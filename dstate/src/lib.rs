@@ -9,7 +9,7 @@ pub use traits::clock::{Clock, SystemClock};
 // ── Types (what users construct / receive) ──────────────────────
 pub use types::envelope::{StateObject, StateViewObject};
 pub use types::config::{ChangeFeedConfig, PushMode, StateConfig, SyncStrategy};
-pub use types::node::{NodeId, VersionMismatchPolicy};
+pub use types::node::{NodeId, Generation, VersionMismatchPolicy};
 pub use types::errors::{
     DeserializeError, MutationError, QueryError, RegistryError,
 };
@@ -18,11 +18,15 @@ pub use traits::runtime::{
 };
 pub use types::sync_message::{BatchedChangeFeed, ChangeNotification, SyncMessage};
 
+// ── Registry (state registration and lookup) ────────────────────
+pub use registry::{AnyStateShard, StateRegistry};
+
 // ── Test support (public for adapter crates and downstream tests) ─
 pub mod test_support;
 
 // ── Internal modules (not part of the public API) ───────────────
 mod traits;
 mod types;
+mod registry;
 pub(crate) mod core;
 pub(crate) mod messages;

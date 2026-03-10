@@ -1,14 +1,12 @@
 use std::time::Instant;
 
-use crate::types::node::NodeId;
+use crate::types::node::{NodeId, Generation};
 
 /// The local node's authoritative copy of a distributed state.
 #[derive(Debug, Clone)]
 pub struct StateObject<S> {
-    /// Monotonically increasing mutation counter within an incarnation.
-    pub age: u64,
-    /// Unique lifetime identifier; changes on crash-restart without persistence.
-    pub incarnation: u64,
+    /// The logical version (incarnation + age) of this state.
+    pub generation: Generation,
     /// The storage format version used when this state was persisted.
     pub storage_version: u32,
     /// The state value.
@@ -19,13 +17,23 @@ pub struct StateObject<S> {
     pub modified_time: i64,
 }
 
+impl<S> StateObject<S> {
+    /// Shorthand for `self.generation.age`.
+    pub fn age(&self) -> u64 {
+        self.generation.age
+    }
+
+    /// Shorthand for `self.generation.incarnation`.
+    pub fn incarnation(&self) -> u64 {
+        self.generation.incarnation
+    }
+}
+
 /// A peer node's replicated view of a distributed state.
 #[derive(Debug, Clone)]
 pub struct StateViewObject<V> {
-    /// The peer's mutation counter at the time this view was sent.
-    pub age: u64,
-    /// The peer's incarnation at the time this view was sent.
-    pub incarnation: u64,
+    /// The logical version (incarnation + age) of this view.
+    pub generation: Generation,
     /// The wire protocol version used to serialize this view.
     pub wire_version: u32,
     /// The view value.
@@ -36,12 +44,9 @@ pub struct StateViewObject<V> {
     pub modified_time: i64,
     /// Monotonic instant when this view was last synchronized.
     pub synced_at: Instant,
-    /// If set, the peer has announced a higher age via a change feed
+    /// If set, the peer has announced a newer version via a change feed
     /// notification, meaning this view is known to be stale.
-    pub pending_remote_age: Option<u64>,
-    /// If set, the peer has announced a higher incarnation via a change feed
-    /// notification (e.g., after an owner restart).
-    pub pending_remote_incarnation: Option<u64>,
+    pub pending_remote_generation: Option<Generation>,
     /// The node that owns this view.
     pub source_node: NodeId,
 }
