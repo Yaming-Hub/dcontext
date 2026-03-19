@@ -1,0 +1,25 @@
+[package]
+name = "dcontext"
+version = "0.1.0"
+edition = "2021"
+description = "Distributed context propagation for Rust — scoped, type-safe, serializable"
+license = "MIT"
+readme = "../README.md"
+keywords = ["context", "distributed", "propagation", "tracing", "scope"]
+categories = ["concurrency", "network-programming"]
+
+[dependencies]
+bincode = "1"
+base64 = { version = "0.22", optional = true }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync"], optional = true }
+
+[features]
+default = ["tokio", "base64"]
+tokio = ["dep:tokio"]
+base64 = ["dep:base64"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+serde_json = "1"
