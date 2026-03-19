@@ -883,6 +883,143 @@ let _guard = dcontext::deserialize_context_string(encoded).unwrap();
 // All registered context values are now available via get_context
 ```
 
+### 11.5 Integrating with `tracing` — Span-Scoped Context
+
+A common pattern is tying `dcontext` scopes to `tracing` spans so that
+entering a span automatically creates a new context scope, and exiting the
+span reverts it. This is achieved with a custom `tracing` `Layer` that hooks
+into span lifecycle events.
+
+```rust
+use dcontext::{register, enter_scope, set_context, get_context, ScopeGuard};
+use serde::{Serialize, Deserialize};
+use tracing::{span, Subscriber, Level};
+use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
+use std::sync::Mutex;
+
+// ── Context types ──────────────────────────────────────────────
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+struct TraceContext {
+    trace_id: String,
+    span_id: String,
+    parent_span_id: Option<String>,
+}
+
+// ── Custom Layer ───────────────────────────────────────────────
+
+/// A tracing Layer that creates a dcontext scope for each span.
+struct DcontextLayer;
+
+/// Per-span storage: holds the ScopeGuard so the scope lives
+/// exactly as long as the span is entered.
+struct SpanContextGuard(Mutex<Option<ScopeGuard>>);
+
+impl<S> Layer<S> for DcontextLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &span::Attributes<'_>,
+        id: &span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        // Optionally extract fields from the span to populate context.
+        // Here we just store a placeholder; real code would read
+        // attrs.values() or use a visitor.
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut()
+                .insert(SpanContextGuard(Mutex::new(None)));
+        }
+    }
+
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+            let exts = span.extensions();
+            if let Some(guard_holder) = exts.get::<SpanContextGuard>() {
+                // Enter a new dcontext scope tied to this span.
+                let scope_guard = enter_scope();
+
+                // Populate span-specific context values.
+                let parent_trace: TraceContext = get_context("trace_context");
+                set_context("trace_context", TraceContext {
+                    trace_id: if parent_trace.trace_id.is_empty() {
+                        uuid::Uuid::new_v4().to_string()  // root span
+                    } else {
+                        parent_trace.trace_id              // inherit
+                    },
+                    span_id: id.into_u64().to_string(),
+                    parent_span_id: Some(parent_trace.span_id)
+                        .filter(|s| !s.is_empty()),
+                });
+
+                *guard_holder.0.lock().unwrap() = Some(scope_guard);
+            }
+        }
+    }
+
+    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+            let exts = span.extensions();
+            if let Some(guard_holder) = exts.get::<SpanContextGuard>() {
+                // Drop the ScopeGuard → reverts context to parent scope.
+                let _ = guard_holder.0.lock().unwrap().take();
+            }
+        }
+    }
+}
+
+// ── Usage ──────────────────────────────────────────────────────
+
+fn main() {
+    // Register context types.
+    register::<TraceContext>("trace_context");
+
+    // Install the subscriber with our layer.
+    tracing_subscriber::registry()
+        .with(DcontextLayer)
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    // Each span now automatically scopes context.
+    let _root = span!(Level::INFO, "handle_request").entered();
+    let tc: TraceContext = get_context("trace_context");
+    println!("root trace_id={}, span_id={}", tc.trace_id, tc.span_id);
+
+    {
+        let _child = span!(Level::INFO, "db_query").entered();
+        let tc: TraceContext = get_context("trace_context");
+        println!(
+            "child trace_id={}, span_id={}, parent={}",
+            tc.trace_id,
+            tc.span_id,
+            tc.parent_span_id.as_deref().unwrap_or("none")
+        );
+        // trace_id is inherited, span_id is new, parent points to root
+    }
+    // Back to root span context — child's changes are reverted.
+    let tc: TraceContext = get_context("trace_context");
+    println!("back to root span_id={}", tc.span_id);
+}
+```
+
+**How it works:**
+
+1. `DcontextLayer` implements `tracing_subscriber::Layer`.
+2. `on_enter` — called when a span is entered — pushes a new `dcontext` scope
+   and populates it with trace context (inheriting `trace_id`, generating a
+   new `span_id`).
+3. `on_exit` — called when the span is exited — drops the `ScopeGuard`,
+   reverting context to the parent span's values.
+4. The `ScopeGuard` is stored in the span's extensions so its lifetime is
+   tied to the span's enter/exit cycle.
+
+This pattern gives you the **best of both worlds**: `tracing`'s structured
+span lifecycle with `dcontext`'s arbitrary scoped context propagation — and
+the context automatically serializes for cross-process propagation via
+`dcontext::serialize_context()`.
+
 ---
 
 ## 12. Thread Safety Summary
