@@ -74,14 +74,10 @@ Before a context key can be used, its type must be **registered**. Registration 
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `key` | `&'static str` | Human-readable name, used for serialization and diagnostics |
-| `type_id` | `TypeId` | Rust `TypeId` of the concrete struct — **primary internal map key** |
+| `key` | `&'static str` | Human-readable name, used as map key, serialization, and diagnostics |
+| `type_id` | `TypeId` | Rust `TypeId` of the concrete struct — used for type-safety validation |
 | `default_fn` | `fn() -> Box<dyn ContextValue>` | Factory that produces the default value (from `Default` impl) |
 | `deserialize_fn` | `fn(&[u8], u32) -> Result<Box<dyn ContextValue>, ContextError>` | Deserializer for restoring from bytes (receives key version) |
-
-The **internal map key is `TypeId`**, not the string. `TypeId` provides O(1)
-integer hashing and is collision-free across types. The string key is stored
-in the registry for serialization (wire format) and diagnostics only.
 
 Registration is typically done once at startup:
 
@@ -90,10 +86,13 @@ dcontext::register::<TraceContext>("trace_context");
 dcontext::register::<FeatureFlags>("feature_flags");
 ```
 
-The registry is a global `RwLock<HashMap<TypeId, Registration>>`. Reads
-(which dominate) take a read lock; registration (startup only) takes a write
-lock. A secondary `HashMap<&'static str, TypeId>` maps string keys to
-`TypeId` for deserialization lookups.
+The registry is a global `RwLock<HashMap<&'static str, Registration>>`.
+Reads (which dominate) take a read lock; registration (startup only) takes a
+write lock. The registry is a **cold path** — it is consulted only during
+`register()` and deserialization. The hot path (`get_context` / `set_context`)
+operates on the `ContextStack` in thread-local / task-local storage, not the
+registry. `TypeId` is stored in each `Registration` for runtime type-safety
+checks but is not used as a map key.
 
 #### 2.3.1 Typed Key Wrappers (Optional Ergonomic API)
 
@@ -138,8 +137,7 @@ use cases.
 ```rust
 struct Scope {
     /// Overlay values set in this scope (shadows parent entries).
-    /// Keyed by TypeId for O(1) lookup; string key is in the registry.
-    values: HashMap<TypeId, Box<dyn ContextValue>>,
+    values: HashMap<&'static str, Box<dyn ContextValue>>,
 }
 
 struct ContextStack {
@@ -150,7 +148,7 @@ struct ContextStack {
     /// Flattened read cache: merged view of all scopes (copy-on-write).
     /// Invalidated on set_context or enter/leave scope.
     /// None = cache dirty, must rebuild on next read.
-    read_cache: Option<HashMap<TypeId, Box<dyn ContextValue>>>,
+    read_cache: Option<HashMap<&'static str, Box<dyn ContextValue>>>,
 }
 ```
 
