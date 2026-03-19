@@ -715,7 +715,7 @@ pub enum ContextError {
 > set via `dcontext::set_max_context_size(limit)`. Serialization and snapshot
 > operations check against this limit and return `ContextTooLarge` if
 > exceeded. Default: no limit (backward compatible).
-```
+
 
 ---
 
