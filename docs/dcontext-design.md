@@ -1020,6 +1020,187 @@ span lifecycle with `dcontext`'s arbitrary scoped context propagation — and
 the context automatically serializes for cross-process propagation via
 `dcontext::serialize_context()`.
 
+### 11.6 Actix-Web Middleware — Request-Scoped Context
+
+This example shows how to use `dcontext` with [actix-web](https://actix.rs/)
+to generate a request ID in middleware and make it available to all handlers
+and downstream service calls via context, without passing it through function
+parameters.
+
+```rust
+use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse, middleware};
+use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
+use dcontext::{register, get_context, set_context, snapshot, with_context};
+use futures::future::{ok, Ready, LocalBoxFuture};
+use serde::{Serialize, Deserialize};
+use std::task::{Context, Poll};
+use uuid::Uuid;
+
+// ── Context types ──────────────────────────────────────────────
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+struct RequestContext {
+    request_id: String,
+    user_agent: String,
+    path: String,
+}
+
+// ── Middleware definition ──────────────────────────────────────
+
+/// Middleware that creates a dcontext scope per request and populates
+/// it with a unique request ID and request metadata.
+struct DcontextMiddleware;
+
+impl<S, B> Transform<S, ServiceRequest> for DcontextMiddleware
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<B>;
+    type Error = actix_web::Error;
+    type Transform = DcontextMiddlewareService<S>;
+    type InitError = ();
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        ok(DcontextMiddlewareService { service })
+    }
+}
+
+struct DcontextMiddlewareService<S> {
+    service: S,
+}
+
+impl<S, B> Service<ServiceRequest> for DcontextMiddlewareService<S>
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<B>;
+    type Error = actix_web::Error;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.service.poll_ready(cx)
+    }
+
+    fn call(&self, req: ServiceRequest) -> Self::Future {
+        // Extract request metadata before passing ownership.
+        let request_id = req
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        let user_agent = req
+            .headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let path = req.path().to_string();
+
+        // If the caller sent a serialized context (e.g., from an upstream
+        // service), restore it. Otherwise start fresh.
+        let snap = if let Some(encoded) = req
+            .headers()
+            .get("x-context")
+            .and_then(|v| v.to_str().ok())
+        {
+            // Restore upstream context, then overlay request-specific values.
+            dcontext::snapshot_from_string(encoded).unwrap_or_default()
+        } else {
+            dcontext::snapshot()
+        };
+
+        let fut = self.service.call(req);
+
+        Box::pin(with_context(snap, async move {
+            // Push a request scope on top of any restored upstream context.
+            let _guard = dcontext::enter_scope();
+            set_context("request_context", RequestContext {
+                request_id: request_id.clone(),
+                user_agent,
+                path,
+            });
+
+            let mut res = fut.await?;
+
+            // Echo request ID back in response header.
+            res.headers_mut().insert(
+                actix_web::http::header::HeaderName::from_static("x-request-id"),
+                request_id.parse().unwrap(),
+            );
+
+            Ok(res)
+        }))
+    }
+}
+
+// ── Handlers ───────────────────────────────────────────────────
+
+async fn index() -> HttpResponse {
+    let ctx: RequestContext = get_context("request_context");
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": "hello",
+        "request_id": ctx.request_id,
+    }))
+}
+
+async fn users_list() -> HttpResponse {
+    let ctx: RequestContext = get_context("request_context");
+    tracing::info!(request_id = %ctx.request_id, "listing users");
+
+    // Context is available in any function called from here,
+    // no need to pass request_id as a parameter.
+    let users = fetch_users_from_db().await;
+    HttpResponse::Ok().json(users)
+}
+
+async fn fetch_users_from_db() -> Vec<String> {
+    // Deep in the call stack — request context is still available.
+    let ctx: RequestContext = get_context("request_context");
+    tracing::debug!(request_id = %ctx.request_id, "querying database");
+    vec!["alice".into(), "bob".into()]
+}
+
+// ── Main ───────────────────────────────────────────────────────
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    // Register context types at startup.
+    register::<RequestContext>("request_context");
+
+    HttpServer::new(|| {
+        App::new()
+            .wrap(DcontextMiddleware)       // ← context middleware
+            .wrap(middleware::Logger::default())
+            .route("/", web::get().to(index))
+            .route("/users", web::get().to(users_list))
+    })
+    .bind("127.0.0.1:8080")?
+    .run()
+    .await
+}
+```
+
+**How it works:**
+
+1. **`DcontextMiddleware`** wraps each request in a `with_context` future,
+   establishing the task-local context for the request's entire lifetime.
+2. Inside that scope, it pushes a new `dcontext` scope and populates a
+   `RequestContext` with a generated (or forwarded) request ID, the path, and
+   user-agent.
+3. **Handlers** and any functions they call can access the request context
+   via `get_context("request_context")` — no parameter threading needed.
+4. For **service-to-service calls**, the upstream context can be forwarded via
+   the `x-context` header. The middleware restores it and overlays the
+   current request's values on top.
+5. The request ID is echoed back in the `x-request-id` response header for
+   correlation.
+
 ---
 
 ## 12. Thread Safety Summary
