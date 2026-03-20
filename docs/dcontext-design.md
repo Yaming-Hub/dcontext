@@ -1247,6 +1247,10 @@ async fn main() -> std::io::Result<()> {
   within the same process (e.g., across threads and async tasks), but are
   silently omitted during serialization. This avoids requiring `Serialize`
   bounds on types that are inherently non-serializable.
+- **Sample usage programs** — Add a `samples/` directory (excluded from the
+  published crate) with runnable examples covering typical use cases:
+  request-scoped tracing, feature flags, multi-threaded worker pools,
+  async task propagation, and cross-process serialization.
 - **`async-std` support** via poll-wrapper `ContextFuture` (see §5.2 / §9).
 - **Automatic propagation** via runtime hooks (e.g., Tokio's `tracing` integration).
 - **Middleware integrations** for popular web frameworks (axum, actix-web, tonic).

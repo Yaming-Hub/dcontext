@@ -1,0 +1,10 @@
+[package]
+name = "dcontext-samples"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dcontext = { path = "../dcontext" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
