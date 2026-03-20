@@ -473,11 +473,76 @@ task-local mechanism, which moves with the task across thread migrations:
 |---------|-----------|-----------|
 | **Tokio** | `tokio::task_local!` | Value follows the task across `.await` points and thread migrations |
 
-> **Known limitation (I4):** `async-std` does not provide a built-in
-> `task_local!` equivalent. For runtimes without native task-local support,
-> a **poll-wrapper** approach (wrapping the user's `Future` to save/restore
-> the thread-local on each `poll()`) is the planned solution. This is
-> tracked as future work; the initial release supports Tokio only.
+> **Runtime-agnostic async (I4):** For runtimes without native task-local
+> support (async-std, smol, etc.), the library provides `ContextFuture` — a
+> **poll-wrapper** that saves/restores thread-local context on each `poll()`.
+> Since `poll()` runs on the OS thread currently executing the task, this
+> effectively carries context across thread migrations. See `context_future.rs`
+> and the `runtime_agnostic` sample.
+
+#### `ContextFuture` poll-wrapper (feature: `context-future`)
+
+For async runtimes that do not provide a built-in task-local mechanism
+(async-std, smol, glommio, etc.), the library offers `ContextFuture<F>` — a
+`Future` wrapper that manages context via thread-local storage and the
+`force_thread_local` escape hatch.
+
+**Poll cycle:**
+
+```
+Executor calls ContextFuture::poll()
+├── 1. force_thread_local { depth++ }
+│   ├── 2. Push snapshot onto thread-local as new scope
+│   ├── 3. Poll inner future
+│   │   ├── get_context → with_current_stack → depth>0 → thread-local ✓
+│   │   ├── .await sub_future → sub_future.poll()
+│   │   │   └── get_context → with_current_stack → depth>0 → thread-local ✓
+│   │   └── returns Ready(v) or Pending
+│   ├── 4. Save mutations back to snapshot
+│   └── 5. Pop scope (ScopeGuard drop)
+└── force_thread_local { depth-- }
+```
+
+**Why inner async functions work without wrappers:**
+
+The key insight is that `force_thread_local` sets a thread-local depth counter
+(`FORCE_THREAD_LOCAL_DEPTH`). This counter stays > 0 for the **entire duration**
+of a single poll. The dual-storage dispatch (`with_current_stack` — see §5.3)
+checks this counter first: if > 0, it skips task-local lookup and routes
+directly to thread-local storage. Since the snapshot has been installed in
+thread-local, every call to `get_context`/`set_context` during that poll finds
+the correct values — regardless of whether the call originates from the async
+block itself, a regular async function reached via `.await`, or a deeply nested
+sync function.
+
+**Suspension and re-poll:**
+
+When the inner future returns `Pending` (e.g., waiting for I/O):
+
+1. `ContextFuture::poll` captures any mutations back into the snapshot.
+2. The scope is popped and `force_thread_local` depth returns to 0.
+3. The executor may move the task to a different OS thread.
+4. On the next poll, `ContextFuture::poll` re-installs the snapshot on the
+   *new* thread's thread-local, increments the depth counter, and polls the
+   inner future again. The inner future resumes where it left off, and all
+   context calls work correctly.
+
+Mutations made before a yield are preserved because the snapshot is saved
+**before** the scope is popped on every poll.
+
+**API:**
+
+```rust
+/// Wrap a future with an explicit snapshot.
+pub fn ContextFuture::new(snapshot: ContextSnapshot, future: F) -> ContextFuture<F>;
+
+/// Capture the current thread-local context and wrap a future.
+pub fn with_context_future<F>(future: F) -> ContextFuture<F>;
+```
+
+`with_context_future` uses `force_thread_local` internally to snapshot from
+thread-local storage, making it safe to call from any context (including
+inside a Tokio runtime where no task-local is established).
 
 #### Primary storage for async: `tokio::task_local!`
 
@@ -756,14 +821,14 @@ dcontext::with_scope! {
 | `tokio` | **yes** | Enables Tokio task-local storage, `scope_async`, and async spawn helpers. |
 | `base64` | **yes** | Enables `serialize_context_string` / `deserialize_context_string`. |
 | `context-key` | **yes** | Enables `ContextKey<T>` typed key wrapper for compile-time safe access. |
+| `context-future` | **no** | Enables `ContextFuture` poll-wrapper for runtime-agnostic async (non-Tokio executors). |
 
-> **`async-std` (I4):** Not supported in the initial release. `async-std`
-> lacks a built-in `task_local!` equivalent. Support is planned via a
-> **poll-wrapper** approach: wrapping the user's `Future` to save/restore
-> the thread-local `ContextStack` on each `poll()` call. Since `poll()` runs
-> on the thread currently executing the task, this effectively carries context
-> across thread migrations. This will be added as an `async-std` cargo feature
-> in a future release.
+> **Runtime-agnostic async (I4):** When the `context-future` feature is enabled,
+> `ContextFuture` and `with_context_future` provide a **poll-wrapper** approach
+> that works with any async executor (async-std, smol, etc.) without requiring
+> runtime-specific APIs. The wrapper saves/restores the thread-local
+> `ContextStack` on each `poll()` call, so context follows the task across
+> thread migrations. See the `runtime_agnostic` sample.
 
 ---
 
@@ -1268,7 +1333,7 @@ async fn main() -> std::io::Result<()> {
   published crate) with runnable examples covering typical use cases:
   request-scoped tracing, feature flags, multi-threaded worker pools,
   async task propagation, and cross-process serialization.
-- **`async-std` support** via poll-wrapper `ContextFuture` (see §5.2 / §9).
+- ~~**`async-std` support** via poll-wrapper `ContextFuture` (see §5.2 / §9).~~ ✅ Implemented as `ContextFuture` / `with_context_future` — runtime-agnostic, works with any executor.
 - **Automatic propagation** via runtime hooks (e.g., Tokio's `tracing` integration).
 - **Middleware integrations** for popular web frameworks (axum, actix-web, tonic).
 - **Context size limits** enforcement (configurable max, `ContextTooLarge` error).

@@ -486,6 +486,337 @@ fn test_set_max_context_size_enforced() {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  ContextFuture tests (feature-gated)
+// ══════════════════════════════════════════════════════════════
+
+#[cfg(feature = "context-future")]
+mod context_future_tests {
+    use super::*;
+
+    /// Helper: poll a future to completion on the current thread using a manual waker.
+    fn block_on_simple<F: std::future::Future>(mut fut: F) -> F::Output {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+        fn dummy_raw_waker() -> RawWaker {
+            fn no_op(_: *const ()) {}
+            fn clone(p: *const ()) -> RawWaker {
+                RawWaker::new(p, &VTABLE)
+            }
+            const VTABLE: RawWakerVTable =
+                RawWakerVTable::new(clone, no_op, no_op, no_op);
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+
+        let waker = unsafe { Waker::from_raw(dummy_raw_waker()) };
+        let mut cx = Context::from_waker(&waker);
+
+        // SAFETY: we never move `fut` after pinning.
+        let mut fut = unsafe { std::pin::Pin::new_unchecked(&mut fut) };
+
+    loop {
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(val) => return val,
+            Poll::Pending => {
+                // In a real executor this would park; for tests we just spin.
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+#[test]
+fn test_context_future_basic() {
+    let key = unique_key("ctx_fut_basic", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("future-123".into()));
+
+    // No force_thread_local needed inside — ContextFuture::poll
+    // wraps every poll in force_thread_local automatically.
+    let fut = with_context_future(async move {
+        let val: RequestId = get_context(key);
+        val
+    });
+
+    let result = block_on_simple(fut);
+    assert_eq!(result, RequestId("future-123".into()));
+}
+
+#[test]
+fn test_context_future_mutation_propagates() {
+    let key = unique_key("ctx_fut_mut", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("initial".into()));
+
+    let fut = with_context_future(async move {
+        set_context(key, RequestId("mutated".into()));
+        let val: RequestId = get_context(key);
+        val
+    });
+
+    let result = block_on_simple(fut);
+    assert_eq!(result, RequestId("mutated".into()));
+}
+
+#[test]
+fn test_context_future_isolation() {
+    let key = unique_key("ctx_fut_iso", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("outer".into()));
+
+    let fut = with_context_future(async move {
+        set_context(key, RequestId("inner-change".into()));
+    });
+
+    block_on_simple(fut);
+
+    // Outer context should still be "outer"
+    let val: RequestId = get_context(key);
+    assert_eq!(val, RequestId("outer".into()));
+}
+
+#[test]
+fn test_context_future_empty_snapshot() {
+    let key = unique_key("ctx_fut_empty", "rid");
+    register::<RequestId>(key);
+
+    let fut = ContextFuture::new(ContextSnapshot::empty(), async move {
+        let val: RequestId = get_context(key);
+        val
+    });
+
+    let result = block_on_simple(fut);
+    assert_eq!(result, RequestId::default());
+}
+
+/// Test that regular async functions called via .await inside
+/// ContextFuture can access context without any special wrappers.
+#[test]
+fn test_context_future_regular_async_fn() {
+    let key = unique_key("ctx_fut_regular", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("propagated".into()));
+
+    async fn inner_fn(key: &'static str) -> RequestId {
+        get_context(key)
+    }
+
+    let fut = with_context_future(async move {
+        // .await a regular Future (not ContextFuture) — context still works
+        let val = inner_fn(key).await;
+        val
+    });
+
+    let result = block_on_simple(fut);
+    assert_eq!(result, RequestId("propagated".into()));
+}
+
+/// Deeply nested .await chain: ContextFuture → async fn → async fn → async fn.
+/// Each level is a plain Future, not a ContextFuture. Context is visible at
+/// every level because ContextFuture::poll sets force_thread_local for the
+/// entire poll, and nested .await calls are just nested poll() invocations
+/// within the same outermost poll.
+#[test]
+fn test_context_future_deep_await_chain() {
+    let key = unique_key("ctx_fut_deep", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("deep-value".into()));
+
+    async fn level_3(key: &'static str) -> RequestId {
+        get_context(key)
+    }
+
+    async fn level_2(key: &'static str) -> RequestId {
+        level_3(key).await
+    }
+
+    async fn level_1(key: &'static str) -> RequestId {
+        level_2(key).await
+    }
+
+    let fut = with_context_future(async move {
+        level_1(key).await
+    });
+
+    let result = block_on_simple(fut);
+    assert_eq!(result, RequestId("deep-value".into()));
+}
+
+/// Mutation made by one awaited function is visible to the next awaited
+/// function within the same ContextFuture, because mutations are saved
+/// back to the snapshot between polls (or within the same poll if both
+/// complete immediately).
+#[test]
+fn test_context_future_mutation_across_await() {
+    let key = unique_key("ctx_fut_mutawait", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("original".into()));
+
+    async fn writer(key: &'static str) {
+        set_context(key, RequestId("written-by-async-fn".into()));
+    }
+
+    async fn reader(key: &'static str) -> RequestId {
+        get_context(key)
+    }
+
+    let fut = with_context_future(async move {
+        writer(key).await;
+        reader(key).await
+    });
+
+    let result = block_on_simple(fut);
+    assert_eq!(result, RequestId("written-by-async-fn".into()));
+}
+
+/// A future that yields Pending once before completing, simulating a
+/// real async operation that suspends. This tests that ContextFuture
+/// correctly saves/restores context across re-polls:
+///
+///   poll 1: ContextFuture installs snapshot → inner returns Pending
+///           → ContextFuture saves snapshot, pops scope
+///   poll 2: ContextFuture re-installs snapshot → inner returns Ready
+///           → ContextFuture saves snapshot, pops scope
+///
+/// Context must be available on both polls.
+#[test]
+fn test_context_future_multi_poll() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let key = unique_key("ctx_fut_multipoll", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("survives-suspend".into()));
+
+    // A future that yields Pending on the first poll, Ready on the second.
+    struct YieldOnceFuture {
+        yielded: Arc<AtomicBool>,
+        key: &'static str,
+    }
+
+    impl std::future::Future for YieldOnceFuture {
+        type Output = RequestId;
+        fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>)
+            -> std::task::Poll<Self::Output>
+        {
+            if self.yielded.swap(true, Ordering::SeqCst) {
+                // Second poll: context should still be available.
+                let val: RequestId = get_context(self.key);
+                std::task::Poll::Ready(val)
+            } else {
+                // First poll: verify context is available, then yield.
+                let val: RequestId = get_context(self.key);
+                assert_eq!(val, RequestId("survives-suspend".into()),
+                    "context must be available on first poll");
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        }
+    }
+
+    let yielded = Arc::new(AtomicBool::new(false));
+    let fut = with_context_future(YieldOnceFuture {
+        yielded: yielded.clone(),
+        key,
+    });
+
+    let result = block_on_simple(fut);
+    assert_eq!(result, RequestId("survives-suspend".into()));
+    assert!(yielded.load(Ordering::SeqCst), "future must have yielded at least once");
+}
+
+/// Mutations made before a Pending yield are preserved when the future
+/// is re-polled, because ContextFuture saves the snapshot after every poll.
+#[test]
+fn test_context_future_mutation_survives_yield() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let key = unique_key("ctx_fut_mutyield", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("before".into()));
+
+    struct MutateAndYield {
+        yielded: Arc<AtomicBool>,
+        key: &'static str,
+    }
+
+    impl std::future::Future for MutateAndYield {
+        type Output = RequestId;
+        fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>)
+            -> std::task::Poll<Self::Output>
+        {
+            if self.yielded.swap(true, Ordering::SeqCst) {
+                // Second poll: read the value that was mutated in poll 1.
+                let val: RequestId = get_context(self.key);
+                std::task::Poll::Ready(val)
+            } else {
+                // First poll: mutate context, then yield.
+                set_context(self.key, RequestId("mutated-before-yield".into()));
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        }
+    }
+
+    let yielded = Arc::new(AtomicBool::new(false));
+    let fut = with_context_future(MutateAndYield {
+        yielded: yielded.clone(),
+        key,
+    });
+
+    let result = block_on_simple(fut);
+    // The mutation from poll 1 must be visible in poll 2.
+    assert_eq!(result, RequestId("mutated-before-yield".into()));
+}
+
+/// Nested ContextFutures: an inner ContextFuture creates its own
+/// isolated scope. Changes in the inner future don't leak to the outer.
+#[test]
+fn test_context_future_nested() {
+    let key = unique_key("ctx_fut_nested", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("outer-value".into()));
+
+    let fut = with_context_future(async move {
+        assert_eq!(get_context::<RequestId>(key).0, "outer-value");
+
+        // Inner ContextFuture with its own snapshot
+        let inner = with_context_future(async move {
+            set_context(key, RequestId("inner-value".into()));
+            get_context::<RequestId>(key)
+        });
+        let inner_result = inner.await;
+        assert_eq!(inner_result.0, "inner-value");
+
+        // Outer ContextFuture still sees the original value
+        get_context::<RequestId>(key)
+    });
+
+    let result = block_on_simple(fut);
+    assert_eq!(result.0, "outer-value");
+}
+
+} // mod context_future_tests
+
+// ══════════════════════════════════════════════════════════════
 //  Async tests (tokio)
 // ══════════════════════════════════════════════════════════════
 

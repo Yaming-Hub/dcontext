@@ -37,6 +37,8 @@ mod helpers;
 #[cfg(feature = "context-key")]
 mod context_key;
 mod config;
+#[cfg(feature = "context-future")]
+mod context_future;
 #[macro_use]
 mod macros;
 
@@ -71,6 +73,11 @@ pub use helpers::spawn_with_context;
 
 #[cfg(feature = "tokio")]
 pub use helpers::{with_context, spawn_with_context_async};
+
+// ── Runtime-agnostic async (feature-gated) ─────────────────────
+
+#[cfg(feature = "context-future")]
+pub use context_future::{ContextFuture, with_context_future};
 
 // ── Serialization ──────────────────────────────────────────────
 
