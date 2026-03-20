@@ -753,8 +753,9 @@ dcontext::with_scope! {
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `tokio` | **yes** | Enables Tokio task-local storage and async spawn helpers. |
+| `tokio` | **yes** | Enables Tokio task-local storage, `scope_async`, and async spawn helpers. |
 | `base64` | **yes** | Enables `serialize_context_string` / `deserialize_context_string`. |
+| `context-key` | **yes** | Enables `ContextKey<T>` typed key wrapper for compile-time safe access. |
 
 > **`async-std` (I4):** Not supported in the initial release. `async-std`
 > lacks a built-in `task_local!` equivalent. Support is planned via a
@@ -773,19 +774,35 @@ dcontext/                     ← workspace root
 ├── Cargo.toml                ← workspace manifest
 ├── README.md
 ├── docs/
-│   └── dcontext-design.md    ← this document
+│   ├── dcontext-design.md    ← this document
+│   └── review_comment.md     ← design review comments
+├── samples/                  ← runnable examples (publish = false)
+│   └── src/bin/
+│       ├── basic_scope.rs
+│       ├── cross_thread.rs
+│       ├── async_tasks.rs
+│       ├── feature_flags.rs
+│       ├── cross_process.rs
+│       ├── worker_pool.rs
+│       ├── typed_keys.rs     ← ContextKey<T> usage
+│       ├── macros.rs         ← register_contexts!, with_scope!
+│       ├── async_scopes.rs   ← scope_async
+│       └── size_limits.rs    ← set_max_context_size
 └── dcontext/                 ← core crate
     ├── Cargo.toml
     └── src/
         ├── lib.rs            ← public API re-exports
         ├── registry.rs       ← type registration logic
         ├── scope.rs          ← Scope, ContextStack, ScopeGuard
-        ├── storage.rs        ← thread-local + task-local backends
+        ├── storage.rs        ← thread-local + task-local backends, scope_async
         ├── snapshot.rs       ← ContextSnapshot capture/attach
-        ├── serde.rs          ← WireContext serialization
+        ├── wire.rs           ← WireContext serialization
         ├── error.rs          ← ContextError
+        ├── config.rs         ← set_max_context_size, size limit enforcement
+        ├── context_key.rs    ← ContextKey<T> (feature: context-key)
         ├── macros.rs         ← register_contexts!, with_scope!
-        └── helpers.rs        ← spawn_with_context, async helpers
+        ├── helpers.rs        ← spawn_with_context, async helpers
+        └── value.rs          ← ContextValue trait + blanket impl
 ```
 
 ---

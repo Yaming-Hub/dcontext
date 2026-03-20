@@ -10,7 +10,7 @@ pub(crate) struct Registration {
     pub key: &'static str,
     pub type_id: TypeId,
     pub key_version: u32,
-    pub deserialize_fn: fn(&[u8], u32) -> Result<Box<dyn ContextValue>, ContextError>,
+    pub deserialize_fn: Box<dyn Fn(&[u8], u32) -> Result<Box<dyn ContextValue>, ContextError> + Send + Sync>,
     pub type_name: &'static str,
 }
 
@@ -47,18 +47,19 @@ where
             key,
             type_id: tid,
             key_version: version,
-            deserialize_fn: |bytes, version| {
-                // Version is passed through for future migration logic.
-                // Currently we only support version 1; reject mismatches.
-                if version != 1 {
-                    return Err(ContextError::DeserializationFailed(format!(
-                        "unsupported key version: {} (expected 1)",
-                        version
-                    )));
-                }
-                bincode::deserialize::<T>(bytes)
-                    .map(|v| Box::new(v) as Box<dyn ContextValue>)
-                    .map_err(|e| ContextError::DeserializationFailed(e.to_string()))
+            deserialize_fn: {
+                let registered_version = version;
+                Box::new(move |bytes: &[u8], wire_version: u32| -> Result<Box<dyn ContextValue>, ContextError> {
+                    if wire_version != registered_version {
+                        return Err(ContextError::DeserializationFailed(format!(
+                            "key version mismatch: wire={}, registered={}",
+                            wire_version, registered_version
+                        )));
+                    }
+                    bincode::deserialize::<T>(bytes)
+                        .map(|v| Box::new(v) as Box<dyn ContextValue>)
+                        .map_err(|e| ContextError::DeserializationFailed(e.to_string()))
+                })
             },
             type_name: std::any::type_name::<T>(),
         },
@@ -72,6 +73,14 @@ where
     T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
     try_register::<T>(key).expect("dcontext::register failed");
+}
+
+/// Panicking convenience wrapper for versioned registration.
+pub fn register_versioned<T>(key: &'static str, version: u32)
+where
+    T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    try_register_versioned::<T>(key, version).expect("dcontext::register_versioned failed");
 }
 
 /// Look up a registration by key. Returns None if not registered.

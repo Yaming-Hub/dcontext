@@ -62,13 +62,15 @@ fn main() {
 - **ScopeGuard** — RAII guard returned by `enter_scope()`; drops → reverts
 - **Snapshot** — A captured, cloneable, sendable copy of the current context
 - **Registry** — Global type registration for serialization support
+- **ContextKey\<T\>** — Optional typed key wrapper for compile-time safe access
 
 ## Cargo Features
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `tokio` | yes | Tokio task-local storage and async spawn helpers |
+| `tokio` | yes | Tokio task-local storage, `scope_async`, and async spawn helpers |
 | `base64` | yes | Base64 string serialization for HTTP headers/gRPC metadata |
+| `context-key` | yes | `ContextKey<T>` typed key wrapper for compile-time safe access |
 
 ## Documentation
 

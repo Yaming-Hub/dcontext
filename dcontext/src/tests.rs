@@ -405,6 +405,87 @@ fn test_force_thread_local_panic_safety() {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  ContextKey<T> tests
+// ══════════════════════════════════════════════════════════════
+
+#[cfg(feature = "context-key")]
+static TEST_CK_KEY: crate::ContextKey<RequestId> = crate::ContextKey::new("test_ck_rid");
+
+#[cfg(feature = "context-key")]
+#[test]
+fn test_context_key_register_and_get() {
+    TEST_CK_KEY.register();
+    TEST_CK_KEY.set(RequestId("ck-val".into()));
+    assert_eq!(TEST_CK_KEY.get().0, "ck-val");
+}
+
+#[cfg(feature = "context-key")]
+#[test]
+fn test_context_key_try_get_none() {
+    let key: crate::ContextKey<UserId> = crate::ContextKey::new(unique_key("ck_none", "uid"));
+    key.register();
+    assert!(key.try_get().unwrap().is_none());
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Macro tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_register_contexts_macro() {
+    let key_a = unique_key("macro_reg", "a");
+    let key_b = unique_key("macro_reg", "b");
+    register_contexts! {
+        key_a => RequestId,
+        key_b => UserId,
+    }
+    set_context(key_a, RequestId("macro-a".into()));
+    set_context(key_b, UserId(77));
+    assert_eq!(get_context::<RequestId>(key_a).0, "macro-a");
+    assert_eq!(get_context::<UserId>(key_b).0, 77);
+}
+
+#[test]
+fn test_with_scope_macro() {
+    let key = unique_key("macro_scope", "rid");
+    register::<RequestId>(key);
+    set_context(key, RequestId("before".into()));
+
+    with_scope! {
+        key => RequestId("inside-macro".into()),
+        => {
+            assert_eq!(get_context::<RequestId>(key).0, "inside-macro");
+        }
+    }
+
+    assert_eq!(get_context::<RequestId>(key).0, "before");
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Config / size limit tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_set_max_context_size_enforced() {
+    let key = unique_key("size_limit", "rid");
+    register::<RequestId>(key);
+    set_context(key, RequestId("some-value".into()));
+
+    // Set a very small limit.
+    set_max_context_size(5);
+
+    let result = serialize_context();
+    assert!(matches!(result, Err(ContextError::ContextTooLarge { .. })));
+
+    // Reset limit.
+    set_max_context_size(0);
+
+    // Should succeed now.
+    let result = serialize_context();
+    assert!(result.is_ok());
+}
+
+// ══════════════════════════════════════════════════════════════
 //  Async tests (tokio)
 // ══════════════════════════════════════════════════════════════
 
@@ -430,6 +511,30 @@ mod async_tests {
         .await;
 
         assert_eq!(result.0, "async-val");
+    }
+
+    #[tokio::test]
+    async fn test_scope_async() {
+        let key = unique_key("scope_async", "rid");
+        register::<RequestId>(key);
+
+        let snap = force_thread_local(|| {
+            set_context(key, RequestId("before-async".into()));
+            snapshot()
+        });
+
+        with_context(snap, async {
+            assert_eq!(get_context::<RequestId>(key).0, "before-async");
+
+            scope_async(async {
+                set_context(key, RequestId("inside-async".into()));
+                assert_eq!(get_context::<RequestId>(key).0, "inside-async");
+            })
+            .await;
+
+            assert_eq!(get_context::<RequestId>(key).0, "before-async");
+        })
+        .await;
     }
 
     #[tokio::test]
