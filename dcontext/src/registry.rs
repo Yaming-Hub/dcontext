@@ -10,7 +10,6 @@ pub(crate) struct Registration {
     pub key: &'static str,
     pub type_id: TypeId,
     pub key_version: u32,
-    pub default_fn: fn() -> Box<dyn ContextValue>,
     pub deserialize_fn: fn(&[u8], u32) -> Result<Box<dyn ContextValue>, ContextError>,
     pub type_name: &'static str,
 }
@@ -48,8 +47,15 @@ where
             key,
             type_id: tid,
             key_version: version,
-            default_fn: || Box::new(T::default()),
-            deserialize_fn: |bytes, _version| {
+            deserialize_fn: |bytes, version| {
+                // Version is passed through for future migration logic.
+                // Currently we only support version 1; reject mismatches.
+                if version != 1 {
+                    return Err(ContextError::DeserializationFailed(format!(
+                        "unsupported key version: {} (expected 1)",
+                        version
+                    )));
+                }
                 bincode::deserialize::<T>(bytes)
                     .map(|v| Box::new(v) as Box<dyn ContextValue>)
                     .map_err(|e| ContextError::DeserializationFailed(e.to_string()))
@@ -77,14 +83,6 @@ pub(crate) fn with_registration<R>(
     registry.get(key).map(f)
 }
 
-/// Iterate all registrations (used for serialization).
-pub(crate) fn for_each_registration(mut f: impl FnMut(&Registration)) {
-    let registry = REGISTRY.read().unwrap();
-    for reg in registry.values() {
-        f(reg);
-    }
-}
-
 /// Check if a key is registered.
 pub(crate) fn is_registered(key: &str) -> bool {
     REGISTRY.read().unwrap().contains_key(key)
@@ -93,12 +91,6 @@ pub(crate) fn is_registered(key: &str) -> bool {
 /// Get the TypeId for a registered key.
 pub(crate) fn type_id_for(key: &str) -> Option<TypeId> {
     REGISTRY.read().unwrap().get(key).map(|r| r.type_id)
-}
-
-/// Clear all registrations (for testing only).
-#[cfg(test)]
-pub(crate) fn clear_registry() {
-    REGISTRY.write().unwrap().clear();
 }
 
 #[cfg(test)]
@@ -112,27 +104,31 @@ mod tests {
     #[derive(Clone, Default, Debug, Serialize, Deserialize)]
     struct OtherVal(u64);
 
+    fn unique_reg_key(name: &str) -> &'static str {
+        let s = format!("reg_test_{}", name);
+        Box::leak(s.into_boxed_str())
+    }
+
     #[test]
     fn register_and_lookup() {
-        clear_registry();
-        try_register::<TestVal>("test_val").unwrap();
-        assert!(is_registered("test_val"));
-        assert!(!is_registered("missing"));
+        let key = unique_reg_key("lookup");
+        try_register::<TestVal>(key).unwrap();
+        assert!(is_registered(key));
+        assert!(!is_registered("reg_test_missing_xxx"));
     }
 
     #[test]
     fn idempotent_registration() {
-        clear_registry();
-        try_register::<TestVal>("idem_key").unwrap();
-        // Same key+type is fine
-        try_register::<TestVal>("idem_key").unwrap();
+        let key = unique_reg_key("idem");
+        try_register::<TestVal>(key).unwrap();
+        try_register::<TestVal>(key).unwrap();
     }
 
     #[test]
     fn conflicting_registration() {
-        clear_registry();
-        try_register::<TestVal>("conflict_key").unwrap();
-        let err = try_register::<OtherVal>("conflict_key").unwrap_err();
+        let key = unique_reg_key("conflict");
+        try_register::<TestVal>(key).unwrap();
+        let err = try_register::<OtherVal>(key).unwrap_err();
         assert!(matches!(err, ContextError::AlreadyRegistered(_)));
     }
 }

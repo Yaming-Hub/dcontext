@@ -10,8 +10,6 @@ pub(crate) trait ContextValue: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     /// Serialize this value to bytes (bincode).
     fn serialize_value(&self) -> Result<Vec<u8>, ContextError>;
-    /// Type name for diagnostics.
-    fn type_name(&self) -> &'static str;
 }
 
 impl<T> ContextValue for T
@@ -28,9 +26,5 @@ where
 
     fn serialize_value(&self) -> Result<Vec<u8>, ContextError> {
         bincode::serialize(self).map_err(|e| ContextError::SerializationFailed(e.to_string()))
-    }
-
-    fn type_name(&self) -> &'static str {
-        std::any::type_name::<T>()
     }
 }

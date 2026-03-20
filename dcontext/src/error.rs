@@ -18,9 +18,6 @@ pub enum ContextError {
     #[error("deserialization failed: {0}")]
     DeserializationFailed(String),
 
-    #[error("no active scope")]
-    NoActiveScope,
-
     #[error("context size exceeds limit: {size} bytes > {limit} bytes")]
     ContextTooLarge { size: usize, limit: usize },
 }

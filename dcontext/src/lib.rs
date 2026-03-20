@@ -89,42 +89,54 @@ pub fn try_get_context<T>(key: &'static str) -> Result<Option<T>, ContextError>
 where
     T: Clone + Default + Send + Sync + 'static,
 {
-    if !registry::is_registered(key) {
-        return Err(ContextError::NotRegistered(key.to_string()));
-    }
-
-    // Check type matches
-    let expected_tid = TypeId::of::<T>();
-    let registered_tid = registry::type_id_for(key).unwrap();
-    if expected_tid != registered_tid {
-        let expected_name = std::any::type_name::<T>();
-        let registered_name =
-            registry::with_registration(key, |r| r.type_name).unwrap_or("unknown");
-        return Err(ContextError::TypeMismatch(
-            key.to_string(),
-            registered_name.to_string(),
-            expected_name.to_string(),
-        ));
-    }
-
-    // C3 safety: clone_boxed inside borrow, then downcast outside.
+    // Hot path: try to get the value from storage first (no registry lock).
     let boxed = storage::get_value(key);
     match boxed {
         Some(val) => {
             let any_ref = val.as_any();
-            Ok(Some(
-                any_ref
-                    .downcast_ref::<T>()
-                    .expect("type mismatch after TypeId check")
-                    .clone(),
-            ))
+            match any_ref.downcast_ref::<T>() {
+                Some(typed) => Ok(Some(typed.clone())),
+                None => {
+                    // Type mismatch — get names from registry for the error message.
+                    let registered_name =
+                        registry::with_registration(key, |r| r.type_name).unwrap_or("unknown");
+                    Err(ContextError::TypeMismatch(
+                        key.to_string(),
+                        registered_name.to_string(),
+                        std::any::type_name::<T>().to_string(),
+                    ))
+                }
+            }
         }
-        None => Ok(None),
+        None => {
+            // Value not in storage. Check registry (cold path) to distinguish
+            // "registered but not set" from "not registered".
+            if !registry::is_registered(key) {
+                return Err(ContextError::NotRegistered(key.to_string()));
+            }
+            // Verify type matches even when returning None.
+            let expected_tid = TypeId::of::<T>();
+            let registered_tid = registry::type_id_for(key).unwrap();
+            if expected_tid != registered_tid {
+                let registered_name =
+                    registry::with_registration(key, |r| r.type_name).unwrap_or("unknown");
+                return Err(ContextError::TypeMismatch(
+                    key.to_string(),
+                    registered_name.to_string(),
+                    std::any::type_name::<T>().to_string(),
+                ));
+            }
+            Ok(None)
+        }
     }
 }
 
 /// Set a context value in the current scope.
 /// Panics if the key is not registered or type doesn't match.
+///
+/// Note: `T` must implement `Serialize + DeserializeOwned` because context values
+/// must be serializable for cross-process propagation. This is enforced by the
+/// `ContextValue` trait's blanket implementation.
 pub fn set_context<T>(key: &'static str, value: T)
 where
     T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,

@@ -11,21 +11,6 @@ struct RequestId(String);
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 struct UserId(u64);
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct Flags {
-    debug: bool,
-    verbose: bool,
-}
-
-impl Default for Flags {
-    fn default() -> Self {
-        Self {
-            debug: false,
-            verbose: false,
-        }
-    }
-}
-
 // ── Helpers ────────────────────────────────────────────────────
 
 /// Each test needs isolated registration. Since the global registry is shared,
@@ -245,7 +230,7 @@ fn test_spawn_with_context() {
 
     let handle = spawn_with_context("test-worker", move || {
         get_context::<RequestId>(key)
-    });
+    }).unwrap();
 
     let result = handle.join().unwrap();
     assert_eq!(result.0, "main-thread");
@@ -355,6 +340,67 @@ fn test_serialize_multiple_keys() {
         let _guard = deserialize_context(&bytes).unwrap();
         assert_eq!(get_context::<RequestId>(key_a).0, "req-multi");
         assert_eq!(get_context::<UserId>(key_b).0, 42);
+    });
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Additional tests (from review feedback S1)
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_try_get_registered_but_unset() {
+    let key = unique_key("try_get_none", "rid");
+    register::<RequestId>(key);
+    // Registered but never set — should return Ok(None)
+    let result = try_get_context::<RequestId>(key).unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_force_thread_local_basic() {
+    let key = unique_key("force_tl", "rid");
+    register::<RequestId>(key);
+
+    force_thread_local(|| {
+        set_context(key, RequestId("forced".into()));
+        assert_eq!(get_context::<RequestId>(key).0, "forced");
+    });
+}
+
+#[test]
+fn test_force_thread_local_nesting() {
+    let key = unique_key("force_tl_nest", "rid");
+    register::<RequestId>(key);
+
+    force_thread_local(|| {
+        set_context(key, RequestId("outer".into()));
+        force_thread_local(|| {
+            // Inner force_thread_local should still work
+            assert_eq!(get_context::<RequestId>(key).0, "outer");
+            set_context(key, RequestId("inner".into()));
+        });
+        // After inner returns, force_thread_local should still be active
+        assert_eq!(get_context::<RequestId>(key).0, "inner");
+    });
+}
+
+#[test]
+fn test_force_thread_local_panic_safety() {
+    let key = unique_key("force_tl_panic", "rid");
+    register::<RequestId>(key);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        force_thread_local(|| {
+            set_context(key, RequestId("before_panic".into()));
+            panic!("intentional panic");
+        });
+    }));
+    assert!(result.is_err());
+
+    // force_thread_local flag should be cleared despite the panic
+    // (verified by not hanging/panicking on subsequent calls)
+    force_thread_local(|| {
+        assert_eq!(get_context::<RequestId>(key).0, "before_panic");
     });
 }
 

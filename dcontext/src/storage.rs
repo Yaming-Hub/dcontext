@@ -5,7 +5,7 @@ use crate::value::ContextValue;
 
 thread_local! {
     pub(crate) static CONTEXT: RefCell<ContextStack> = RefCell::new(ContextStack::new());
-    static FORCE_THREAD_LOCAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_THREAD_LOCAL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(feature = "tokio")]
@@ -20,7 +20,7 @@ pub(crate) fn with_current_stack<R>(mut f: impl FnMut(&RefCell<ContextStack>) ->
     // Try task-local first (async path).
     #[cfg(feature = "tokio")]
     {
-        let force = FORCE_THREAD_LOCAL.with(|c| c.get());
+        let force = FORCE_THREAD_LOCAL_DEPTH.with(|c| c.get()) > 0;
         if !force {
             // Use a Cell to smuggle the result out of the closure.
             let result: std::cell::Cell<Option<R>> = std::cell::Cell::new(None);
@@ -82,12 +82,15 @@ pub(crate) fn get_value(key: &str) -> Option<Box<dyn ContextValue>> {
 }
 
 /// Set a value in the current topmost scope.
+/// Old value is dropped outside the RefCell borrow to prevent re-entrancy panics (B3).
 pub(crate) fn set_value(key: &'static str, value: Box<dyn ContextValue>) {
     let mut value = Some(value);
-    with_current_stack(|cell| {
+    let _old = with_current_stack(|cell| {
         let mut stack = cell.borrow_mut();
-        stack.set(key, value.take().unwrap());
-    })
+        stack.set(key, value.take().unwrap())
+        // old value returned here, borrow released
+    });
+    // _old dropped here, outside the borrow — safe if Drop calls get_context
 }
 
 /// Collect all effective values (for snapshot/serialization).
@@ -103,9 +106,17 @@ pub(crate) fn collect_values() -> std::collections::HashMap<&'static str, Box<dy
 }
 
 /// Escape hatch: explicitly use thread-local storage even inside an async runtime.
+/// Panic-safe and nesting-safe via depth counter + RAII guard.
 pub fn force_thread_local<R>(f: impl FnOnce() -> R) -> R {
-    FORCE_THREAD_LOCAL.with(|c| c.set(true));
-    let result = f();
-    FORCE_THREAD_LOCAL.with(|c| c.set(false));
-    result
+    FORCE_THREAD_LOCAL_DEPTH.with(|c| c.set(c.get() + 1));
+
+    struct DepthGuard;
+    impl Drop for DepthGuard {
+        fn drop(&mut self) {
+            crate::storage::FORCE_THREAD_LOCAL_DEPTH.with(|c| c.set(c.get() - 1));
+        }
+    }
+    let _guard = DepthGuard;
+
+    f()
 }

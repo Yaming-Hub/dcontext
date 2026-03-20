@@ -1,7 +1,8 @@
 use crate::snapshot::{self, ContextSnapshot};
 
 /// Spawn a std::thread that inherits the current context.
-pub fn spawn_with_context<F, T>(name: &str, f: F) -> std::thread::JoinHandle<T>
+/// Returns `io::Result` instead of panicking on spawn failure.
+pub fn spawn_with_context<F, T>(name: &str, f: F) -> std::io::Result<std::thread::JoinHandle<T>>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -13,7 +14,6 @@ where
             let _guard = snapshot::attach(snap);
             f()
         })
-        .expect("failed to spawn thread")
 }
 
 /// Run an async block with the given snapshot established as task-local context.

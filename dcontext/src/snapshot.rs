@@ -11,10 +11,6 @@ pub struct ContextSnapshot {
     pub(crate) values: Arc<HashMap<&'static str, Box<dyn ContextValue>>>,
 }
 
-// Safety: ContextValue requires Send + Sync, and Arc is Send + Sync.
-unsafe impl Send for ContextSnapshot {}
-unsafe impl Sync for ContextSnapshot {}
-
 impl ContextSnapshot {
     /// Create an empty snapshot.
     pub fn empty() -> Self {

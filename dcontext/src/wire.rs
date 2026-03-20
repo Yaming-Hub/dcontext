@@ -67,19 +67,17 @@ pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
 
     for entry in &wire.entries {
         let key_str = entry.key.as_str();
-        // Only restore keys we have registered.
+        // Single registry lookup: get both deserialize_fn and static key.
         let restored = registry::with_registration(key_str, |reg| {
-            (reg.deserialize_fn)(&entry.value, entry.key_version)
+            let val = (reg.deserialize_fn)(&entry.value, entry.key_version);
+            (reg.key, val)
         });
 
         match restored {
-            Some(Ok(val)) => {
-                // We need the &'static str from the registry.
-                if let Some(static_key) = registry::with_registration(key_str, |r| r.key) {
-                    storage::set_value(static_key, val);
-                }
+            Some((static_key, Ok(val))) => {
+                storage::set_value(static_key, val);
             }
-            Some(Err(e)) => return Err(e),
+            Some((_, Err(e))) => return Err(e),
             None => {
                 // Unknown key — silently skip.
             }

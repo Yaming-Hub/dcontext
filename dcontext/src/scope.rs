@@ -62,10 +62,12 @@ impl ContextStack {
         None
     }
 
-    /// Set a value in the topmost scope.
-    pub(crate) fn set(&mut self, key: &'static str, value: Box<dyn ContextValue>) {
+    /// Set a value in the topmost scope. Returns the old value if any.
+    pub(crate) fn set(&mut self, key: &'static str, value: Box<dyn ContextValue>) -> Option<Box<dyn ContextValue>> {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.values.insert(key, value);
+            scope.values.insert(key, value)
+        } else {
+            None
         }
     }
 
@@ -90,10 +92,12 @@ impl ContextStack {
 }
 
 /// RAII guard that reverts a scope on drop.
+/// Not Send/Sync — scopes are bound to their storage context.
 pub struct ScopeGuard {
     #[allow(dead_code)]
     scope_id: u64,
     expected_depth: usize,
+    _not_send: std::marker::PhantomData<*const ()>,
 }
 
 impl ScopeGuard {
@@ -101,6 +105,7 @@ impl ScopeGuard {
         Self {
             scope_id,
             expected_depth,
+            _not_send: std::marker::PhantomData,
         }
     }
 }
