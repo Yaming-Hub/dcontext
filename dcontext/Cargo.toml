@@ -16,9 +16,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync"], optional = true }
 
 [features]
-default = ["tokio", "base64"]
+default = ["tokio", "base64", "context-key"]
 tokio = ["dep:tokio"]
 base64 = ["dep:base64"]
+context-key = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

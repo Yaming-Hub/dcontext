@@ -34,6 +34,7 @@ mod storage;
 mod snapshot;
 mod wire;
 mod helpers;
+#[cfg(feature = "context-key")]
 mod context_key;
 mod config;
 #[macro_use]
@@ -43,6 +44,8 @@ mod macros;
 pub use error::ContextError;
 pub use scope::ScopeGuard;
 pub use snapshot::ContextSnapshot;
+
+#[cfg(feature = "context-key")]
 pub use context_key::ContextKey;
 
 // ── Registration ───────────────────────────────────────────────

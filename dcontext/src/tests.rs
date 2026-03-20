@@ -408,8 +408,10 @@ fn test_force_thread_local_panic_safety() {
 //  ContextKey<T> tests
 // ══════════════════════════════════════════════════════════════
 
+#[cfg(feature = "context-key")]
 static TEST_CK_KEY: crate::ContextKey<RequestId> = crate::ContextKey::new("test_ck_rid");
 
+#[cfg(feature = "context-key")]
 #[test]
 fn test_context_key_register_and_get() {
     TEST_CK_KEY.register();
@@ -417,6 +419,7 @@ fn test_context_key_register_and_get() {
     assert_eq!(TEST_CK_KEY.get().0, "ck-val");
 }
 
+#[cfg(feature = "context-key")]
 #[test]
 fn test_context_key_try_get_none() {
     let key: crate::ContextKey<UserId> = crate::ContextKey::new(unique_key("ck_none", "uid"));
