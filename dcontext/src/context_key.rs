@@ -67,7 +67,3 @@ where
         self.key
     }
 }
-
-// ContextKey is safe to share across threads (it's just a &'static str + PhantomData).
-unsafe impl<T> Send for ContextKey<T> {}
-unsafe impl<T> Sync for ContextKey<T> {}

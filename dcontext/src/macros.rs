@@ -29,7 +29,7 @@ macro_rules! register_contexts {
 /// ```
 #[macro_export]
 macro_rules! with_scope {
-    ( $( $key:expr => $val:expr ),+ , => $body:block ) => {
+    ( $( $key:expr => $val:expr ),+ $(,)? => $body:block ) => {
         $crate::scope(|| {
             $(
                 $crate::set_context($key, $val);

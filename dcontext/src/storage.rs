@@ -72,13 +72,29 @@ pub fn scope<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// Async version: execute a future in a new scope.
+/// The scope is entered before polling and exited after the future completes.
 #[cfg(feature = "tokio")]
 pub async fn scope_async<F, R>(f: F) -> R
 where
     F: std::future::Future<Output = R>,
 {
-    let _guard = enter_scope();
-    f.await
+    // Enter scope and record the depth, but don't hold the !Send guard
+    // across the .await point. Instead, manually manage enter/leave.
+    let depth = with_current_stack(|cell| {
+        let mut stack = cell.borrow_mut();
+        let (_id, depth) = stack.push_scope();
+        depth
+    });
+
+    let result = f.await;
+
+    // Manually pop the scope after the future completes.
+    with_current_stack(|cell| {
+        let mut stack = cell.borrow_mut();
+        stack.pop_scope(depth);
+    });
+
+    result
 }
 
 /// Get a value from the context. Returns a clone.
