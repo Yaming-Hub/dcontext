@@ -1218,6 +1218,35 @@ async fn main() -> std::io::Result<()> {
 
 ## 13. Future Work
 
+- **Wire version migration support** — Allow multiple versions of the same
+  context type to be registered, each with its own deserializer. When
+  deserializing from the wire, the library selects the correct deserializer
+  based on the `key_version` in `WireEntry`. This enables rolling upgrades
+  where old and new nodes coexist with different struct schemas:
+  ```rust
+  dcontext::register_versioned::<TraceContextV1>("trace_context", 1);
+  dcontext::register_versioned::<TraceContextV2>("trace_context", 2);
+  // Wire version 1 → deserializes as V1 then converts to V2
+  // Wire version 2 → deserializes as V2 directly
+  ```
+- **Local-only (non-serializable) context entries** — Allow marking a
+  context entry as *local-only* at registration time so that it is excluded
+  from `serialize_context()` / `serialize_context_string()`. This is useful
+  for entries that contain non-portable data (open file handles, thread IDs,
+  in-process caches) or sensitive data (credentials, tokens) that must not
+  cross process boundaries:
+  ```rust
+  dcontext::register_local::<DbConnectionPool>("db_pool");
+  // Or with an options builder:
+  dcontext::register_with_options::<AuthToken>("auth_token", ContextOptions {
+      serialize: false, // excluded from wire format
+      ..Default::default()
+  });
+  ```
+  Local-only entries are still propagated via `snapshot()` / `attach()`
+  within the same process (e.g., across threads and async tasks), but are
+  silently omitted during serialization. This avoids requiring `Serialize`
+  bounds on types that are inherently non-serializable.
 - **`async-std` support** via poll-wrapper `ContextFuture` (see §5.2 / §9).
 - **Automatic propagation** via runtime hooks (e.g., Tokio's `tracing` integration).
 - **Middleware integrations** for popular web frameworks (axum, actix-web, tonic).
