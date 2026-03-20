@@ -40,7 +40,12 @@ pub fn serialize_context() -> Result<Vec<u8>, ContextError> {
         entries,
     };
 
-    bincode::serialize(&wire).map_err(|e| ContextError::SerializationFailed(e.to_string()))
+    let bytes = bincode::serialize(&wire)
+        .map_err(|e| ContextError::SerializationFailed(e.to_string()))?;
+
+    crate::config::check_size(bytes.len())?;
+
+    Ok(bytes)
 }
 
 /// Serialize the current context into a base64-encoded string.

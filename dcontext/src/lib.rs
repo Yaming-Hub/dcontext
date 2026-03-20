@@ -34,19 +34,27 @@ mod storage;
 mod snapshot;
 mod wire;
 mod helpers;
+mod context_key;
+mod config;
+#[macro_use]
+mod macros;
 
 // Re-export public types
 pub use error::ContextError;
 pub use scope::ScopeGuard;
 pub use snapshot::ContextSnapshot;
+pub use context_key::ContextKey;
 
 // ── Registration ───────────────────────────────────────────────
 
-pub use registry::{register, try_register};
+pub use registry::{register, try_register, try_register_versioned, register_versioned};
 
 // ── Scope management ───────────────────────────────────────────
 
 pub use storage::{enter_scope, scope, force_thread_local};
+
+#[cfg(feature = "tokio")]
+pub use storage::scope_async;
 
 // ── Snapshot / Clone ───────────────────────────────────────────
 
@@ -67,6 +75,10 @@ pub use wire::{serialize_context, deserialize_context};
 
 #[cfg(feature = "base64")]
 pub use wire::{serialize_context_string, deserialize_context_string};
+
+// ── Configuration ──────────────────────────────────────────────
+
+pub use config::{set_max_context_size, max_context_size};
 
 // ── Core get/set API ───────────────────────────────────────────
 

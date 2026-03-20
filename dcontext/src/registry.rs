@@ -74,6 +74,14 @@ where
     try_register::<T>(key).expect("dcontext::register failed");
 }
 
+/// Panicking convenience wrapper for versioned registration.
+pub fn register_versioned<T>(key: &'static str, version: u32)
+where
+    T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    try_register_versioned::<T>(key, version).expect("dcontext::register_versioned failed");
+}
+
 /// Look up a registration by key. Returns None if not registered.
 pub(crate) fn with_registration<R>(
     key: &str,

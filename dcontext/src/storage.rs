@@ -71,6 +71,16 @@ pub fn scope<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Async version: execute a future in a new scope.
+#[cfg(feature = "tokio")]
+pub async fn scope_async<F, R>(f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    let _guard = enter_scope();
+    f.await
+}
+
 /// Get a value from the context. Returns a clone.
 /// The RefCell borrow is released before cloning user data (C3 safety).
 pub(crate) fn get_value(key: &str) -> Option<Box<dyn ContextValue>> {
