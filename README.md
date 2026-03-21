@@ -71,6 +71,7 @@ fn main() {
 | `tokio` | yes | Tokio task-local storage, `scope_async`, and async spawn helpers |
 | `base64` | yes | Base64 string serialization for HTTP headers/gRPC metadata |
 | `context-key` | yes | `ContextKey<T>` typed key wrapper for compile-time safe access |
+| `context-future` | no | `ContextFuture` poll-wrapper for runtime-agnostic async (non-Tokio executors) |
 
 ## Documentation
 
