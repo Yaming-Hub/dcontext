@@ -53,7 +53,8 @@ pub use context_key::ContextKey;
 // ── Registration ───────────────────────────────────────────────
 
 pub use registry::{register, try_register, try_register_versioned, register_versioned,
-                   register_local, try_register_local};
+                   register_local, try_register_local,
+                   register_migration, try_register_migration};
 
 // ── Scope management ───────────────────────────────────────────
 
@@ -82,7 +83,7 @@ pub use context_future::{ContextFuture, with_context_future};
 
 // ── Serialization ──────────────────────────────────────────────
 
-pub use wire::{serialize_context, deserialize_context};
+pub use wire::{serialize_context, deserialize_context, make_wire_bytes};
 
 #[cfg(feature = "base64")]
 pub use wire::{serialize_context_string, deserialize_context_string};

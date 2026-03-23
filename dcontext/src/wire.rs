@@ -76,14 +76,22 @@ pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
 
     for entry in &wire.entries {
         let key_str = entry.key.as_str();
-        // Single registry lookup: get both deserialize_fn and static key.
+        // Single registry lookup: find the right versioned deserializer.
         let restored = registry::with_registration(key_str, |reg| {
-            match &reg.deserialize_fn {
+            if reg.local_only || reg.deserializers.is_empty() {
+                return None; // local-only or no deserializers — skip
+            }
+            match reg.deserializers.get(&entry.key_version) {
                 Some(deser_fn) => {
-                    let val = deser_fn(&entry.value, entry.key_version);
+                    let val = deser_fn(&entry.value);
                     Some((reg.key, val))
                 }
-                None => None, // local-only key — skip
+                None => Some((reg.key, Err(ContextError::DeserializationFailed(format!(
+                    "no deserializer for key '{}' wire version {} (registered versions: {:?})",
+                    key_str,
+                    entry.key_version,
+                    reg.deserializers.keys().collect::<Vec<_>>()
+                )))))
             }
         });
 
@@ -109,4 +117,30 @@ pub fn deserialize_context_string(encoded: &str) -> Result<ScopeGuard, ContextEr
         .decode(encoded)
         .map_err(|e| ContextError::DeserializationFailed(e.to_string()))?;
     deserialize_context(&bytes)
+}
+
+/// Construct wire-format bytes with a single entry. This is a helper for
+/// testing version migration — it lets you create wire bytes as if they came
+/// from a sender running an older schema version.
+///
+/// In production, wire bytes come from `serialize_context()` on the sender.
+/// This function is useful in tests and samples to simulate cross-version
+/// scenarios within a single process.
+pub fn make_wire_bytes(key: &str, key_version: u32, value_bytes: &[u8]) -> Vec<u8> {
+    let wire = WireContext {
+        version: WIRE_VERSION,
+        entries: vec![WireEntry {
+            key: key.to_string(),
+            key_version,
+            value: value_bytes.to_vec(),
+        }],
+    };
+    bincode::serialize(&wire)
+        .expect("dcontext::make_wire_bytes: bincode serialization should not fail")
+}
+
+/// Test helpers (re-exports make_wire_bytes for internal tests).
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    pub use super::make_wire_bytes;
 }

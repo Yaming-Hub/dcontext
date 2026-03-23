@@ -5,12 +5,19 @@ use std::sync::RwLock;
 use crate::error::ContextError;
 use crate::value::ContextValue;
 
+/// Type alias for versioned deserializer functions.
+type DeserializeFn = Box<dyn Fn(&[u8]) -> Result<Box<dyn ContextValue>, ContextError> + Send + Sync>;
+
 /// Metadata stored for each registered context key.
 pub(crate) struct Registration {
     pub key: &'static str,
     pub type_id: TypeId,
+    /// The current (latest) version used for serialization.
     pub key_version: u32,
-    pub deserialize_fn: Option<Box<dyn Fn(&[u8], u32) -> Result<Box<dyn ContextValue>, ContextError> + Send + Sync>>,
+    /// Versioned deserializers: wire_version → deserializer function.
+    /// Each function deserializes bytes from that specific wire version
+    /// into the current type (possibly via migration/conversion).
+    pub deserializers: HashMap<u32, DeserializeFn>,
     pub type_name: &'static str,
     /// If true, this key is excluded from serialization.
     pub local_only: bool,
@@ -43,26 +50,23 @@ where
         return Err(ContextError::AlreadyRegistered(key.to_string()));
     }
 
+    let mut deserializers: HashMap<u32, DeserializeFn> = HashMap::new();
+    deserializers.insert(
+        version,
+        Box::new(|bytes: &[u8]| -> Result<Box<dyn ContextValue>, ContextError> {
+            bincode::deserialize::<T>(bytes)
+                .map(|v| Box::new(v) as Box<dyn ContextValue>)
+                .map_err(|e| ContextError::DeserializationFailed(e.to_string()))
+        }),
+    );
+
     registry.insert(
         key,
         Registration {
             key,
             type_id: tid,
             key_version: version,
-            deserialize_fn: Some({
-                let registered_version = version;
-                Box::new(move |bytes: &[u8], wire_version: u32| -> Result<Box<dyn ContextValue>, ContextError> {
-                    if wire_version != registered_version {
-                        return Err(ContextError::DeserializationFailed(format!(
-                            "key version mismatch: wire={}, registered={}",
-                            wire_version, registered_version
-                        )));
-                    }
-                    bincode::deserialize::<T>(bytes)
-                        .map(|v| Box::new(v) as Box<dyn ContextValue>)
-                        .map_err(|e| ContextError::DeserializationFailed(e.to_string()))
-                })
-            }),
+            deserializers,
             type_name: std::any::type_name::<T>(),
             local_only: false,
         },
@@ -84,6 +88,80 @@ where
     T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
     try_register_versioned::<T>(key, version).expect("dcontext::register_versioned failed");
+}
+
+/// Register a migration deserializer for an older wire version. The key must
+/// already be registered with the current type `TCurrent`. When bytes arrive
+/// with `wire_version == old_version`, they are deserialized as `TOld` and
+/// then converted to `TCurrent` via the provided `migrate` function.
+///
+/// This enables rolling upgrades where old and new nodes coexist:
+/// ```rust,ignore
+/// // Current version
+/// dcontext::register_versioned::<TraceContextV2>("trace", 2);
+/// // Accept old V1 bytes and convert to V2
+/// dcontext::register_migration::<TraceContextV1, TraceContextV2>(
+///     "trace", 1, |v1| TraceContextV2 { trace_id: v1.trace_id, span_id: String::new() }
+/// );
+/// ```
+pub fn try_register_migration<TOld, TCurrent>(
+    key: &'static str,
+    old_version: u32,
+    migrate: impl Fn(TOld) -> TCurrent + Send + Sync + 'static,
+) -> Result<(), ContextError>
+where
+    TOld: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    TCurrent: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    let mut registry = REGISTRY.write().unwrap();
+
+    let reg = registry.get_mut(key).ok_or_else(|| {
+        ContextError::NotRegistered(key.to_string())
+    })?;
+
+    // Verify the current type matches TCurrent.
+    if reg.type_id != TypeId::of::<TCurrent>() {
+        return Err(ContextError::TypeMismatch(
+            key.to_string(),
+            reg.type_name.to_string(),
+            std::any::type_name::<TCurrent>().to_string(),
+        ));
+    }
+
+    // Prevent overwriting the current version's native deserializer.
+    if old_version == reg.key_version {
+        return Err(ContextError::DeserializationFailed(format!(
+            "cannot register migration for key '{}' at current version {} \
+             (would overwrite the native deserializer)",
+            key, old_version
+        )));
+    }
+
+    reg.deserializers.insert(
+        old_version,
+        Box::new(move |bytes: &[u8]| -> Result<Box<dyn ContextValue>, ContextError> {
+            let old_val = bincode::deserialize::<TOld>(bytes)
+                .map_err(|e| ContextError::DeserializationFailed(e.to_string()))?;
+            let current_val = migrate(old_val);
+            Ok(Box::new(current_val) as Box<dyn ContextValue>)
+        }),
+    );
+
+    Ok(())
+}
+
+/// Panicking convenience wrapper for migration registration.
+pub fn register_migration<TOld, TCurrent>(
+    key: &'static str,
+    old_version: u32,
+    migrate: impl Fn(TOld) -> TCurrent + Send + Sync + 'static,
+)
+where
+    TOld: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    TCurrent: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    try_register_migration::<TOld, TCurrent>(key, old_version, migrate)
+        .expect("dcontext::register_migration failed");
 }
 
 /// Register a local-only context type. Local-only entries are propagated via
@@ -110,7 +188,7 @@ where
             key,
             type_id: tid,
             key_version: 0,
-            deserialize_fn: None,
+            deserializers: HashMap::new(),
             type_name: std::any::type_name::<T>(),
             local_only: true,
         },
