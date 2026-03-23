@@ -486,6 +486,98 @@ fn test_set_max_context_size_enforced() {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  Local-only registration tests
+// ══════════════════════════════════════════════════════════════
+
+/// A non-serializable type — only Clone+Send+Sync, no Serialize.
+#[derive(Clone, Default, Debug, PartialEq)]
+struct DbPool {
+    connection_count: u32,
+}
+
+#[test]
+fn test_register_local_and_get() {
+    let key = unique_key("local_basic", "pool");
+    register_local::<DbPool>(key);
+
+    let _guard = enter_scope();
+    set_context_local(key, DbPool { connection_count: 5 });
+
+    let val: DbPool = get_context(key);
+    assert_eq!(val.connection_count, 5);
+}
+
+#[test]
+fn test_local_excluded_from_serialization() {
+    let key_local = unique_key("local_serde", "pool");
+    let key_normal = unique_key("local_serde", "rid");
+
+    register_local::<DbPool>(key_local);
+    register::<RequestId>(key_normal);
+
+    let _guard = enter_scope();
+    set_context_local(key_local, DbPool { connection_count: 42 });
+    set_context(key_normal, RequestId("req-local-test".into()));
+
+    // Serialize — should succeed (local-only keys are silently skipped).
+    let bytes = serialize_context().expect("serialization should succeed");
+
+    // Deserialize into a fresh thread to verify the local key is NOT in the
+    // wire format (a new thread has no parent scope to inherit from).
+    let handle = std::thread::spawn(move || {
+        register_local::<DbPool>(key_local);
+        register::<RequestId>(key_normal);
+
+        let _guard = deserialize_context(&bytes).expect("deserialization should succeed");
+
+        // Normal key was in the wire format.
+        let rid: RequestId = get_context(key_normal);
+        assert_eq!(rid.0, "req-local-test");
+
+        // Local key was NOT serialized — should be default.
+        let pool: DbPool = get_context(key_local);
+        assert_eq!(pool, DbPool::default());
+    });
+
+    handle.join().unwrap();
+}
+
+#[test]
+fn test_local_propagates_via_snapshot() {
+    let key = unique_key("local_snap", "pool");
+    register_local::<DbPool>(key);
+
+    let _guard = enter_scope();
+    set_context_local(key, DbPool { connection_count: 10 });
+
+    // Snapshot captures local values.
+    let snap = snapshot();
+    let _guard2 = attach(snap);
+
+    let val: DbPool = get_context(key);
+    assert_eq!(val.connection_count, 10);
+}
+
+#[test]
+fn test_local_scope_isolation() {
+    let key = unique_key("local_scope", "pool");
+    register_local::<DbPool>(key);
+
+    let _guard = enter_scope();
+    set_context_local(key, DbPool { connection_count: 1 });
+
+    scope(|| {
+        set_context_local(key, DbPool { connection_count: 99 });
+        let val: DbPool = get_context(key);
+        assert_eq!(val.connection_count, 99);
+    });
+
+    // Reverts after scope exits.
+    let val: DbPool = get_context(key);
+    assert_eq!(val.connection_count, 1);
+}
+
+// ══════════════════════════════════════════════════════════════
 //  ContextFuture tests (feature-gated)
 // ══════════════════════════════════════════════════════════════
 

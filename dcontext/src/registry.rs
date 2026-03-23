@@ -10,8 +10,10 @@ pub(crate) struct Registration {
     pub key: &'static str,
     pub type_id: TypeId,
     pub key_version: u32,
-    pub deserialize_fn: Box<dyn Fn(&[u8], u32) -> Result<Box<dyn ContextValue>, ContextError> + Send + Sync>,
+    pub deserialize_fn: Option<Box<dyn Fn(&[u8], u32) -> Result<Box<dyn ContextValue>, ContextError> + Send + Sync>>,
     pub type_name: &'static str,
+    /// If true, this key is excluded from serialization.
+    pub local_only: bool,
 }
 
 static REGISTRY: std::sync::LazyLock<RwLock<HashMap<&'static str, Registration>>> =
@@ -47,7 +49,7 @@ where
             key,
             type_id: tid,
             key_version: version,
-            deserialize_fn: {
+            deserialize_fn: Some({
                 let registered_version = version;
                 Box::new(move |bytes: &[u8], wire_version: u32| -> Result<Box<dyn ContextValue>, ContextError> {
                     if wire_version != registered_version {
@@ -60,8 +62,9 @@ where
                         .map(|v| Box::new(v) as Box<dyn ContextValue>)
                         .map_err(|e| ContextError::DeserializationFailed(e.to_string()))
                 })
-            },
+            }),
             type_name: std::any::type_name::<T>(),
+            local_only: false,
         },
     );
     Ok(())
@@ -81,6 +84,56 @@ where
     T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
     try_register_versioned::<T>(key, version).expect("dcontext::register_versioned failed");
+}
+
+/// Register a local-only context type. Local-only entries are propagated via
+/// `snapshot()`/`attach()` within the same process but are silently excluded
+/// from `serialize_context()`. The type does NOT need to implement
+/// `Serialize`/`DeserializeOwned`.
+pub fn try_register_local<T>(key: &'static str) -> Result<(), ContextError>
+where
+    T: Clone + Default + Send + Sync + 'static,
+{
+    let mut registry = REGISTRY.write().unwrap();
+    let tid = TypeId::of::<T>();
+
+    if let Some(existing) = registry.get(key) {
+        if existing.type_id == tid {
+            return Ok(());
+        }
+        return Err(ContextError::AlreadyRegistered(key.to_string()));
+    }
+
+    registry.insert(
+        key,
+        Registration {
+            key,
+            type_id: tid,
+            key_version: 0,
+            deserialize_fn: None,
+            type_name: std::any::type_name::<T>(),
+            local_only: true,
+        },
+    );
+    Ok(())
+}
+
+/// Panicking convenience wrapper for local-only registration.
+pub fn register_local<T>(key: &'static str)
+where
+    T: Clone + Default + Send + Sync + 'static,
+{
+    try_register_local::<T>(key).expect("dcontext::register_local failed");
+}
+
+/// Check if a key is registered as local-only.
+pub(crate) fn is_local(key: &str) -> bool {
+    REGISTRY
+        .read()
+        .unwrap()
+        .get(key)
+        .map(|r| r.local_only)
+        .unwrap_or(false)
 }
 
 /// Look up a registration by key. Returns None if not registered.
