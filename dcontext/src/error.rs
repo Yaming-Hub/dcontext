@@ -20,4 +20,7 @@ pub enum ContextError {
 
     #[error("context size exceeds limit: {size} bytes > {limit} bytes")]
     ContextTooLarge { size: usize, limit: usize },
+
+    #[error("key '{0}' is local-only and cannot be serialized")]
+    LocalOnlyKey(String),
 }

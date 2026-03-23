@@ -52,7 +52,8 @@ pub use context_key::ContextKey;
 
 // ── Registration ───────────────────────────────────────────────
 
-pub use registry::{register, try_register, try_register_versioned, register_versioned};
+pub use registry::{register, try_register, try_register_versioned, register_versioned,
+                   register_local, try_register_local};
 
 // ── Scope management ───────────────────────────────────────────
 
@@ -187,6 +188,39 @@ where
     }
 
     storage::set_value(key, Box::new(value));
+    Ok(())
+}
+
+/// Set a local-only context value. The type does NOT need Serialize/DeserializeOwned.
+/// Panics if the key is not registered or type doesn't match.
+pub fn set_context_local<T>(key: &'static str, value: T)
+where
+    T: Clone + Send + Sync + 'static,
+{
+    try_set_context_local(key, value).expect("dcontext::set_context_local failed");
+}
+
+/// Set a local-only context value. Returns Err on type mismatch or if key is not registered.
+pub fn try_set_context_local<T>(key: &'static str, value: T) -> Result<(), ContextError>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    if !registry::is_registered(key) {
+        return Err(ContextError::NotRegistered(key.to_string()));
+    }
+
+    let expected_tid = registry::type_id_for(key).unwrap();
+    if TypeId::of::<T>() != expected_tid {
+        let expected_name =
+            registry::with_registration(key, |r| r.type_name).unwrap_or("unknown");
+        return Err(ContextError::TypeMismatch(
+            key.to_string(),
+            expected_name.to_string(),
+            std::any::type_name::<T>().to_string(),
+        ));
+    }
+
+    storage::set_value(key, Box::new(crate::value::LocalValue(value)));
     Ok(())
 }
 

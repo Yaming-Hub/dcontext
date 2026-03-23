@@ -26,6 +26,10 @@ pub fn serialize_context() -> Result<Vec<u8>, ContextError> {
     let mut entries = Vec::new();
 
     for (key, val) in &values {
+        // Skip local-only entries — they don't cross process boundaries.
+        if val.is_local() {
+            continue;
+        }
         let value_bytes = val.serialize_value()?;
         let key_version = registry::with_registration(key, |r| r.key_version).unwrap_or(1);
         entries.push(WireEntry {
@@ -74,17 +78,22 @@ pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
         let key_str = entry.key.as_str();
         // Single registry lookup: get both deserialize_fn and static key.
         let restored = registry::with_registration(key_str, |reg| {
-            let val = (reg.deserialize_fn)(&entry.value, entry.key_version);
-            (reg.key, val)
+            match &reg.deserialize_fn {
+                Some(deser_fn) => {
+                    let val = deser_fn(&entry.value, entry.key_version);
+                    Some((reg.key, val))
+                }
+                None => None, // local-only key — skip
+            }
         });
 
         match restored {
-            Some((static_key, Ok(val))) => {
+            Some(Some((static_key, Ok(val)))) => {
                 storage::set_value(static_key, val);
             }
-            Some((_, Err(e))) => return Err(e),
-            None => {
-                // Unknown key — silently skip.
+            Some(Some((_, Err(e)))) => return Err(e),
+            Some(None) | None => {
+                // Unknown key or local-only — silently skip.
             }
         }
     }
