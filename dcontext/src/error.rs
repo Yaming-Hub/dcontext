@@ -23,4 +23,7 @@ pub enum ContextError {
 
     #[error("key '{0}' is local-only and cannot be serialized")]
     LocalOnlyKey(String),
+
+    #[error("no active scope: {0}")]
+    NoActiveScope(String),
 }
