@@ -30,7 +30,13 @@ pub fn serialize_context() -> Result<Vec<u8>, ContextError> {
         if val.is_local() {
             continue;
         }
-        let value_bytes = val.serialize_value()?;
+        // Use custom serialize_fn if registered, otherwise default (bincode via ContextValue).
+        let value_bytes = registry::with_registration(key, |r| {
+            match &r.serialize_fn {
+                Some(custom_ser) => custom_ser(val.as_ref()),
+                None => val.serialize_value(),
+            }
+        }).unwrap_or_else(|| val.serialize_value())?;
         let key_version = registry::with_registration(key, |r| r.key_version).unwrap_or(1);
         entries.push(WireEntry {
             key: key.to_string(),

@@ -8,7 +8,7 @@
 //! Usage: `cargo run --bin version_migration`
 
 use dcontext::{
-    register_versioned, register_migration, set_context, get_context,
+    register_with, register_migration, set_context, get_context,
     scope, serialize_context, deserialize_context, make_wire_bytes,
 };
 use serde::{Serialize, Deserialize};
@@ -31,7 +31,7 @@ fn main() {
     println!("=== Version Migration ===\n");
 
     // Register the CURRENT version (V2) of the context type.
-    register_versioned::<TraceContextV2>("trace_ctx", 2);
+    register_with::<TraceContextV2>("trace_ctx", |o| o.version(2));
 
     // Register a migration from V1 → V2. When wire bytes arrive with
     // key_version=1, they are deserialized as TraceContextV1, then

@@ -597,7 +597,7 @@ fn test_migration_v1_to_v2() {
     let key = unique_key("migrate_v1v2", "trace");
 
     // Register current version (V2) and add V1 migration.
-    register_versioned::<TraceV2>(key, 2);
+    register_with::<TraceV2>(key, |o| o.version(2));
     register_migration::<TraceV1, TraceV2>(key, 1, |v1| TraceV2 {
         trace_id: v1.trace_id,
         span_id: "migrated".into(),
@@ -625,7 +625,7 @@ fn test_migration_end_to_end() {
     let key = unique_key("migrate_e2e", "ctx");
 
     // Register V2 as the current type, with a V1 migration.
-    register_versioned::<TraceV2>(key, 2);
+    register_with::<TraceV2>(key, |o| o.version(2));
     register_migration::<TraceV1, TraceV2>(key, 1, |v1| TraceV2 {
         trace_id: v1.trace_id,
         span_id: "default-span".into(),
@@ -649,7 +649,7 @@ fn test_migration_end_to_end() {
 #[test]
 fn test_migration_unknown_version_errors() {
     let key = unique_key("migrate_unknown", "ctx");
-    register_versioned::<TraceV2>(key, 2);
+    register_with::<TraceV2>(key, |o| o.version(2));
     // No migration for version 1 registered.
 
     // Check that version 1 has no deserializer.
@@ -662,7 +662,7 @@ fn test_migration_unknown_version_errors() {
 #[test]
 fn test_migration_current_version_still_works() {
     let key = unique_key("migrate_current", "ctx");
-    register_versioned::<TraceV2>(key, 2);
+    register_with::<TraceV2>(key, |o| o.version(2));
     register_migration::<TraceV1, TraceV2>(key, 1, |v1| TraceV2 {
         trace_id: v1.trace_id,
         span_id: "migrated".into(),
@@ -687,7 +687,7 @@ fn test_migration_current_version_still_works() {
 #[test]
 fn test_migration_rejects_current_version() {
     let key = unique_key("migrate_reject", "ctx");
-    register_versioned::<TraceV2>(key, 2);
+    register_with::<TraceV2>(key, |o| o.version(2));
 
     // Attempting to register a migration for the CURRENT version should fail.
     let result = try_register_migration::<TraceV1, TraceV2>(key, 2, |v1| TraceV2 {
@@ -697,6 +697,97 @@ fn test_migration_rejects_current_version() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(matches!(err, ContextError::DeserializationFailed(_)));
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Custom codec tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_register_with_json_codec() {
+    let key = unique_key("codec_json", "rid");
+
+    register_with::<RequestId>(key, |o| o.codec(
+        |val| serde_json::to_vec(val).map_err(|e| e.to_string()),
+        |bytes| serde_json::from_slice(bytes).map_err(|e| e.to_string()),
+    ));
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("json-encoded".into()));
+
+    // Roundtrip through serialization — uses JSON codec, not bincode.
+    let bytes = serialize_context().unwrap();
+    scope(|| {
+        let _guard = deserialize_context(&bytes).unwrap();
+        let val: RequestId = get_context(key);
+        assert_eq!(val.0, "json-encoded");
+    });
+}
+
+#[test]
+fn test_json_codec_wire_bytes_are_json() {
+    let key = unique_key("codec_json_verify", "rid");
+
+    register_with::<RequestId>(key, |o| o.codec(
+        |val| serde_json::to_vec(val).map_err(|e| e.to_string()),
+        |bytes| serde_json::from_slice(bytes).map_err(|e| e.to_string()),
+    ));
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("verify-json".into()));
+
+    let wire_bytes = serialize_context().unwrap();
+
+    // The inner value bytes should be valid JSON, not bincode.
+    // Deserialize on a fresh thread to confirm.
+    let handle = std::thread::spawn(move || {
+        register_with::<RequestId>(key, |o| o.codec(
+            |val| serde_json::to_vec(val).map_err(|e| e.to_string()),
+            |bytes| serde_json::from_slice(bytes).map_err(|e| e.to_string()),
+        ));
+        let _guard = deserialize_context(&wire_bytes).unwrap();
+        let val: RequestId = get_context(key);
+        assert_eq!(val.0, "verify-json");
+    });
+    handle.join().unwrap();
+}
+
+#[test]
+fn test_default_codec_still_works() {
+    // Ensure normal registration (bincode) is unaffected by codec feature.
+    let key = unique_key("codec_default", "rid");
+    register::<RequestId>(key);
+
+    let _guard = enter_scope();
+    set_context(key, RequestId("bincode-default".into()));
+
+    let bytes = serialize_context().unwrap();
+    scope(|| {
+        let _guard = deserialize_context(&bytes).unwrap();
+        let val: RequestId = get_context(key);
+        assert_eq!(val.0, "bincode-default");
+    });
+}
+
+#[test]
+fn test_local_only_rejects_codec() {
+    let key = unique_key("local_codec", "rid");
+    let result = try_register_with::<RequestId>(key, |o| {
+        o.local_only().codec(
+            |val| serde_json::to_vec(val).map_err(|e| e.to_string()),
+            |bytes| serde_json::from_slice(bytes).map_err(|e| e.to_string()),
+        )
+    });
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), ContextError::SerializationFailed(_)));
+}
+
+#[test]
+fn test_local_only_rejects_version() {
+    let key = unique_key("local_version", "rid");
+    let result = try_register_with::<RequestId>(key, |o| o.local_only().version(2));
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), ContextError::SerializationFailed(_)));
 }
 
 // ══════════════════════════════════════════════════════════════

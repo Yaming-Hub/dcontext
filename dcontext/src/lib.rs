@@ -52,9 +52,10 @@ pub use context_key::ContextKey;
 
 // ── Registration ───────────────────────────────────────────────
 
-pub use registry::{register, try_register, try_register_versioned, register_versioned,
+pub use registry::{register, try_register, register_with, try_register_with,
                    register_local, try_register_local,
-                   register_migration, try_register_migration};
+                   register_migration, try_register_migration,
+                   RegistrationOptions};
 
 // ── Scope management ───────────────────────────────────────────
 

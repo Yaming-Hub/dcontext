@@ -780,11 +780,10 @@ keys gracefully.
 
 > **Pluggable codec (S4):** Bincode is fast but not self-describing and not
 > stable across versions/architectures by default. For cross-language or
-> long-lived wire formats, users can register a custom per-key serializer.
-> The default remains bincode for performance; JSON or MessagePack can be
-> used for the inner value via the registration API. A top-level codec swap
-> (e.g., replace bincode with protobuf for `WireContext` itself) is planned
-> as future work.
+> long-lived wire formats, users can register a custom per-key codec via
+> `register_with_codec`. The custom `encode`/`decode` functions replace
+> bincode for the inner value serialization. The top-level `WireContext`
+> envelope remains bincode. See the `custom_codec` sample.
 
 ### 6.2 Version Compatibility
 
@@ -1359,7 +1358,7 @@ async fn main() -> std::io::Result<()> {
 - ~~**Context size limits** enforcement (configurable max, `ContextTooLarge` error).~~ ✅ Implemented as `set_max_context_size`.
 - **Metrics** — track context snapshot/restore frequency, serialization overhead.
 - **Lazy values** — context entries that are computed on first access.
-- **Pluggable top-level codec** — replace bincode `WireContext` envelope with protobuf/msgpack.
+- ~~**Pluggable top-level codec**~~ ✅ Implemented as `register_with_codec` — per-key custom serialize/deserialize functions. The top-level wire format envelope remains bincode; inner values can use any format (JSON, MessagePack, etc.).
 - **`tracing` / OpenTelemetry interop (S5):** Define how `dcontext` relates
   to `tracing::Span` and `opentelemetry::Context`. Possible approaches:
   - A `tracing` subscriber/layer that reads from `dcontext` and attaches
