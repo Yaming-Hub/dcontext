@@ -1,6 +1,6 @@
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::error::ContextError;
 use crate::value::ContextValue;
@@ -8,8 +8,8 @@ use crate::value::ContextValue;
 /// Type alias for versioned deserializer functions.
 type DeserializeFn = Box<dyn Fn(&[u8]) -> Result<Box<dyn ContextValue>, ContextError> + Send + Sync>;
 
-/// Type alias for custom serializer functions.
-type SerializeFn = Box<dyn Fn(&dyn ContextValue) -> Result<Vec<u8>, ContextError> + Send + Sync>;
+/// Type alias for custom serializer functions (Arc so it can be cloned out of the lock).
+type SerializeFn = Arc<dyn Fn(&dyn ContextValue) -> Result<Vec<u8>, ContextError> + Send + Sync>;
 
 /// Metadata stored for each registered context key.
 pub(crate) struct Registration {
@@ -187,7 +187,7 @@ where
     }
 
     let serialize_fn = opts.encode.map(|encode| -> SerializeFn {
-        Box::new(move |val: &dyn ContextValue| {
+        Arc::new(move |val: &dyn ContextValue| {
             let typed = val.as_any().downcast_ref::<T>().ok_or_else(|| {
                 ContextError::SerializationFailed(
                     "type mismatch during custom serialization".into(),
@@ -367,6 +367,24 @@ pub(crate) fn with_registration<R>(
 ) -> Option<R> {
     let registry = REGISTRY.read().unwrap();
     registry.get(key).map(f)
+}
+
+/// Info needed by `serialize_context`, fetched in a single lookup.
+pub(crate) struct SerializationInfo {
+    pub local_only: bool,
+    pub key_version: u32,
+    pub serialize_fn: Option<SerializeFn>,
+}
+
+/// Single-lookup extraction of everything `serialize_context` needs.
+/// The lock is released before the caller invokes any closures.
+pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
+    let registry = REGISTRY.read().unwrap();
+    registry.get(key).map(|r| SerializationInfo {
+        local_only: r.local_only,
+        key_version: r.key_version,
+        serialize_fn: r.serialize_fn.clone(),
+    })
 }
 
 /// Check if a key is registered.

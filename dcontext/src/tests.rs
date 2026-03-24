@@ -790,6 +790,30 @@ fn test_local_only_rejects_version() {
     assert!(matches!(result.unwrap_err(), ContextError::SerializationFailed(_)));
 }
 
+#[test]
+fn test_local_only_builder_excludes_from_serialization() {
+    let key = unique_key("local_builder_ser", "rid");
+    register_with::<RequestId>(key, |o| o.local_only());
+
+    let _scope = enter_scope();
+    set_context(key, RequestId("should-not-serialize".into()));
+
+    // Serialize — the local_only value must be excluded from wire bytes.
+    let bytes = serialize_context().unwrap();
+
+    // Deserialize on a fresh thread so the original scope's value isn't visible.
+    std::thread::spawn(move || {
+        let _guard = deserialize_context(&bytes).unwrap();
+        let val = try_get_context::<RequestId>(key).unwrap();
+        assert!(
+            val.is_none(),
+            "local_only value registered via builder should not survive serialization"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
 // ══════════════════════════════════════════════════════════════
 //  ContextFuture tests (feature-gated)
 // ══════════════════════════════════════════════════════════════
