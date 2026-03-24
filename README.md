@@ -12,8 +12,11 @@ and even process boundaries via serialization.
 - **Type-safe** — Compile-time checked access via generics over `Any` storage
 - **Cross-thread** — Snapshot and attach context when spawning threads
 - **Cross-async** — Helpers for propagating context across Tokio tasks
+- **Runtime-agnostic async** — `ContextFuture` poll-wrapper works with any executor
 - **Serializable** — Serialize context to bytes/string for cross-process propagation
-- **Runtime-agnostic** — Core is sync-only; async support is opt-in via features
+- **Local-only entries** — Non-serializable context that stays within the process
+- **Version migration** — Rolling upgrades with automatic old→new schema conversion
+- **O(1) lookups** — Index-based read cache for fast context access
 
 ## Quick Start
 

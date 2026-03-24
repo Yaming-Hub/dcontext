@@ -145,28 +145,31 @@ struct ContextStack {
     scopes: Vec<Scope>,
     /// Monotonically increasing scope counter for guard validation.
     next_scope_id: u64,
-    /// Flattened read cache: merged view of all scopes (copy-on-write).
-    /// Invalidated on set_context or enter/leave scope.
-    /// None = cache dirty, must rebuild on next read.
-    read_cache: Option<HashMap<&'static str, Box<dyn ContextValue>>>,
+    /// Index cache: maps each effective key to the scope index holding its value.
+    /// Eagerly maintained — always valid. Stores only indices, never user data.
+    /// No user Clone code runs during cache operations (C3 re-entrancy safe).
+    read_cache: HashMap<&'static str, usize>,
 }
 ```
 
 The `ContextStack` lives in **thread-local** (sync) or **task-local** (async) storage.
 
 > **Lookup optimization (S3):** Reads are expected to dominate writes. The
-> `read_cache` provides O(1) lookups. It is lazily rebuilt on the first read
-> after a mutation or scope change, amortizing the merge cost across multiple
-> reads.
+> `read_cache` maps each effective key to the scope index holding its value,
+> providing O(1) lookups via `HashMap::get` + direct scope access. The cache
+> stores only `(&'static str, usize)` pairs — no user values are cloned,
+> preserving C3 re-entrancy safety. Cache maintenance: `push_scope` requires
+> no update (empty scope), `pop_scope` rebuilds (O(total keys)), `set` does
+> O(1) incremental update.
 
 ### 3.2 Scope Lifecycle
 
 | Operation | Effect |
 |-----------|--------|
-| `enter_scope()` | Pushes a new empty `Scope` onto the stack. Invalidates `read_cache`. Returns a `ScopeGuard`. |
-| `leave_scope()` / drop `ScopeGuard` | Validates scope ID, pops the scope, invalidates `read_cache`. |
-| `get_context::<T>(key)` | Reads from `read_cache` (rebuilding if dirty), downcasts to `T`. Returns `T` (cloned) or default. |
-| `set_context(key, value)` | Inserts/replaces in the current (topmost) scope. Invalidates `read_cache`. |
+| `enter_scope()` | Pushes a new empty `Scope` onto the stack. No cache update needed (empty scope). Returns a `ScopeGuard`. |
+| `leave_scope()` / drop `ScopeGuard` | Validates scope ID, pops the scope, rebuilds `read_cache`. |
+| `get_context::<T>(key)` | O(1) lookup via `read_cache` index → scope access, downcasts to `T`. Returns `T` (cloned) or default. |
+| `set_context(key, value)` | Inserts/replaces in the current (topmost) scope. O(1) incremental `read_cache` update. |
 
 ### 3.3 ScopeGuard
 
@@ -197,7 +200,7 @@ fn leave_scope_checked(scope_id: u64, expected_depth: usize) {
             expected_depth, stack.scopes.len()
         );
         stack.scopes.pop();
-        stack.read_cache = None; // invalidate
+        stack.rebuild_cache(); // rebuild index cache
     });
 }
 ```
@@ -296,9 +299,53 @@ where
     T: Clone + Send + Sync + 'static;
 ```
 
+#### Local-Only Registration
+
+For context entries that should propagate within the process (via `snapshot`/`attach`)
+but must **not** be serialized for cross-process propagation:
+
+```rust
+/// Register a local-only context type. No Serialize/DeserializeOwned required.
+pub fn register_local<T>(key: &'static str)
+where
+    T: Clone + Default + Send + Sync + 'static;
+
+/// Set a local-only context value. No Serialize required.
+pub fn set_context_local<T>(key: &'static str, value: T)
+where
+    T: Clone + Send + Sync + 'static;
+```
+
+Fallible variants: `try_register_local`, `try_set_context_local`.
+
+#### Versioned Registration and Migration
+
+For wire format evolution across rolling upgrades:
+
+```rust
+/// Register with an explicit key version for wire format.
+pub fn register_versioned<T>(key: &'static str, version: u32)
+where
+    T: Clone + Default + Send + Sync + Serialize + DeserializeOwned + 'static;
+
+/// Register a migration from an old wire version to the current type.
+/// When bytes arrive with wire_version == old_version, they are deserialized
+/// as TOld and converted to TCurrent via the migrate function.
+pub fn register_migration<TOld, TCurrent>(
+    key: &'static str,
+    old_version: u32,
+    migrate: fn(TOld) -> TCurrent,
+)
+where
+    TOld: Clone + Send + Sync + Serialize + DeserializeOwned + 'static,
+    TCurrent: Clone + Send + Sync + Serialize + DeserializeOwned + 'static;
+```
+
+Fallible variants: `try_register_versioned`, `try_register_migration`.
+
 ### 4.2 Serialization / Deserialization
 
-For cross-process propagation, the library serializes **all** context values in the current effective context (merged view of all scopes):
+For cross-process propagation, the library serializes **all** serializable context values in the current effective context (merged view of all scopes). Local-only entries are silently excluded:
 
 ```rust
 /// Serialize the current context (all scopes merged) into bytes.
@@ -768,11 +815,14 @@ pub enum ContextError {
     #[error("deserialization failed: {0}")]
     DeserializationFailed(String),
 
-    #[error("no active scope")]
-    NoActiveScope,
+    #[error("no active scope: {0}")]
+    NoActiveScope(String),
 
     #[error("context size exceeds limit: {size} bytes > {limit} bytes")]
     ContextTooLarge { size: usize, limit: usize },
+
+    #[error("key '{0}' is local-only and cannot be serialized")]
+    LocalOnlyKey(String),
 }
 ```
 
@@ -1300,43 +1350,13 @@ async fn main() -> std::io::Result<()> {
 
 ## 13. Future Work
 
-- **Wire version migration support** — Allow multiple versions of the same
-  context type to be registered, each with its own deserializer. When
-  deserializing from the wire, the library selects the correct deserializer
-  based on the `key_version` in `WireEntry`. This enables rolling upgrades
-  where old and new nodes coexist with different struct schemas:
-  ```rust
-  dcontext::register_versioned::<TraceContextV1>("trace_context", 1);
-  dcontext::register_versioned::<TraceContextV2>("trace_context", 2);
-  // Wire version 1 → deserializes as V1 then converts to V2
-  // Wire version 2 → deserializes as V2 directly
-  ```
-- **Local-only (non-serializable) context entries** — Allow marking a
-  context entry as *local-only* at registration time so that it is excluded
-  from `serialize_context()` / `serialize_context_string()`. This is useful
-  for entries that contain non-portable data (open file handles, thread IDs,
-  in-process caches) or sensitive data (credentials, tokens) that must not
-  cross process boundaries:
-  ```rust
-  dcontext::register_local::<DbConnectionPool>("db_pool");
-  // Or with an options builder:
-  dcontext::register_with_options::<AuthToken>("auth_token", ContextOptions {
-      serialize: false, // excluded from wire format
-      ..Default::default()
-  });
-  ```
-  Local-only entries are still propagated via `snapshot()` / `attach()`
-  within the same process (e.g., across threads and async tasks), but are
-  silently omitted during serialization. This avoids requiring `Serialize`
-  bounds on types that are inherently non-serializable.
-- **Sample usage programs** — Add a `samples/` directory (excluded from the
-  published crate) with runnable examples covering typical use cases:
-  request-scoped tracing, feature flags, multi-threaded worker pools,
-  async task propagation, and cross-process serialization.
+- ~~**Wire version migration support**~~ ✅ Implemented as `register_migration` — register a conversion function from an old wire version to the current type. The `deserializers` map in `Registration` holds multiple versioned deserializers per key. See the `version_migration` sample.
+- ~~**Local-only (non-serializable) context entries**~~ ✅ Implemented as `register_local` / `set_context_local`. Local-only entries propagate via `snapshot()`/`attach()` but are silently excluded from serialization. Types only need `Clone+Default+Send+Sync` (no `Serialize`).
+- ~~**Sample usage programs**~~ ✅ 14 samples covering all implemented features.
 - ~~**`async-std` support** via poll-wrapper `ContextFuture` (see §5.2 / §9).~~ ✅ Implemented as `ContextFuture` / `with_context_future` — runtime-agnostic, works with any executor.
 - **Automatic propagation** via runtime hooks (e.g., Tokio's `tracing` integration).
 - **Middleware integrations** for popular web frameworks (axum, actix-web, tonic).
-- **Context size limits** enforcement (configurable max, `ContextTooLarge` error).
+- ~~**Context size limits** enforcement (configurable max, `ContextTooLarge` error).~~ ✅ Implemented as `set_max_context_size`.
 - **Metrics** — track context snapshot/restore frequency, serialization overhead.
 - **Lazy values** — context entries that are computed on first access.
 - **Pluggable top-level codec** — replace bincode `WireContext` envelope with protobuf/msgpack.

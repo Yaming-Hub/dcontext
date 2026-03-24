@@ -578,6 +578,128 @@ fn test_local_scope_isolation() {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  Version migration tests
+// ══════════════════════════════════════════════════════════════
+
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+struct TraceV1 {
+    trace_id: String,
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+struct TraceV2 {
+    trace_id: String,
+    span_id: String,
+}
+
+#[test]
+fn test_migration_v1_to_v2() {
+    let key = unique_key("migrate_v1v2", "trace");
+
+    // Register current version (V2) and add V1 migration.
+    register_versioned::<TraceV2>(key, 2);
+    register_migration::<TraceV1, TraceV2>(key, 1, |v1| TraceV2 {
+        trace_id: v1.trace_id,
+        span_id: "migrated".into(),
+    });
+
+    // Serialize V1 bytes manually and run through the migration deserializer.
+    let v1_val = TraceV1 { trace_id: "tid-old".into() };
+    let v1_bytes = bincode::serialize(&v1_val).unwrap();
+
+    let result = crate::registry::with_registration(key, |reg| {
+        let deser = reg.deserializers.get(&1).expect("v1 deserializer missing");
+        deser(&v1_bytes)
+    });
+
+    let boxed = result.unwrap().unwrap();
+    let migrated = boxed.as_any().downcast_ref::<TraceV2>().unwrap();
+    assert_eq!(migrated.trace_id, "tid-old");
+    assert_eq!(migrated.span_id, "migrated");
+}
+
+#[test]
+fn test_migration_end_to_end() {
+    // Full end-to-end: simulate receiving V1 wire bytes when V2 is registered
+    // with a V1 migration. Uses a separate thread to get a clean thread-local.
+    let key = unique_key("migrate_e2e", "ctx");
+
+    // Register V2 as the current type, with a V1 migration.
+    register_versioned::<TraceV2>(key, 2);
+    register_migration::<TraceV1, TraceV2>(key, 1, |v1| TraceV2 {
+        trace_id: v1.trace_id,
+        span_id: "default-span".into(),
+    });
+
+    // Manually craft V1 wire bytes (simulating what a V1 sender would produce).
+    let v1_value = TraceV1 { trace_id: "from-v1-sender".into() };
+    let v1_value_bytes = bincode::serialize(&v1_value).unwrap();
+    let wire = crate::wire::test_helpers::make_wire_bytes(key, 1, &v1_value_bytes);
+
+    // Deserialize on a fresh thread (clean thread-local context).
+    let handle = std::thread::spawn(move || {
+        let _guard = deserialize_context(&wire).unwrap();
+        let val: TraceV2 = get_context(key);
+        assert_eq!(val.trace_id, "from-v1-sender");
+        assert_eq!(val.span_id, "default-span");
+    });
+    handle.join().unwrap();
+}
+
+#[test]
+fn test_migration_unknown_version_errors() {
+    let key = unique_key("migrate_unknown", "ctx");
+    register_versioned::<TraceV2>(key, 2);
+    // No migration for version 1 registered.
+
+    // Check that version 1 has no deserializer.
+    let has_v1 = crate::registry::with_registration(key, |reg| {
+        reg.deserializers.contains_key(&1)
+    });
+    assert_eq!(has_v1, Some(false));
+}
+
+#[test]
+fn test_migration_current_version_still_works() {
+    let key = unique_key("migrate_current", "ctx");
+    register_versioned::<TraceV2>(key, 2);
+    register_migration::<TraceV1, TraceV2>(key, 1, |v1| TraceV2 {
+        trace_id: v1.trace_id,
+        span_id: "migrated".into(),
+    });
+
+    // Current version (V2) roundtrip should still work.
+    let _guard = enter_scope();
+    set_context(key, TraceV2 {
+        trace_id: "current".into(),
+        span_id: "current-span".into(),
+    });
+    let bytes = serialize_context().unwrap();
+
+    scope(|| {
+        let _guard = deserialize_context(&bytes).unwrap();
+        let val: TraceV2 = get_context(key);
+        assert_eq!(val.trace_id, "current");
+        assert_eq!(val.span_id, "current-span");
+    });
+}
+
+#[test]
+fn test_migration_rejects_current_version() {
+    let key = unique_key("migrate_reject", "ctx");
+    register_versioned::<TraceV2>(key, 2);
+
+    // Attempting to register a migration for the CURRENT version should fail.
+    let result = try_register_migration::<TraceV1, TraceV2>(key, 2, |v1| TraceV2 {
+        trace_id: v1.trace_id,
+        span_id: "should-fail".into(),
+    });
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(err, ContextError::DeserializationFailed(_)));
+}
+
+// ══════════════════════════════════════════════════════════════
 //  ContextFuture tests (feature-gated)
 // ══════════════════════════════════════════════════════════════
 
