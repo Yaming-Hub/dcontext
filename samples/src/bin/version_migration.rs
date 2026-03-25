@@ -8,7 +8,7 @@
 //! Usage: `cargo run --bin version_migration`
 
 use dcontext::{
-    register_with, register_migration, initialize, set_context, get_context,
+    RegistryBuilder, initialize, set_context, get_context,
     scope, serialize_context, deserialize_context, make_wire_bytes,
 };
 use serde::{Serialize, Deserialize};
@@ -31,19 +31,20 @@ fn main() {
     println!("=== Version Migration ===\n");
 
     // Register the CURRENT version (V2) of the context type.
-    register_with::<TraceContextV2>("trace_ctx", |o| o.version(2));
+    let mut builder = RegistryBuilder::new();
+    builder.register_with::<TraceContextV2>("trace_ctx", |o| o.version(2));
 
     // Register a migration from V1 → V2. When wire bytes arrive with
     // key_version=1, they are deserialized as TraceContextV1, then
     // converted to TraceContextV2 via this function.
-    register_migration::<TraceContextV1, TraceContextV2>("trace_ctx", 1, |v1| {
+    builder.register_migration::<TraceContextV1, TraceContextV2>("trace_ctx", 1, |v1| {
         TraceContextV2 {
             trace_id: v1.trace_id,
             span_id: String::new(),  // V1 didn't have span_id
             sampled: true,           // default: sampled
         }
     });
-    initialize();
+    initialize(builder);
 
     // --- Scenario 1: Current version roundtrip (V2 → V2) ---
     println!("1. Current version roundtrip (V2 → V2):");

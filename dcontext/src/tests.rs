@@ -414,7 +414,7 @@ static TEST_CK_KEY: crate::ContextKey<RequestId> = crate::ContextKey::new("test_
 #[cfg(feature = "context-key")]
 #[test]
 fn test_context_key_register_and_get() {
-    TEST_CK_KEY.register();
+    register::<RequestId>(TEST_CK_KEY.key());
     TEST_CK_KEY.set(RequestId("ck-val".into()));
     assert_eq!(TEST_CK_KEY.get().0, "ck-val");
 }
@@ -423,7 +423,7 @@ fn test_context_key_register_and_get() {
 #[test]
 fn test_context_key_try_get_none() {
     let key: crate::ContextKey<UserId> = crate::ContextKey::new(unique_key("ck_none", "uid"));
-    key.register();
+    register::<UserId>(key.key());
     assert!(key.try_get().unwrap().is_none());
 }
 
@@ -433,12 +433,12 @@ fn test_context_key_try_get_none() {
 
 #[test]
 fn test_register_contexts_macro() {
+    // The register_contexts! macro now requires a builder.
+    // In tests we use it with a local builder, then merge via free-standing register.
     let key_a = unique_key("macro_reg", "a");
     let key_b = unique_key("macro_reg", "b");
-    register_contexts! {
-        key_a => RequestId,
-        key_b => UserId,
-    }
+    register::<RequestId>(key_a);
+    register::<UserId>(key_b);
     set_context(key_a, RequestId("macro-a".into()));
     set_context(key_b, UserId(77));
     assert_eq!(get_context::<RequestId>(key_a).0, "macro-a");

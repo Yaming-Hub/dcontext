@@ -9,15 +9,16 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use dcontext::{register, initialize, enter_scope, get_context, set_context};
+//! use dcontext::{RegistryBuilder, initialize, enter_scope, get_context, set_context};
 //! use serde::{Serialize, Deserialize};
 //!
 //! #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 //! struct RequestId(String);
 //!
 //! # fn main() {
-//! register::<RequestId>("request_id");
-//! initialize(); // freeze registry — all reads are lock-free after this
+//! let mut builder = RegistryBuilder::new();
+//! builder.register::<RequestId>("request_id");
+//! initialize(builder); // freeze registry — all reads are lock-free
 //!
 //! let _guard = enter_scope();
 //! set_context("request_id", RequestId("req-123".into()));
@@ -53,11 +54,14 @@ pub use context_key::ContextKey;
 
 // ── Registration ───────────────────────────────────────────────
 
-pub use registry::{register, try_register, register_with, try_register_with,
+pub use registry::{RegistryBuilder, RegistrationOptions,
+                   initialize, try_initialize};
+
+// Re-export free-standing registration functions for internal tests only.
+#[cfg(test)]
+pub(crate) use registry::{register, try_register, register_with, try_register_with,
                    register_local, try_register_local,
-                   register_migration, try_register_migration,
-                   initialize, try_initialize,
-                   RegistrationOptions};
+                   register_migration, try_register_migration};
 
 // ── Scope management ───────────────────────────────────────────
 

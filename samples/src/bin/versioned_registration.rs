@@ -8,7 +8,7 @@
 //! Usage: `cargo run --bin versioned_registration`
 
 use dcontext::{
-    register_with, initialize, set_context, get_context, scope,
+    RegistryBuilder, initialize, set_context, get_context, scope,
     serialize_context, deserialize_context,
 };
 use serde::{Serialize, Deserialize};
@@ -30,11 +30,12 @@ fn main() {
     println!("=== Versioned Registration ===\n");
 
     // Register all keys upfront, then freeze the registry.
-    register_with::<TraceContextV2>("trace_ctx_v2_same", |o| o.version(2));
-    register_with::<TraceContextV1>("trace_ctx_v1_demo", |o| o.version(1));
-    register_with::<TraceContextV2>("trace_ctx_v2_demo", |o| o.version(2));
-    register_with::<TraceContextV1>("trace_ctx_unknown", |o| o.version(1));
-    initialize();
+    let mut builder = RegistryBuilder::new();
+    builder.register_with::<TraceContextV2>("trace_ctx_v2_same", |o| o.version(2));
+    builder.register_with::<TraceContextV1>("trace_ctx_v1_demo", |o| o.version(1));
+    builder.register_with::<TraceContextV2>("trace_ctx_v2_demo", |o| o.version(2));
+    builder.register_with::<TraceContextV1>("trace_ctx_unknown", |o| o.version(1));
+    initialize(builder);
 
     // --- Scenario 1: Same version on both sides ---
     println!("1. Same version (v2 → v2): success");

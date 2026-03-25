@@ -7,7 +7,7 @@
 //! Usage: `cargo run --bin custom_codec`
 
 use dcontext::{
-    register_with, register, initialize, set_context, get_context,
+    RegistryBuilder, initialize, set_context, get_context,
     scope, serialize_context, deserialize_context,
 };
 use serde::{Serialize, Deserialize};
@@ -24,15 +24,17 @@ struct RequestId(String);
 fn main() {
     println!("=== Custom Codec (JSON) ===\n");
 
+    let mut builder = RegistryBuilder::new();
+
     // Register AppConfig with JSON codec (self-describing, cross-language).
-    register_with::<AppConfig>("app_config", |o| o.codec(
+    builder.register_with::<AppConfig>("app_config", |o| o.codec(
         |val| serde_json::to_vec(val).map_err(|e| e.to_string()),
         |bytes| serde_json::from_slice(bytes).map_err(|e| e.to_string()),
     ));
 
     // Register RequestId with default bincode (fast, compact).
-    register::<RequestId>("request_id");
-    initialize();
+    builder.register::<RequestId>("request_id");
+    initialize(builder);
     set_context("app_config", AppConfig {
         feature_flags: vec!["dark-mode".into(), "beta-api".into()],
         max_retries: 3,

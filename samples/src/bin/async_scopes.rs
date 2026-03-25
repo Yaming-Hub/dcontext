@@ -6,7 +6,7 @@
 //! Usage: `cargo run --bin async_scopes`
 
 use dcontext::{
-    register, initialize, set_context, get_context, scope_async, snapshot,
+    RegistryBuilder, initialize, set_context, get_context, scope_async, snapshot,
     with_context, spawn_with_context_async, force_thread_local,
 };
 use serde::{Serialize, Deserialize};
@@ -23,9 +23,10 @@ async fn simulate_io() {
 
 #[tokio::main]
 async fn main() {
-    register::<RequestId>("request_id");
-    register::<Phase>("phase");
-    initialize();
+    let mut builder = RegistryBuilder::new();
+    builder.register::<RequestId>("request_id");
+    builder.register::<Phase>("phase");
+    initialize(builder);
 
     let snap = force_thread_local(|| {
         set_context("request_id", RequestId("req-async-scoped".into()));

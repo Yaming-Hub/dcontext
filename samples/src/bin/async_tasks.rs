@@ -7,7 +7,7 @@
 //! Usage: `cargo run --bin async_tasks`
 
 use dcontext::{
-    register, initialize, set_context, get_context, scope, snapshot,
+    RegistryBuilder, initialize, set_context, get_context, scope, snapshot,
     with_context, spawn_with_context_async, force_thread_local,
 };
 use serde::{Serialize, Deserialize};
@@ -20,9 +20,10 @@ struct SpanId(u64);
 
 #[tokio::main]
 async fn main() {
-    register::<RequestId>("request_id");
-    register::<SpanId>("span_id");
-    initialize();
+    let mut builder = RegistryBuilder::new();
+    builder.register::<RequestId>("request_id");
+    builder.register::<SpanId>("span_id");
+    initialize(builder);
 
     // Set up initial context (using force_thread_local since we're
     // at the top level of main, before any with_context wrapper).
