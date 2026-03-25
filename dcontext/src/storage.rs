@@ -28,7 +28,8 @@ pub(crate) fn with_current_stack<R>(mut f: impl FnMut(&RefCell<ContextStack>) ->
                 result.set(Some(f(stack)));
             });
             if found.is_ok() {
-                return result.into_inner().unwrap();
+                return result.into_inner()
+                    .expect("invariant: closure set the result when try_with succeeded");
             }
 
             // No task-local. Are we inside an async runtime?
@@ -113,7 +114,7 @@ pub(crate) fn set_value(key: &'static str, value: Box<dyn ContextValue>) {
     let mut value = Some(value);
     let _old = with_current_stack(|cell| {
         let mut stack = cell.borrow_mut();
-        stack.set(key, value.take().unwrap())
+        stack.set(key, value.take().expect("invariant: value is always Some on entry"))
         // old value returned here, borrow released
     });
     // _old dropped here, outside the borrow — safe if Drop calls get_context

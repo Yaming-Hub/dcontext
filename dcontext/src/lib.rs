@@ -134,24 +134,19 @@ where
             }
         }
         None => {
-            // Value not in storage. Check registry (cold path) to distinguish
-            // "registered but not set" from "not registered".
-            if !registry::is_registered(key) {
-                return Err(ContextError::NotRegistered(key.to_string()));
+            // Value not in storage. Single registry lookup to distinguish
+            // "registered but not set" from "not registered", and verify type.
+            match registry::with_registration(key, |r| (r.type_id, r.type_name)) {
+                None => Err(ContextError::NotRegistered(key.to_string())),
+                Some((tid, type_name)) if tid != TypeId::of::<T>() => {
+                    Err(ContextError::TypeMismatch(
+                        key.to_string(),
+                        type_name.to_string(),
+                        std::any::type_name::<T>().to_string(),
+                    ))
+                }
+                Some(_) => Ok(None),
             }
-            // Verify type matches even when returning None.
-            let expected_tid = TypeId::of::<T>();
-            let registered_tid = registry::type_id_for(key).unwrap();
-            if expected_tid != registered_tid {
-                let registered_name =
-                    registry::with_registration(key, |r| r.type_name).unwrap_or("unknown");
-                return Err(ContextError::TypeMismatch(
-                    key.to_string(),
-                    registered_name.to_string(),
-                    std::any::type_name::<T>().to_string(),
-                ));
-            }
-            Ok(None)
         }
     }
 }
@@ -174,19 +169,16 @@ pub fn try_set_context<T>(key: &'static str, value: T) -> Result<(), ContextErro
 where
     T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    if !registry::is_registered(key) {
-        return Err(ContextError::NotRegistered(key.to_string()));
-    }
-
-    let expected_tid = registry::type_id_for(key).unwrap();
-    if TypeId::of::<T>() != expected_tid {
-        let expected_name =
-            registry::with_registration(key, |r| r.type_name).unwrap_or("unknown");
-        return Err(ContextError::TypeMismatch(
-            key.to_string(),
-            expected_name.to_string(),
-            std::any::type_name::<T>().to_string(),
-        ));
+    match registry::with_registration(key, |r| (r.type_id, r.type_name)) {
+        None => return Err(ContextError::NotRegistered(key.to_string())),
+        Some((tid, type_name)) if tid != TypeId::of::<T>() => {
+            return Err(ContextError::TypeMismatch(
+                key.to_string(),
+                type_name.to_string(),
+                std::any::type_name::<T>().to_string(),
+            ));
+        }
+        Some(_) => {}
     }
 
     storage::set_value(key, Box::new(value));
@@ -207,19 +199,16 @@ pub fn try_set_context_local<T>(key: &'static str, value: T) -> Result<(), Conte
 where
     T: Clone + Send + Sync + 'static,
 {
-    if !registry::is_registered(key) {
-        return Err(ContextError::NotRegistered(key.to_string()));
-    }
-
-    let expected_tid = registry::type_id_for(key).unwrap();
-    if TypeId::of::<T>() != expected_tid {
-        let expected_name =
-            registry::with_registration(key, |r| r.type_name).unwrap_or("unknown");
-        return Err(ContextError::TypeMismatch(
-            key.to_string(),
-            expected_name.to_string(),
-            std::any::type_name::<T>().to_string(),
-        ));
+    match registry::with_registration(key, |r| (r.type_id, r.type_name)) {
+        None => return Err(ContextError::NotRegistered(key.to_string())),
+        Some((tid, type_name)) if tid != TypeId::of::<T>() => {
+            return Err(ContextError::TypeMismatch(
+                key.to_string(),
+                type_name.to_string(),
+                std::any::type_name::<T>().to_string(),
+            ));
+        }
+        Some(_) => {}
     }
 
     storage::set_value(key, Box::new(crate::value::LocalValue(value)));

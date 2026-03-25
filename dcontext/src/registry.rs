@@ -150,7 +150,7 @@ where
         }
     }
 
-    let mut registry = REGISTRY.write().unwrap();
+    let mut registry = REGISTRY.write().expect("registry lock poisoned");
     let tid = TypeId::of::<T>();
 
     if let Some(existing) = registry.get(key) {
@@ -241,7 +241,7 @@ pub fn try_register_local<T>(key: &'static str) -> Result<(), ContextError>
 where
     T: Clone + Default + Send + Sync + 'static,
 {
-    let mut registry = REGISTRY.write().unwrap();
+    let mut registry = REGISTRY.write().expect("registry lock poisoned");
     let tid = TypeId::of::<T>();
 
     if let Some(existing) = registry.get(key) {
@@ -295,7 +295,7 @@ where
     TOld: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     TCurrent: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    let mut registry = REGISTRY.write().unwrap();
+    let mut registry = REGISTRY.write().expect("registry lock poisoned");
 
     let reg = registry.get_mut(key).ok_or_else(|| {
         ContextError::NotRegistered(key.to_string())
@@ -354,7 +354,7 @@ where
 pub(crate) fn is_local(key: &str) -> bool {
     REGISTRY
         .read()
-        .unwrap()
+        .expect("registry lock poisoned")
         .get(key)
         .map(|r| r.local_only)
         .unwrap_or(false)
@@ -365,7 +365,7 @@ pub(crate) fn with_registration<R>(
     key: &str,
     f: impl FnOnce(&Registration) -> R,
 ) -> Option<R> {
-    let registry = REGISTRY.read().unwrap();
+    let registry = REGISTRY.read().expect("registry lock poisoned");
     registry.get(key).map(f)
 }
 
@@ -379,7 +379,7 @@ pub(crate) struct SerializationInfo {
 /// Single-lookup extraction of everything `serialize_context` needs.
 /// The lock is released before the caller invokes any closures.
 pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
-    let registry = REGISTRY.read().unwrap();
+    let registry = REGISTRY.read().expect("registry lock poisoned");
     registry.get(key).map(|r| SerializationInfo {
         local_only: r.local_only,
         key_version: r.key_version,
@@ -389,12 +389,12 @@ pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
 
 /// Check if a key is registered.
 pub(crate) fn is_registered(key: &str) -> bool {
-    REGISTRY.read().unwrap().contains_key(key)
+    REGISTRY.read().expect("registry lock poisoned").contains_key(key)
 }
 
 /// Get the TypeId for a registered key.
 pub(crate) fn type_id_for(key: &str) -> Option<TypeId> {
-    REGISTRY.read().unwrap().get(key).map(|r| r.type_id)
+    REGISTRY.read().expect("registry lock poisoned").get(key).map(|r| r.type_id)
 }
 
 #[cfg(test)]
