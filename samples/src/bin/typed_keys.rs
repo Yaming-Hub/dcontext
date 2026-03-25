@@ -33,6 +33,12 @@ fn main() {
     USER_INFO.register();
     FEATURE_FLAGS.register();
 
+    // Register additional keys before freezing.
+    let another: ContextKey<RequestId> = ContextKey::new("another_key");
+    another.register();
+
+    dcontext::initialize();
+
     // Set values — no turbofish, no string key at call site.
     REQUEST_ID.set(RequestId("req-typed-001".into()));
     USER_INFO.set(UserInfo { id: 42, name: "Alice".into() });
@@ -53,8 +59,6 @@ fn main() {
     println!("\n[after scope] request_id = {:?}", REQUEST_ID.get()); // reverted
 
     // try_get returns Ok(None) for registered-but-unset keys.
-    let another: ContextKey<RequestId> = ContextKey::new("another_key");
-    another.register();
     match another.try_get() {
         Ok(None) => println!("\n'another_key' is registered but not set"),
         Ok(Some(v)) => println!("\n'another_key' = {:?}", v),

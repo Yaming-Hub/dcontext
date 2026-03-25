@@ -8,7 +8,7 @@
 //! Usage: `cargo run --bin versioned_registration`
 
 use dcontext::{
-    register_with, set_context, get_context, scope,
+    register_with, initialize, set_context, get_context, scope,
     serialize_context, deserialize_context,
 };
 use serde::{Serialize, Deserialize};
@@ -29,11 +29,17 @@ struct TraceContextV2 {
 fn main() {
     println!("=== Versioned Registration ===\n");
 
+    // Register all keys upfront, then freeze the registry.
+    register_with::<TraceContextV2>("trace_ctx_v2_same", |o| o.version(2));
+    register_with::<TraceContextV1>("trace_ctx_v1_demo", |o| o.version(1));
+    register_with::<TraceContextV2>("trace_ctx_v2_demo", |o| o.version(2));
+    register_with::<TraceContextV1>("trace_ctx_unknown", |o| o.version(1));
+    initialize();
+
     // --- Scenario 1: Same version on both sides ---
     println!("1. Same version (v2 → v2): success");
     {
         // Sender registers v2 and serializes.
-        register_with::<TraceContextV2>("trace_ctx_v2_same", |o| o.version(2));
         set_context("trace_ctx_v2_same", TraceContextV2 {
             trace_id: "tid-001".into(),
             span_id: "span-42".into(),
@@ -57,12 +63,10 @@ fn main() {
 
     // Show the version is embedded in the wire format.
     {
-        register_with::<TraceContextV1>("trace_ctx_v1_demo", |o| o.version(1));
         set_context("trace_ctx_v1_demo", TraceContextV1 {
             trace_id: "tid-v1".into(),
         });
 
-        register_with::<TraceContextV2>("trace_ctx_v2_demo", |o| o.version(2));
         set_context("trace_ctx_v2_demo", TraceContextV2 {
             trace_id: "tid-v2".into(),
             span_id: "span-v2".into(),
@@ -76,7 +80,6 @@ fn main() {
     // --- Scenario 3: Unknown key on receiver ---
     println!("\n3. Unknown key on receiver: silently skipped");
     {
-        register_with::<TraceContextV1>("trace_ctx_unknown", |o| o.version(1));
         set_context("trace_ctx_unknown", TraceContextV1 {
             trace_id: "tid-003".into(),
         });

@@ -5,7 +5,7 @@
 //!
 //! Usage: `cargo run --bin worker_pool`
 
-use dcontext::{register, set_context, get_context, scope, snapshot, attach};
+use dcontext::{register, initialize, set_context, get_context, scope, snapshot, attach};
 use serde::{Serialize, Deserialize};
 use std::sync::mpsc;
 
@@ -18,6 +18,7 @@ struct TenantId(String);
 fn main() {
     register::<RequestId>("request_id");
     register::<TenantId>("tenant_id");
+    initialize();
 
     // Simulate processing multiple requests, each with its own context.
     let requests = vec![

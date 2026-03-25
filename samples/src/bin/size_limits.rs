@@ -6,7 +6,7 @@
 //! Usage: `cargo run --bin size_limits`
 
 use dcontext::{
-    register, set_context,
+    register, initialize, set_context,
     serialize_context, set_max_context_size, max_context_size,
     ContextError,
 };
@@ -17,6 +17,7 @@ struct Payload(String);
 
 fn main() {
     register::<Payload>("payload");
+    initialize();
 
     // Set a small payload — serialization works.
     set_context("payload", Payload("small".into()));

@@ -7,7 +7,7 @@
 //! Usage: `cargo run --bin async_tasks`
 
 use dcontext::{
-    register, set_context, get_context, scope, snapshot,
+    register, initialize, set_context, get_context, scope, snapshot,
     with_context, spawn_with_context_async, force_thread_local,
 };
 use serde::{Serialize, Deserialize};
@@ -22,6 +22,7 @@ struct SpanId(u64);
 async fn main() {
     register::<RequestId>("request_id");
     register::<SpanId>("span_id");
+    initialize();
 
     // Set up initial context (using force_thread_local since we're
     // at the top level of main, before any with_context wrapper).

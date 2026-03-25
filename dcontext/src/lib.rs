@@ -9,7 +9,7 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use dcontext::{register, enter_scope, get_context, set_context};
+//! use dcontext::{register, initialize, enter_scope, get_context, set_context};
 //! use serde::{Serialize, Deserialize};
 //!
 //! #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -17,6 +17,7 @@
 //!
 //! # fn main() {
 //! register::<RequestId>("request_id");
+//! initialize(); // freeze registry — all reads are lock-free after this
 //!
 //! let _guard = enter_scope();
 //! set_context("request_id", RequestId("req-123".into()));
@@ -55,6 +56,7 @@ pub use context_key::ContextKey;
 pub use registry::{register, try_register, register_with, try_register_with,
                    register_local, try_register_local,
                    register_migration, try_register_migration,
+                   initialize, try_initialize,
                    RegistrationOptions};
 
 // ── Scope management ───────────────────────────────────────────

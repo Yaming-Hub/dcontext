@@ -7,7 +7,7 @@
 //! Usage: `cargo run --bin custom_codec`
 
 use dcontext::{
-    register_with, register, set_context, get_context,
+    register_with, register, initialize, set_context, get_context,
     scope, serialize_context, deserialize_context,
 };
 use serde::{Serialize, Deserialize};
@@ -32,8 +32,7 @@ fn main() {
 
     // Register RequestId with default bincode (fast, compact).
     register::<RequestId>("request_id");
-
-    // Set values.
+    initialize();
     set_context("app_config", AppConfig {
         feature_flags: vec!["dark-mode".into(), "beta-api".into()],
         max_retries: 3,

@@ -6,7 +6,7 @@
 //!
 //! Usage: `cargo run --bin cross_thread`
 
-use dcontext::{register, set_context, get_context, spawn_with_context, wrap_with_context};
+use dcontext::{register, initialize, set_context, get_context, spawn_with_context, wrap_with_context};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -14,6 +14,7 @@ struct TraceId(String);
 
 fn main() {
     register::<TraceId>("trace_id");
+    initialize();
     set_context("trace_id", TraceId("trace-abc-123".into()));
 
     // --- spawn_with_context: library-controlled thread ---

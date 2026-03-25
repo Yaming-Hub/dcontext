@@ -10,7 +10,7 @@
 //! Usage: `cargo run --bin runtime_agnostic`
 
 use dcontext::{
-    register, set_context, get_context, scope, force_thread_local,
+    register, initialize, set_context, get_context, scope, force_thread_local,
     with_context_future, ContextFuture, snapshot,
 };
 use serde::{Serialize, Deserialize};
@@ -41,6 +41,7 @@ async fn handle_request() -> String {
 async fn main() {
     register::<TraceId>("trace_id");
     register::<UserId>("user_id");
+    initialize();
 
     // Set up context in thread-local (force_thread_local because we're
     // inside #[tokio::main] but before any ContextFuture wrapper).

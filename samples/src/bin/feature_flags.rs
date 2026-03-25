@@ -6,7 +6,7 @@
 //!
 //! Usage: `cargo run --bin feature_flags`
 
-use dcontext::{register, set_context, get_context, scope};
+use dcontext::{register, initialize, set_context, get_context, scope};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,6 +28,7 @@ impl Default for FeatureFlags {
 
 fn main() {
     register::<FeatureFlags>("features");
+    initialize();
 
     // Simulate per-request feature flag resolution.
     set_context("features", FeatureFlags {

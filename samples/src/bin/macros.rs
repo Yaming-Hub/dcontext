@@ -24,6 +24,7 @@ fn main() {
         "span_id"   => SpanId,
         "tenant_id" => TenantId,
     }
+    dcontext::initialize();
 
     set_context("trace_id", TraceId("trace-root".into()));
     set_context("tenant_id", TenantId("acme-corp".into()));

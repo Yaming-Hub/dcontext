@@ -1,6 +1,6 @@
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::ContextError;
 use crate::value::ContextValue;
@@ -8,8 +8,10 @@ use crate::value::ContextValue;
 /// Type alias for versioned deserializer functions.
 type DeserializeFn = Box<dyn Fn(&[u8]) -> Result<Box<dyn ContextValue>, ContextError> + Send + Sync>;
 
-/// Type alias for custom serializer functions (Arc so it can be cloned out of the lock).
+/// Type alias for custom serializer functions (Arc so it can be cloned without the lock).
 type SerializeFn = Arc<dyn Fn(&dyn ContextValue) -> Result<Vec<u8>, ContextError> + Send + Sync>;
+
+type RegistryMap = HashMap<&'static str, Registration>;
 
 /// Metadata stored for each registered context key.
 pub(crate) struct Registration {
@@ -18,8 +20,6 @@ pub(crate) struct Registration {
     /// The current (latest) version used for serialization.
     pub key_version: u32,
     /// Versioned deserializers: wire_version → deserializer function.
-    /// Each function deserializes bytes from that specific wire version
-    /// into the current type (possibly via migration/conversion).
     pub deserializers: HashMap<u32, DeserializeFn>,
     pub type_name: &'static str,
     /// If true, this key is excluded from serialization.
@@ -28,24 +28,61 @@ pub(crate) struct Registration {
     pub serialize_fn: Option<SerializeFn>,
 }
 
-static REGISTRY: std::sync::LazyLock<RwLock<HashMap<&'static str, Registration>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+// ── Two-phase storage ──────────────────────────────────────────
+//
+// Build phase  : registrations go into BUILD (Mutex-protected).
+// Frozen phase : `initialize()` drains BUILD into FROZEN (OnceLock).
+//                All subsequent reads are lock-free via FROZEN.
+//
+// If `initialize()` is never called (e.g. in tests), reads fall back
+// to the Mutex — correct but slightly slower.
 
-/// Acquire a read guard, recovering from lock poisoning.
-///
-/// The registry is append-only (entries are never removed or structurally
-/// mutated), so the data remains valid even if another thread panicked
-/// while holding the lock.
-fn read_registry() -> std::sync::RwLockReadGuard<'static, HashMap<&'static str, Registration>> {
-    REGISTRY.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Mutable map used during the registration (build) phase.
+/// Set to `None` after `initialize()` drains it into FROZEN.
+static BUILD: std::sync::LazyLock<Mutex<Option<RegistryMap>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Some(HashMap::new())));
+
+/// Immutable map used after `initialize()`. Lock-free reads.
+static FROZEN: OnceLock<RegistryMap> = OnceLock::new();
+
+/// Lock the build-phase map for writing, recovering from poisoning.
+fn lock_build() -> std::sync::MutexGuard<'static, Option<RegistryMap>> {
+    BUILD.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Acquire a write guard, recovering from lock poisoning.
+// ── Initialization ─────────────────────────────────────────────
+
+/// Freeze the registry. After this call, all reads are lock-free and
+/// further registrations return [`ContextError::RegistryFrozen`].
 ///
-/// See [`read_registry`] for rationale.
-fn write_registry() -> std::sync::RwLockWriteGuard<'static, HashMap<&'static str, Registration>> {
-    REGISTRY.write().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Call this once, after all `register*` / `register_migration` calls,
+/// before any `get_context` / `set_context` / `serialize_context` calls.
+///
+/// ```rust,ignore
+/// dcontext::register::<RequestId>("request_id");
+/// dcontext::register_with::<TraceV2>("trace", |o| o.version(2));
+/// dcontext::register_migration::<TraceV1, TraceV2>("trace", 1, migrate);
+/// dcontext::initialize();  // ← freeze
+/// ```
+pub fn initialize() {
+    let map = lock_build()
+        .take()
+        .expect("dcontext::initialize called more than once");
+    FROZEN
+        .set(map)
+        .ok()
+        .expect("dcontext::initialize called more than once");
 }
+
+/// Try to freeze the registry. Returns `Err` if already frozen.
+pub fn try_initialize() -> Result<(), ContextError> {
+    let map = lock_build()
+        .take()
+        .ok_or(ContextError::RegistryFrozen)?;
+    FROZEN.set(map).map_err(|_| ContextError::RegistryFrozen)
+}
+
+// ── Registration options builder ───────────────────────────────
 
 /// Builder for configuring context registration options.
 ///
@@ -112,8 +149,11 @@ impl<T: 'static> RegistrationOptions<T> {
     }
 }
 
+// ── Registration functions ─────────────────────────────────────
+
 /// Register a context type with default options (version 1, bincode codec).
-/// Idempotent if same key+type; errors if key registered with a different type.
+/// Idempotent if same key+type; errors if key registered with a different type,
+/// or if the registry has already been frozen via [`initialize`].
 pub fn try_register<T>(key: &'static str) -> Result<(), ContextError>
 where
     T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
@@ -166,7 +206,8 @@ where
         }
     }
 
-    let mut registry = write_registry();
+    let mut guard = lock_build();
+    let registry = guard.as_mut().ok_or(ContextError::RegistryFrozen)?;
     let tid = TypeId::of::<T>();
 
     if let Some(existing) = registry.get(key) {
@@ -257,7 +298,8 @@ pub fn try_register_local<T>(key: &'static str) -> Result<(), ContextError>
 where
     T: Clone + Default + Send + Sync + 'static,
 {
-    let mut registry = write_registry();
+    let mut guard = lock_build();
+    let registry = guard.as_mut().ok_or(ContextError::RegistryFrozen)?;
     let tid = TypeId::of::<T>();
 
     if let Some(existing) = registry.get(key) {
@@ -295,12 +337,14 @@ where
 /// with `wire_version == old_version`, they are deserialized as `TOld` and
 /// then converted to `TCurrent` via the provided `migrate` function.
 ///
-/// This enables rolling upgrades where old and new nodes coexist:
+/// Must be called before [`initialize`].
+///
 /// ```rust,ignore
 /// dcontext::register_with::<TraceContextV2>("trace", |o| o.version(2));
 /// dcontext::register_migration::<TraceContextV1, TraceContextV2>(
 ///     "trace", 1, |v1| TraceContextV2 { trace_id: v1.trace_id, span_id: String::new() }
 /// );
+/// dcontext::initialize();
 /// ```
 pub fn try_register_migration<TOld, TCurrent>(
     key: &'static str,
@@ -311,7 +355,8 @@ where
     TOld: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     TCurrent: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    let mut registry = write_registry();
+    let mut guard = lock_build();
+    let registry = guard.as_mut().ok_or(ContextError::RegistryFrozen)?;
 
     let reg = registry.get_mut(key).ok_or_else(|| {
         ContextError::NotRegistered(key.to_string())
@@ -366,21 +411,23 @@ where
         .expect("dcontext::register_migration failed");
 }
 
-/// Check if a key is registered as local-only.
-pub(crate) fn is_local(key: &str) -> bool {
-    read_registry()
-        .get(key)
-        .map(|r| r.local_only)
-        .unwrap_or(false)
-}
+// ── Read functions (lock-free after initialize) ────────────────
 
 /// Look up a registration by key. Returns None if not registered.
+///
+/// After [`initialize`]: lock-free (OnceLock deref + HashMap lookup).
+/// Before [`initialize`]: acquires Mutex (correct, but slower).
 pub(crate) fn with_registration<R>(
     key: &str,
     f: impl FnOnce(&Registration) -> R,
 ) -> Option<R> {
-    let registry = read_registry();
-    registry.get(key).map(f)
+    // Fast path: frozen registry (no locks).
+    if let Some(frozen) = FROZEN.get() {
+        return frozen.get(key).map(f);
+    }
+    // Slow path: build-phase fallback (tests / pre-init).
+    let guard = lock_build();
+    guard.as_ref().and_then(|map| map.get(key).map(f))
 }
 
 /// Info needed by `serialize_context`, fetched in a single lookup.
@@ -391,24 +438,28 @@ pub(crate) struct SerializationInfo {
 }
 
 /// Single-lookup extraction of everything `serialize_context` needs.
-/// The lock is released before the caller invokes any closures.
 pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
-    let registry = read_registry();
-    registry.get(key).map(|r| SerializationInfo {
+    let extract = |r: &Registration| SerializationInfo {
         local_only: r.local_only,
         key_version: r.key_version,
         serialize_fn: r.serialize_fn.clone(),
-    })
+    };
+
+    if let Some(frozen) = FROZEN.get() {
+        return frozen.get(key).map(extract);
+    }
+    let guard = lock_build();
+    guard.as_ref().and_then(|map| map.get(key).map(extract))
 }
 
+#[cfg(test)]
 /// Check if a key is registered.
 pub(crate) fn is_registered(key: &str) -> bool {
-    read_registry().contains_key(key)
-}
-
-/// Get the TypeId for a registered key.
-pub(crate) fn type_id_for(key: &str) -> Option<TypeId> {
-    read_registry().get(key).map(|r| r.type_id)
+    if let Some(frozen) = FROZEN.get() {
+        return frozen.contains_key(key);
+    }
+    let guard = lock_build();
+    guard.as_ref().map_or(false, |map| map.contains_key(key))
 }
 
 #[cfg(test)]

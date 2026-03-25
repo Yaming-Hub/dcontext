@@ -8,7 +8,7 @@
 //! Usage: `cargo run --bin version_migration`
 
 use dcontext::{
-    register_with, register_migration, set_context, get_context,
+    register_with, register_migration, initialize, set_context, get_context,
     scope, serialize_context, deserialize_context, make_wire_bytes,
 };
 use serde::{Serialize, Deserialize};
@@ -43,6 +43,7 @@ fn main() {
             sampled: true,           // default: sampled
         }
     });
+    initialize();
 
     // --- Scenario 1: Current version roundtrip (V2 → V2) ---
     println!("1. Current version roundtrip (V2 → V2):");

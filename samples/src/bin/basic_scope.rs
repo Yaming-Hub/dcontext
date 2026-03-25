@@ -5,7 +5,7 @@
 //!
 //! Usage: `cargo run --bin basic_scope`
 
-use dcontext::{register, enter_scope, get_context, set_context, scope};
+use dcontext::{register, initialize, enter_scope, get_context, set_context, scope};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -18,6 +18,7 @@ fn main() {
     // 1. Register context types at startup.
     register::<RequestId>("request_id");
     register::<UserId>("user_id");
+    initialize();
 
     // 2. Set values in the root scope.
     set_context("request_id", RequestId("req-001".into()));

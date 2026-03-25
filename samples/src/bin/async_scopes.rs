@@ -6,7 +6,7 @@
 //! Usage: `cargo run --bin async_scopes`
 
 use dcontext::{
-    register, set_context, get_context, scope_async, snapshot,
+    register, initialize, set_context, get_context, scope_async, snapshot,
     with_context, spawn_with_context_async, force_thread_local,
 };
 use serde::{Serialize, Deserialize};
@@ -25,6 +25,7 @@ async fn simulate_io() {
 async fn main() {
     register::<RequestId>("request_id");
     register::<Phase>("phase");
+    initialize();
 
     let snap = force_thread_local(|| {
         set_context("request_id", RequestId("req-async-scoped".into()));
