@@ -31,6 +31,22 @@ pub(crate) struct Registration {
 static REGISTRY: std::sync::LazyLock<RwLock<HashMap<&'static str, Registration>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Acquire a read guard, recovering from lock poisoning.
+///
+/// The registry is append-only (entries are never removed or structurally
+/// mutated), so the data remains valid even if another thread panicked
+/// while holding the lock.
+fn read_registry() -> std::sync::RwLockReadGuard<'static, HashMap<&'static str, Registration>> {
+    REGISTRY.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Acquire a write guard, recovering from lock poisoning.
+///
+/// See [`read_registry`] for rationale.
+fn write_registry() -> std::sync::RwLockWriteGuard<'static, HashMap<&'static str, Registration>> {
+    REGISTRY.write().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Builder for configuring context registration options.
 ///
 /// Obtained via the callback in [`try_register_with`] / [`register_with`].
@@ -150,7 +166,7 @@ where
         }
     }
 
-    let mut registry = REGISTRY.write().expect("registry lock poisoned");
+    let mut registry = write_registry();
     let tid = TypeId::of::<T>();
 
     if let Some(existing) = registry.get(key) {
@@ -241,7 +257,7 @@ pub fn try_register_local<T>(key: &'static str) -> Result<(), ContextError>
 where
     T: Clone + Default + Send + Sync + 'static,
 {
-    let mut registry = REGISTRY.write().expect("registry lock poisoned");
+    let mut registry = write_registry();
     let tid = TypeId::of::<T>();
 
     if let Some(existing) = registry.get(key) {
@@ -295,7 +311,7 @@ where
     TOld: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     TCurrent: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    let mut registry = REGISTRY.write().expect("registry lock poisoned");
+    let mut registry = write_registry();
 
     let reg = registry.get_mut(key).ok_or_else(|| {
         ContextError::NotRegistered(key.to_string())
@@ -352,9 +368,7 @@ where
 
 /// Check if a key is registered as local-only.
 pub(crate) fn is_local(key: &str) -> bool {
-    REGISTRY
-        .read()
-        .expect("registry lock poisoned")
+    read_registry()
         .get(key)
         .map(|r| r.local_only)
         .unwrap_or(false)
@@ -365,7 +379,7 @@ pub(crate) fn with_registration<R>(
     key: &str,
     f: impl FnOnce(&Registration) -> R,
 ) -> Option<R> {
-    let registry = REGISTRY.read().expect("registry lock poisoned");
+    let registry = read_registry();
     registry.get(key).map(f)
 }
 
@@ -379,7 +393,7 @@ pub(crate) struct SerializationInfo {
 /// Single-lookup extraction of everything `serialize_context` needs.
 /// The lock is released before the caller invokes any closures.
 pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
-    let registry = REGISTRY.read().expect("registry lock poisoned");
+    let registry = read_registry();
     registry.get(key).map(|r| SerializationInfo {
         local_only: r.local_only,
         key_version: r.key_version,
@@ -389,12 +403,12 @@ pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
 
 /// Check if a key is registered.
 pub(crate) fn is_registered(key: &str) -> bool {
-    REGISTRY.read().expect("registry lock poisoned").contains_key(key)
+    read_registry().contains_key(key)
 }
 
 /// Get the TypeId for a registered key.
 pub(crate) fn type_id_for(key: &str) -> Option<TypeId> {
-    REGISTRY.read().expect("registry lock poisoned").get(key).map(|r| r.type_id)
+    read_registry().get(key).map(|r| r.type_id)
 }
 
 #[cfg(test)]
