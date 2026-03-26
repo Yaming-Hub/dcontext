@@ -26,12 +26,25 @@ pub fn serialize_context() -> Result<Vec<u8>, ContextError> {
     let mut entries = Vec::new();
 
     for (key, val) in &values {
+        // Single registry lookup: fetch local_only, key_version, and
+        // serialize_fn (Arc-cloned) so no work runs under the lock.
+        let info = registry::get_serialization_info(key);
+
         // Skip local-only entries — they don't cross process boundaries.
-        if val.is_local() {
+        // Check both the registry flag and the value trait method (the
+        // latter covers values stored via set_context_local).
+        let is_local = val.is_local()
+            || info.as_ref().map_or(false, |i| i.local_only);
+        if is_local {
             continue;
         }
-        let value_bytes = val.serialize_value()?;
-        let key_version = registry::with_registration(key, |r| r.key_version).unwrap_or(1);
+
+        // Use custom serialize_fn if registered, otherwise default (bincode via ContextValue).
+        let value_bytes = match info.as_ref().and_then(|i| i.serialize_fn.as_ref()) {
+            Some(custom_ser) => custom_ser(val.as_ref())?,
+            None => val.serialize_value()?,
+        };
+        let key_version = info.as_ref().map_or(1, |i| i.key_version);
         entries.push(WireEntry {
             key: key.to_string(),
             key_version,

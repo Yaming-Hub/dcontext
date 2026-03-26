@@ -5,7 +5,7 @@
 //!
 //! Usage: `cargo run --bin basic_scope`
 
-use dcontext::{register, enter_scope, get_context, set_context, scope};
+use dcontext::{RegistryBuilder, initialize, enter_scope, get_context, set_context, scope};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -16,8 +16,10 @@ struct UserId(u64);
 
 fn main() {
     // 1. Register context types at startup.
-    register::<RequestId>("request_id");
-    register::<UserId>("user_id");
+    let mut builder = RegistryBuilder::new();
+    builder.register::<RequestId>("request_id");
+    builder.register::<UserId>("user_id");
+    initialize(builder);
 
     // 2. Set values in the root scope.
     set_context("request_id", RequestId("req-001".into()));

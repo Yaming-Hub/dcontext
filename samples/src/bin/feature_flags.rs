@@ -6,7 +6,7 @@
 //!
 //! Usage: `cargo run --bin feature_flags`
 
-use dcontext::{register, set_context, get_context, scope};
+use dcontext::{RegistryBuilder, initialize, set_context, get_context, scope};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,7 +27,9 @@ impl Default for FeatureFlags {
 }
 
 fn main() {
-    register::<FeatureFlags>("features");
+    let mut builder = RegistryBuilder::new();
+    builder.register::<FeatureFlags>("features");
+    initialize(builder);
 
     // Simulate per-request feature flag resolution.
     set_context("features", FeatureFlags {

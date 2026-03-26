@@ -54,6 +54,7 @@ dependencies = [
  "bincode",
  "dcontext",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

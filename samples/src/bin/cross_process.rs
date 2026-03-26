@@ -6,7 +6,7 @@
 //! Usage: `cargo run --bin cross_process`
 
 use dcontext::{
-    register, set_context, get_context, scope,
+    RegistryBuilder, initialize, set_context, get_context, scope,
     serialize_context, deserialize_context,
     serialize_context_string, deserialize_context_string,
 };
@@ -25,8 +25,10 @@ struct AuthInfo {
 }
 
 fn main() {
-    register::<TraceContext>("trace_context");
-    register::<AuthInfo>("auth_info");
+    let mut builder = RegistryBuilder::new();
+    builder.register::<TraceContext>("trace_context");
+    builder.register::<AuthInfo>("auth_info");
+    initialize(builder);
 
     // --- Sender side: serialize context ---
     set_context("trace_context", TraceContext {

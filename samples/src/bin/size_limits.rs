@@ -6,7 +6,7 @@
 //! Usage: `cargo run --bin size_limits`
 
 use dcontext::{
-    register, set_context,
+    RegistryBuilder, initialize, set_context,
     serialize_context, set_max_context_size, max_context_size,
     ContextError,
 };
@@ -16,7 +16,9 @@ use serde::{Serialize, Deserialize};
 struct Payload(String);
 
 fn main() {
-    register::<Payload>("payload");
+    let mut builder = RegistryBuilder::new();
+    builder.register::<Payload>("payload");
+    initialize(builder);
 
     // Set a small payload — serialization works.
     set_context("payload", Payload("small".into()));

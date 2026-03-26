@@ -26,4 +26,7 @@ pub enum ContextError {
 
     #[error("no active scope: {0}")]
     NoActiveScope(String),
+
+    #[error("registry is already initialized; registrations must happen before initialize()")]
+    RegistryFrozen,
 }

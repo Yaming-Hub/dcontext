@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::error::ContextError;
+use crate::registry::RegistryBuilder;
 
 /// A typed handle to a registered context entry.
 ///
@@ -8,7 +9,11 @@ use crate::error::ContextError;
 ///
 /// ```rust,ignore
 /// static REQUEST_ID: ContextKey<RequestId> = ContextKey::new("request_id");
-/// REQUEST_ID.register();
+///
+/// let mut builder = RegistryBuilder::new();
+/// REQUEST_ID.register_on(&mut builder);
+/// dcontext::initialize(builder);
+///
 /// REQUEST_ID.set(RequestId("req-123".into()));
 /// let rid = REQUEST_ID.get();
 /// ```
@@ -30,14 +35,14 @@ where
         }
     }
 
-    /// Register this key's type. Idempotent if same type.
-    pub fn register(&self) {
-        crate::register::<T>(self.key);
+    /// Register this key on a builder. Panics on conflict.
+    pub fn register_on(&self, builder: &mut RegistryBuilder) {
+        builder.register::<T>(self.key);
     }
 
-    /// Try to register this key's type.
-    pub fn try_register(&self) -> Result<(), ContextError> {
-        crate::try_register::<T>(self.key)
+    /// Try to register this key on a builder.
+    pub fn try_register_on(&self, builder: &mut RegistryBuilder) -> Result<(), ContextError> {
+        builder.try_register::<T>(self.key)
     }
 
     /// Get the value. Returns `T::default()` if not set.

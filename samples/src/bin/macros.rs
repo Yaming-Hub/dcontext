@@ -5,7 +5,7 @@
 //!
 //! Usage: `cargo run --bin macros`
 
-use dcontext::{register_contexts, with_scope, get_context, set_context};
+use dcontext::{with_scope, get_context, set_context, RegistryBuilder};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -19,11 +19,13 @@ struct TenantId(String);
 
 fn main() {
     // Bulk registration with a single macro call.
-    register_contexts! {
+    let mut builder = RegistryBuilder::new();
+    dcontext::register_contexts!(builder, {
         "trace_id"  => TraceId,
         "span_id"   => SpanId,
         "tenant_id" => TenantId,
-    }
+    });
+    dcontext::initialize(builder);
 
     set_context("trace_id", TraceId("trace-root".into()));
     set_context("tenant_id", TenantId("acme-corp".into()));

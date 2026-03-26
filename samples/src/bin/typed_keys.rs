@@ -5,7 +5,7 @@
 //!
 //! Usage: `cargo run --bin typed_keys`
 
-use dcontext::ContextKey;
+use dcontext::{ContextKey, RegistryBuilder};
 use serde::{Serialize, Deserialize};
 
 // Define typed keys as statics — the string is only for serialization/diagnostics.
@@ -29,9 +29,16 @@ struct Flags {
 
 fn main() {
     // Register all keys (type is inferred from the ContextKey).
-    REQUEST_ID.register();
-    USER_INFO.register();
-    FEATURE_FLAGS.register();
+    let mut builder = RegistryBuilder::new();
+    REQUEST_ID.register_on(&mut builder);
+    USER_INFO.register_on(&mut builder);
+    FEATURE_FLAGS.register_on(&mut builder);
+
+    // Register additional keys before freezing.
+    let another: ContextKey<RequestId> = ContextKey::new("another_key");
+    another.register_on(&mut builder);
+
+    dcontext::initialize(builder);
 
     // Set values — no turbofish, no string key at call site.
     REQUEST_ID.set(RequestId("req-typed-001".into()));
@@ -53,8 +60,6 @@ fn main() {
     println!("\n[after scope] request_id = {:?}", REQUEST_ID.get()); // reverted
 
     // try_get returns Ok(None) for registered-but-unset keys.
-    let another: ContextKey<RequestId> = ContextKey::new("another_key");
-    another.register();
     match another.try_get() {
         Ok(None) => println!("\n'another_key' is registered but not set"),
         Ok(Some(v)) => println!("\n'another_key' = {:?}", v),

@@ -1,6 +1,6 @@
 //! # Sample 12: Versioned Registration
 //!
-//! Demonstrates `register_versioned` for wire format evolution. When a context
+//! Demonstrates `register_with` + `.version()` for wire format evolution. When a context
 //! struct's schema changes between releases, per-key versioning ensures that
 //! nodes running different versions can detect mismatches instead of silently
 //! deserializing garbage.
@@ -8,7 +8,7 @@
 //! Usage: `cargo run --bin versioned_registration`
 
 use dcontext::{
-    register_versioned, set_context, get_context, scope,
+    RegistryBuilder, initialize, set_context, get_context, scope,
     serialize_context, deserialize_context,
 };
 use serde::{Serialize, Deserialize};
@@ -29,11 +29,18 @@ struct TraceContextV2 {
 fn main() {
     println!("=== Versioned Registration ===\n");
 
+    // Register all keys upfront, then freeze the registry.
+    let mut builder = RegistryBuilder::new();
+    builder.register_with::<TraceContextV2>("trace_ctx_v2_same", |o| o.version(2));
+    builder.register_with::<TraceContextV1>("trace_ctx_v1_demo", |o| o.version(1));
+    builder.register_with::<TraceContextV2>("trace_ctx_v2_demo", |o| o.version(2));
+    builder.register_with::<TraceContextV1>("trace_ctx_unknown", |o| o.version(1));
+    initialize(builder);
+
     // --- Scenario 1: Same version on both sides ---
     println!("1. Same version (v2 → v2): success");
     {
         // Sender registers v2 and serializes.
-        register_versioned::<TraceContextV2>("trace_ctx_v2_same", 2);
         set_context("trace_ctx_v2_same", TraceContextV2 {
             trace_id: "tid-001".into(),
             span_id: "span-42".into(),
@@ -57,12 +64,10 @@ fn main() {
 
     // Show the version is embedded in the wire format.
     {
-        register_versioned::<TraceContextV1>("trace_ctx_v1_demo", 1);
         set_context("trace_ctx_v1_demo", TraceContextV1 {
             trace_id: "tid-v1".into(),
         });
 
-        register_versioned::<TraceContextV2>("trace_ctx_v2_demo", 2);
         set_context("trace_ctx_v2_demo", TraceContextV2 {
             trace_id: "tid-v2".into(),
             span_id: "span-v2".into(),
@@ -76,7 +81,6 @@ fn main() {
     // --- Scenario 3: Unknown key on receiver ---
     println!("\n3. Unknown key on receiver: silently skipped");
     {
-        register_versioned::<TraceContextV1>("trace_ctx_unknown", 1);
         set_context("trace_ctx_unknown", TraceContextV1 {
             trace_id: "tid-003".into(),
         });
