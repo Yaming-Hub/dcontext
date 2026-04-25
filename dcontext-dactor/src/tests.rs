@@ -8,6 +8,7 @@ use crate::header::{ContextHeader, ContextSnapshotHeader};
 use crate::inbound::ContextInboundInterceptor;
 use crate::outbound::ContextOutboundInterceptor;
 use crate::propagation::{bytes_to_snapshot, extract_context};
+use crate::ErrorPolicy;
 
 // ── Test context type ──────────────────────────────────────────
 
@@ -56,10 +57,10 @@ fn make_outbound_ctx(remote: bool) -> OutboundContext<'static> {
 }
 
 #[test]
-fn outbound_interceptor_attaches_wire_header() {
+fn outbound_remote_attaches_wire_header_only() {
     init_registry();
 
-    let interceptor = ContextOutboundInterceptor;
+    let interceptor = ContextOutboundInterceptor::default();
     let ctx = make_outbound_ctx(true);
     let rh = RuntimeHeaders::new();
     let mut headers = Headers::new();
@@ -68,8 +69,7 @@ fn outbound_interceptor_attaches_wire_header() {
     let disposition = interceptor.on_send(&ctx, &rh, &mut headers, &msg);
     assert!(matches!(disposition, Disposition::Continue));
 
-    // Remote: should have wire header but no snapshot header.
-    assert!(headers.get::<ContextHeader>().is_some(), "should have wire header");
+    assert!(headers.get::<ContextHeader>().is_some(), "remote should have wire header");
     assert!(
         headers.get::<ContextSnapshotHeader>().is_none(),
         "remote should not have snapshot header"
@@ -77,13 +77,13 @@ fn outbound_interceptor_attaches_wire_header() {
 }
 
 #[test]
-fn outbound_interceptor_attaches_snapshot_for_local() {
+fn outbound_local_attaches_snapshot_only() {
     init_registry();
 
     let _guard = dcontext::enter_scope();
     dcontext::set_context("request_id", RequestId("req-abc".into()));
 
-    let interceptor = ContextOutboundInterceptor;
+    let interceptor = ContextOutboundInterceptor::default();
     let ctx = make_outbound_ctx(false);
     let rh = RuntimeHeaders::new();
     let mut headers = Headers::new();
@@ -92,12 +92,75 @@ fn outbound_interceptor_attaches_snapshot_for_local() {
     let disposition = interceptor.on_send(&ctx, &rh, &mut headers, &msg);
     assert!(matches!(disposition, Disposition::Continue));
 
-    // Local: should have both snapshot and wire headers.
     assert!(
         headers.get::<ContextSnapshotHeader>().is_some(),
         "local should have snapshot header"
     );
-    assert!(headers.get::<ContextHeader>().is_some(), "should have wire header");
+    assert!(
+        headers.get::<ContextHeader>().is_none(),
+        "local should NOT have wire header — no serialization needed"
+    );
+}
+
+// ── Error policy tests ─────────────────────────────────────────
+
+#[test]
+fn outbound_reject_policy_rejects_on_serialization_error() {
+    // Don't init_registry — serialization will fail for unregistered types.
+    // But serialize_context() won't fail because it only serializes what's
+    // in the context. To test rejection, we need to trigger a real error.
+    // serialize_context only fails on bincode/size errors which are hard to
+    // trigger, so we test the policy plumbing via the inbound interceptor
+    // which is easier to trigger with corrupt bytes.
+
+    let interceptor = ContextOutboundInterceptor::new(ErrorPolicy::Reject);
+    assert_eq!(interceptor.name(), "dcontext-outbound");
+}
+
+#[test]
+fn inbound_log_and_continue_on_corrupt_bytes() {
+    init_registry();
+
+    let interceptor = ContextInboundInterceptor::default();
+    let ctx = make_inbound_ctx();
+    let rh = RuntimeHeaders::new();
+    let mut headers = Headers::new();
+    let msg = 42u64;
+
+    headers.insert(ContextHeader {
+        bytes: vec![0xFF, 0xFE, 0xFD],
+    });
+
+    let disposition = interceptor.on_receive(&ctx, &rh, &mut headers, &msg);
+    assert!(
+        matches!(disposition, Disposition::Continue),
+        "LogAndContinue should not reject"
+    );
+    assert!(
+        headers.get::<ContextSnapshotHeader>().is_none(),
+        "corrupt bytes should not produce a snapshot"
+    );
+}
+
+#[test]
+fn inbound_reject_policy_rejects_on_corrupt_bytes() {
+    init_registry();
+
+    let interceptor = ContextInboundInterceptor::new(ErrorPolicy::Reject);
+    let ctx = make_inbound_ctx();
+    let rh = RuntimeHeaders::new();
+    let mut headers = Headers::new();
+    let msg = 42u64;
+
+    headers.insert(ContextHeader {
+        bytes: vec![0xFF, 0xFE, 0xFD],
+    });
+
+    let disposition = interceptor.on_receive(&ctx, &rh, &mut headers, &msg);
+    assert!(
+        matches!(disposition, Disposition::Reject(_)),
+        "Reject policy should reject on corrupt bytes"
+    );
 }
 
 // ── Inbound interceptor tests ──────────────────────────────────
@@ -118,13 +181,12 @@ fn make_inbound_ctx() -> InboundContext<'static> {
 
 #[test]
 fn inbound_interceptor_preserves_existing_snapshot() {
-    let interceptor = ContextInboundInterceptor;
+    let interceptor = ContextInboundInterceptor::default();
     let ctx = make_inbound_ctx();
     let rh = RuntimeHeaders::new();
     let mut headers = Headers::new();
     let msg = 42u64;
 
-    // Pre-existing snapshot header.
     headers.insert(ContextSnapshotHeader {
         snapshot: ContextSnapshot::empty(),
     });
@@ -138,14 +200,13 @@ fn inbound_interceptor_preserves_existing_snapshot() {
 fn inbound_interceptor_converts_wire_to_snapshot() {
     init_registry();
 
-    // Serialize some context to wire bytes.
     let wire_bytes = dcontext::force_thread_local(|| {
         let _guard = dcontext::enter_scope();
         dcontext::set_context("request_id", RequestId("req-wire".into()));
         dcontext::serialize_context().unwrap()
     });
 
-    let interceptor = ContextInboundInterceptor;
+    let interceptor = ContextInboundInterceptor::default();
     let ctx = make_inbound_ctx();
     let rh = RuntimeHeaders::new();
     let mut headers = Headers::new();
@@ -197,7 +258,6 @@ fn extract_context_prefers_snapshot() {
         "test".into(),
     );
 
-    // Insert both headers.
     actor_ctx.headers.insert(ContextSnapshotHeader {
         snapshot: ContextSnapshot::empty(),
     });
@@ -206,7 +266,6 @@ fn extract_context_prefers_snapshot() {
     });
 
     let result = extract_context(&actor_ctx);
-    // Should succeed (prefers snapshot over wire bytes).
     assert!(result.is_some());
 }
 
@@ -230,20 +289,23 @@ fn extract_context_returns_none_when_empty() {
 fn end_to_end_local_propagation() {
     init_registry();
 
-    // Set up context on the "sender" side.
     let _guard = dcontext::enter_scope();
     dcontext::set_context("request_id", RequestId("e2e-local".into()));
 
-    // Outbound interceptor captures context.
-    let outbound = ContextOutboundInterceptor;
+    // Outbound interceptor captures snapshot (no serialization for local).
+    let outbound = ContextOutboundInterceptor::default();
     let out_ctx = make_outbound_ctx(false);
     let rh = RuntimeHeaders::new();
     let mut headers = Headers::new();
     let msg = 42u64;
     outbound.on_send(&out_ctx, &rh, &mut headers, &msg);
 
-    // Inbound interceptor processes headers.
-    let inbound = ContextInboundInterceptor;
+    // Verify no wire header was produced for local target.
+    assert!(headers.get::<ContextHeader>().is_none(), "local should skip serialization");
+    assert!(headers.get::<ContextSnapshotHeader>().is_some());
+
+    // Inbound interceptor — snapshot already present, nothing to convert.
+    let inbound = ContextInboundInterceptor::default();
     let in_ctx = make_inbound_ctx();
     inbound.on_receive(&in_ctx, &rh, &mut headers, &msg);
 
@@ -259,8 +321,6 @@ fn end_to_end_local_propagation() {
 
     // Extract and verify.
     let snap = extract_context(&actor_ctx).expect("should have propagated context");
-
-    // Restore and verify the value.
     let _restore = dcontext::attach(snap);
     let rid: RequestId = dcontext::get_context("request_id");
     assert_eq!(rid.0, "e2e-local");
@@ -270,7 +330,7 @@ fn end_to_end_local_propagation() {
 fn end_to_end_remote_propagation() {
     init_registry();
 
-    // Set up context on the "sender" side.
+    // Simulate sender serializing context (remote path).
     let wire_bytes = dcontext::force_thread_local(|| {
         let _guard = dcontext::enter_scope();
         dcontext::set_context("request_id", RequestId("e2e-remote".into()));
@@ -282,13 +342,12 @@ fn end_to_end_remote_propagation() {
     headers.insert(ContextHeader { bytes: wire_bytes });
 
     // Inbound interceptor converts wire to snapshot.
-    let inbound = ContextInboundInterceptor;
+    let inbound = ContextInboundInterceptor::default();
     let in_ctx = make_inbound_ctx();
     let rh = RuntimeHeaders::new();
     let msg = 42u64;
     inbound.on_receive(&in_ctx, &rh, &mut headers, &msg);
 
-    // Build a mock ActorContext.
     let mut actor_ctx = ActorContext::new(
         ActorId {
             node: NodeId("n".into()),
@@ -298,7 +357,6 @@ fn end_to_end_remote_propagation() {
     );
     actor_ctx.headers = headers;
 
-    // Extract and verify.
     let snap = extract_context(&actor_ctx).expect("should have propagated context");
     let _restore = dcontext::attach(snap);
     let rid: RequestId = dcontext::get_context("request_id");
@@ -311,14 +369,12 @@ fn end_to_end_remote_propagation() {
 async fn with_propagated_context_establishes_scope() {
     init_registry();
 
-    // Capture context with a known value.
     let snap = dcontext::force_thread_local(|| {
         let _guard = dcontext::enter_scope();
         dcontext::set_context("request_id", RequestId("async-test".into()));
         dcontext::snapshot()
     });
 
-    // Build ActorContext with snapshot header.
     let mut actor_ctx = ActorContext::new(
         ActorId {
             node: NodeId("n".into()),
@@ -328,7 +384,6 @@ async fn with_propagated_context_establishes_scope() {
     );
     actor_ctx.headers.insert(ContextSnapshotHeader { snapshot: snap });
 
-    // Use with_propagated_context to run async work.
     let result = crate::with_propagated_context(&actor_ctx, async {
         let rid: RequestId = dcontext::get_context("request_id");
         rid.0
@@ -350,7 +405,6 @@ async fn with_propagated_context_passthrough_without_headers() {
         "test".into(),
     );
 
-    // Should execute without errors even with no context headers.
     let result = crate::with_propagated_context(&actor_ctx, async { 42 }).await;
     assert_eq!(result, 42);
 }

@@ -5,24 +5,54 @@ use dactor::{
 };
 
 use crate::header::{ContextHeader, ContextSnapshotHeader};
+use crate::ErrorPolicy;
 
 /// Outbound interceptor that captures the current dcontext and attaches it
 /// to outgoing actor messages as headers.
 ///
-/// - **Local targets**: attaches a [`ContextSnapshotHeader`] (preserves
-///   local-only context values) **and** a [`ContextHeader`] (wire bytes).
-/// - **Remote targets**: attaches only [`ContextHeader`] (wire bytes).
+/// - **Local targets**: attaches a [`ContextSnapshotHeader`] only — no
+///   serialization is performed, preserving local-only context values.
+/// - **Remote targets**: serializes context to bytes and attaches a
+///   [`ContextHeader`] for wire transport.
+///
+/// # Error Handling
+///
+/// Controlled by [`ErrorPolicy`]:
+/// - [`LogAndContinue`](ErrorPolicy::LogAndContinue) (default) — log and
+///   send the message without context.
+/// - [`Reject`](ErrorPolicy::Reject) — reject the message.
 ///
 /// # Usage
 ///
-/// Register on your actor runtime:
-///
 /// ```ignore
-/// use dcontext_dactor::ContextOutboundInterceptor;
+/// use dcontext_dactor::{ContextOutboundInterceptor, ErrorPolicy};
 ///
-/// runtime.add_outbound_interceptor(Box::new(ContextOutboundInterceptor));
+/// // Default: log and continue on errors
+/// runtime.add_outbound_interceptor(Box::new(ContextOutboundInterceptor::default()));
+///
+/// // Strict: reject messages if context serialization fails
+/// runtime.add_outbound_interceptor(Box::new(
+///     ContextOutboundInterceptor::new(ErrorPolicy::Reject),
+/// ));
 /// ```
-pub struct ContextOutboundInterceptor;
+pub struct ContextOutboundInterceptor {
+    error_policy: ErrorPolicy,
+}
+
+impl ContextOutboundInterceptor {
+    /// Create with a specific error policy.
+    pub fn new(error_policy: ErrorPolicy) -> Self {
+        Self { error_policy }
+    }
+}
+
+impl Default for ContextOutboundInterceptor {
+    fn default() -> Self {
+        Self {
+            error_policy: ErrorPolicy::default(),
+        }
+    }
+}
 
 impl OutboundInterceptor for ContextOutboundInterceptor {
     fn name(&self) -> &'static str {
@@ -36,25 +66,30 @@ impl OutboundInterceptor for ContextOutboundInterceptor {
         headers: &mut Headers,
         _message: &dyn Any,
     ) -> Disposition {
-        // For local targets, capture a full snapshot (preserves local-only values).
-        if !ctx.remote {
+        if ctx.remote {
+            // Remote target: serialize context to wire bytes.
+            match dcontext::serialize_context() {
+                Ok(bytes) => {
+                    headers.insert(ContextHeader { bytes });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "dcontext_dactor",
+                        error = %e,
+                        target_actor = %ctx.target_name,
+                        "failed to serialize dcontext for outbound message"
+                    );
+                    if self.error_policy == ErrorPolicy::Reject {
+                        return Disposition::Reject(format!(
+                            "dcontext serialization failed: {e}"
+                        ));
+                    }
+                }
+            }
+        } else {
+            // Local target: snapshot only — no serialization needed.
             let snap = dcontext::snapshot();
             headers.insert(ContextSnapshotHeader { snapshot: snap });
-        }
-
-        // Always serialize wire bytes (needed for remote, useful as fallback for local).
-        match dcontext::serialize_context() {
-            Ok(bytes) => {
-                headers.insert(ContextHeader { bytes });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "dcontext_dactor",
-                    error = %e,
-                    target_actor = %ctx.target_name,
-                    "failed to serialize dcontext for outbound message"
-                );
-            }
         }
 
         Disposition::Continue

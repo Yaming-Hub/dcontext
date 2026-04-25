@@ -27,12 +27,21 @@ pub fn extract_context(ctx: &ActorContext) -> Option<ContextSnapshot> {
 
 /// Run an async handler body with the propagated dcontext from actor headers.
 ///
-/// If the message carries a propagated context (via interceptors), this
-/// establishes a dcontext task-local scope so that `get_context` /
-/// `set_context` work correctly inside the handler.
+/// This is the function that **actually restores context into the async task**.
+/// The interceptors only prepare the snapshot in headers — this function
+/// extracts it and establishes a dcontext task-local scope via
+/// [`dcontext::with_context`] so that `get_context` / `set_context` work
+/// correctly inside the handler body.
 ///
-/// If no propagated context is found, the future runs without any
-/// dcontext scope (a no-op passthrough).
+/// If no propagated context is found in the headers, the future runs without
+/// any dcontext scope (a no-op passthrough).
+///
+/// # Why this is needed
+///
+/// dcontext's [`ScopeGuard`](dcontext::ScopeGuard) is `!Send`, so it cannot
+/// be held across `.await` points. This function works around that by using
+/// [`dcontext::with_context`] which wraps the future in a properly scoped
+/// Tokio task-local.
 ///
 /// # Usage
 ///
