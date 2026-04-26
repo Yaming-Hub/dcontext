@@ -1,19 +1,20 @@
 [package]
 name = "dcontext-dactor"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Automatic dcontext propagation through dactor actor messages"
 license = "MIT"
+repository = "https://github.com/Yaming-Hub/dcontext"
 keywords = ["context", "actor", "distributed", "propagation", "dactor"]
 categories = ["concurrency", "network-programming"]
 
 [dependencies]
-dcontext = { path = "../dcontext" }
-dactor = { git = "https://github.com/Yaming-Hub/dactor.git", version = "0.3" }
+dcontext = { path = "../dcontext", version = "0.2.0" }
+dactor = "0.3.1"
 tracing = "0.1"
 
 [dev-dependencies]
-dactor = { git = "https://github.com/Yaming-Hub/dactor.git", version = "0.3", features = ["test-support"] }
+dactor = { version = "0.3.1", features = ["test-support"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"

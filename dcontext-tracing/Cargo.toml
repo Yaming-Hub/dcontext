@@ -1,14 +1,15 @@
 [package]
 name = "dcontext-tracing"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Automatic dcontext scope management via tracing spans"
 license = "MIT"
+repository = "https://github.com/Yaming-Hub/dcontext"
 keywords = ["context", "tracing", "distributed", "propagation", "spans"]
 categories = ["development-tools::debugging", "development-tools::profiling"]
 
 [dependencies]
-dcontext = { path = "../dcontext" }
+dcontext = { path = "../dcontext", version = "0.2.0" }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-core = "0.1"

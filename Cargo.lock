@@ -69,8 +69,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "dactor"
-version = "0.3.0"
-source = "git+https://github.com/Yaming-Hub/dactor.git#86105b25a749383f2fc5ed293251473ceccf40da"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "036e87d76f64a88084ccd90a0e0817f4976146ee65468a6992767f3bf50e25c0"
 dependencies = [
  "async-trait",
  "futures",
@@ -85,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "dcontext"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "bincode",
@@ -97,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "dcontext-dactor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "dactor",
@@ -120,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "dcontext-tracing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dcontext",
  "serde",
