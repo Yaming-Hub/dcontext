@@ -1,5 +1,5 @@
 use dactor::{
-    ActorContext, Disposition, HeaderValue, Headers, InboundContext,
+    ActorContext, Disposition, HeaderRegistry, HeaderValue, Headers, InboundContext,
     InboundInterceptor, NodeId, ActorId, OutboundContext, OutboundInterceptor, RuntimeHeaders,
     SendMode,
 };
@@ -585,4 +585,44 @@ async fn wrap_handler_end_to_end_remote() {
     wrapped.await;
 
     assert_eq!(*captured.lock().await, "e2e-wrap-remote");
+}
+
+// ── Wire round-trip via HeaderRegistry ─────────────────────────
+
+#[test]
+fn register_context_headers_enables_wire_roundtrip() {
+    init_registry();
+
+    // Serialize context to wire bytes.
+    let wire_bytes = dcontext::force_thread_local(|| {
+        let _guard = dcontext::enter_scope();
+        dcontext::set_context("request_id", RequestId("wire-roundtrip".into()));
+        dcontext::serialize_context().unwrap()
+    });
+
+    // Outbound: insert ContextHeader into Headers, then convert to wire format.
+    let mut headers = Headers::new();
+    headers.insert(ContextHeader { bytes: wire_bytes });
+    let wire_headers = headers.to_wire();
+
+    // Simulate remote transport: wire_headers arrive on receiver side.
+    // Register the deserializer and reconstruct typed headers.
+    let mut header_registry = HeaderRegistry::new();
+    crate::register_context_headers(&mut header_registry);
+
+    let restored_headers = wire_headers.to_headers(&header_registry);
+    assert!(
+        restored_headers.get::<ContextHeader>().is_some(),
+        "ContextHeader should be reconstructed from wire bytes via HeaderRegistry"
+    );
+
+    // Verify the restored header has correct content.
+    let restored = restored_headers.get::<ContextHeader>().unwrap();
+    let snap = bytes_to_snapshot(&restored.bytes);
+    assert!(snap.is_some(), "restored wire bytes should deserialize to a valid snapshot");
+
+    let snap = snap.unwrap();
+    let _restore = dcontext::attach(snap);
+    let rid: RequestId = dcontext::get_context("request_id");
+    assert_eq!(rid.0, "wire-roundtrip");
 }

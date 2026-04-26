@@ -9,9 +9,22 @@ use dcontext::ContextSnapshot;
 /// on the sender side. Deserialized on the receiver side by
 /// [`ContextInboundInterceptor`](crate::ContextInboundInterceptor) or
 /// the handler via [`extract_context`](crate::extract_context).
+///
+/// For remote transport, register the deserializer with
+/// [`register_context_headers`](crate::register_context_headers) at startup.
 pub struct ContextHeader {
     /// Serialized dcontext bytes (bincode wire format).
     pub(crate) bytes: Vec<u8>,
+}
+
+impl ContextHeader {
+    /// Create a `ContextHeader` from raw wire bytes.
+    ///
+    /// Used by the `HeaderRegistry` deserializer to reconstruct this header
+    /// from bytes received over the wire.
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
 }
 
 impl HeaderValue for ContextHeader {

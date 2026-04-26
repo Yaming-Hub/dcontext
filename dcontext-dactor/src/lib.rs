@@ -89,6 +89,28 @@ pub use propagation::extract_context;
 #[allow(deprecated)]
 pub use propagation::with_propagated_context;
 
+/// Register dcontext header deserializers with a dactor [`HeaderRegistry`](dactor::HeaderRegistry).
+///
+/// Call this at startup before processing remote messages so that
+/// [`ContextHeader`] can be reconstructed from wire bytes during remote
+/// actor communication.
+///
+/// # Example
+///
+/// ```ignore
+/// use dactor::HeaderRegistry;
+/// use dcontext_dactor::register_context_headers;
+///
+/// let mut registry = HeaderRegistry::new();
+/// register_context_headers(&mut registry);
+/// // pass registry to your transport / runtime
+/// ```
+pub fn register_context_headers(registry: &mut dactor::HeaderRegistry) {
+    registry.register("dcontext.wire", |bytes: &[u8]| {
+        Some(Box::new(ContextHeader::from_bytes(bytes.to_vec())))
+    });
+}
+
 /// Controls how interceptors behave when serialization or deserialization fails.
 ///
 /// Passed to [`ContextOutboundInterceptor::new`] and
