@@ -78,7 +78,8 @@ fn main() {
 
 ## Documentation
 
-See [`docs/dcontext-design.md`](docs/dcontext-design.md) for the full design document.
+- **[Usage Guide](docs/usage-guide.md)** — Comprehensive guide covering all features with examples
+- **[Design Document](docs/dcontext-design.md)** — Internal architecture and design decisions
 
 ## License
 
