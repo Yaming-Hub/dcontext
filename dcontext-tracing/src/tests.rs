@@ -226,6 +226,27 @@ fn field_mapping_missing_field() {
 }
 
 #[test]
+fn field_mapping_late_record() {
+    let layer = DcontextLayer::builder()
+        .map_field::<RequestId>("request_id")
+        .build();
+
+    with_layer(layer, || {
+        // Create span with an empty field placeholder
+        let span = tracing::info_span!("handler", request_id = tracing::field::Empty);
+
+        // Record the field value after creation
+        span.record("request_id", "late-value");
+
+        {
+            let _entered = span.enter();
+            let id: RequestId = dcontext::get_context("request_id");
+            assert_eq!(id, RequestId("late-value".to_string()));
+        }
+    });
+}
+
+#[test]
 fn multiple_field_mappings() {
     let layer = DcontextLayer::builder()
         .map_field::<RequestId>("request_id")

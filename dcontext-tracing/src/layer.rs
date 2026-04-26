@@ -169,6 +169,40 @@ where
         }
     }
 
+    fn on_record(
+        &self,
+        id: &span::Id,
+        values: &span::Record<'_>,
+        ctx: Context<'_, S>,
+    ) {
+        if self.field_mappings.is_empty() {
+            return;
+        }
+
+        let span = match ctx.span(id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        let field_names: Vec<&'static str> =
+            self.field_mappings.iter().map(|m| m.field_name).collect();
+        let mut extractor = FieldExtractor::new(&field_names);
+        values.record(&mut extractor);
+
+        if !extractor.extracted.is_empty() {
+            let mut extensions = span.extensions_mut();
+            if let Some(existing) = extensions.get_mut::<ExtractedFields>() {
+                // Merge new values into existing extracted fields
+                existing.string_values.extend(extractor.extracted.string_values);
+                existing.u64_values.extend(extractor.extracted.u64_values);
+                existing.i64_values.extend(extractor.extracted.i64_values);
+                existing.bool_values.extend(extractor.extracted.bool_values);
+            } else {
+                extensions.insert(extractor.extracted);
+            }
+        }
+    }
+
     fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
         // Use force_thread_local to ensure dcontext uses thread-local storage.
         // This is necessary because on_enter/on_exit are synchronous callbacks
@@ -225,6 +259,11 @@ where
     }
 
     fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        // Clean up any stale guards (defensive: handles missed on_exit)
+        dcontext::force_thread_local(|| {
+            guard_stack::pop_guard(&id);
+        });
+
         // Clean up extracted fields from extensions
         if let Some(span) = ctx.span(&id) {
             let mut extensions = span.extensions_mut();

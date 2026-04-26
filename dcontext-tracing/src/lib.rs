@@ -91,6 +91,17 @@
 //!
 //! This mirrors the approach used by `tracing-opentelemetry` for similar
 //! thread-local guard management.
+//!
+//! ## Async Behavior
+//!
+//! When used with [`Instrument`](tracing::Instrument), the layer creates and
+//! reverts a scope around each poll of the future. Mapped field values and span
+//! info are re-applied on each enter, so reads via `force_thread_local()` will
+//! see the correct values during each poll. However, **mutations made inside a
+//! span do not persist across `.await` points** — each poll gets a fresh scope.
+//!
+//! For full async context propagation across `.await`, use `dcontext::with_context()`
+//! or `dcontext::ContextFuture` directly.
 
 mod field_mapping;
 mod guard_stack;
