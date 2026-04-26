@@ -1,0 +1,20 @@
+[package]
+name = "dcontext-tracing"
+version = "0.1.0"
+edition = "2021"
+description = "Automatic dcontext scope management via tracing spans"
+license = "MIT"
+keywords = ["context", "tracing", "distributed", "propagation", "spans"]
+categories = ["development-tools::debugging", "development-tools::profiling"]
+
+[dependencies]
+dcontext = { path = "../dcontext" }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+serde = { version = "1", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["registry", "fmt"] }
