@@ -1,3 +1,3 @@
 [workspace]
-members = ["dcontext", "dcontext-dactor", "samples"]
+members = ["dcontext", "dcontext-dactor", "dcontext-tracing", "samples"]
 resolver = "2"
