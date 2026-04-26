@@ -1,10 +1,11 @@
 [package]
 name = "dcontext"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Distributed context propagation for Rust — scoped, type-safe, serializable"
 license = "MIT"
 readme = "../README.md"
+repository = "https://github.com/Yaming-Hub/dcontext"
 keywords = ["context", "distributed", "propagation", "tracing", "scope"]
 categories = ["concurrency", "network-programming"]
 
