@@ -9,8 +9,9 @@ use crate::header::{ContextHeader, ContextSnapshotHeader};
 /// back to [`ContextHeader`] (remote wire bytes). Returns `None` if no
 /// propagated context is present.
 ///
-/// For most use cases, prefer [`with_propagated_context`] which
-/// automatically establishes the dcontext scope for async handlers.
+/// Useful for advanced scenarios such as spawning sub-tasks that need the
+/// propagated context, or inspecting context values without relying on
+/// the task-local scope.
 pub fn extract_context(ctx: &ActorContext) -> Option<ContextSnapshot> {
     // Prefer local snapshot (preserves local-only values).
     if let Some(h) = ctx.headers.get::<ContextSnapshotHeader>() {
@@ -27,41 +28,22 @@ pub fn extract_context(ctx: &ActorContext) -> Option<ContextSnapshot> {
 
 /// Run an async handler body with the propagated dcontext from actor headers.
 ///
-/// This is the function that **actually restores context into the async task**.
-/// The interceptors only prepare the snapshot in headers — this function
-/// extracts it and establishes a dcontext task-local scope via
-/// [`dcontext::with_context`] so that `get_context` / `set_context` work
-/// correctly inside the handler body.
+/// **Deprecated since dactor 0.3**: The [`ContextInboundInterceptor`](crate::ContextInboundInterceptor)
+/// now implements `wrap_handler` which automatically restores context into the
+/// handler's async task-local scope. This function is no longer needed when
+/// using the interceptor pipeline.
+///
+/// Retained for backward compatibility and for use cases outside the
+/// interceptor pipeline (e.g., manual context restoration in tests or
+/// one-off async blocks).
 ///
 /// If no propagated context is found in the headers, the future runs without
 /// any dcontext scope (a no-op passthrough).
-///
-/// # Why this is needed
-///
-/// dcontext's [`ScopeGuard`](dcontext::ScopeGuard) is `!Send`, so it cannot
-/// be held across `.await` points. This function works around that by using
-/// [`dcontext::with_context`] which wraps the future in a properly scoped
-/// Tokio task-local.
-///
-/// # Usage
-///
-/// ```ignore
-/// use dcontext_dactor::with_propagated_context;
-/// use dactor::{async_trait, Actor, Handler, ActorContext, Message};
-///
-/// struct MyActor;
-///
-/// #[async_trait]
-/// impl Handler<MyMessage> for MyActor {
-///     async fn handle(&mut self, msg: MyMessage, ctx: &mut ActorContext) -> () {
-///         with_propagated_context(ctx, async {
-///             // dcontext is available here
-///             let rid: RequestId = dcontext::get_context("request_id");
-///             println!("handling with request_id = {:?}", rid);
-///         }).await;
-///     }
-/// }
-/// ```
+#[deprecated(
+    since = "0.2.0",
+    note = "ContextInboundInterceptor now restores context automatically via wrap_handler. \
+            Use this only for manual context restoration outside the interceptor pipeline."
+)]
 pub async fn with_propagated_context<F, R>(ctx: &ActorContext, f: F) -> R
 where
     F: std::future::Future<Output = R>,

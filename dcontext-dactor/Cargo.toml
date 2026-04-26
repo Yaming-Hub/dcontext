@@ -9,11 +9,11 @@ categories = ["concurrency", "network-programming"]
 
 [dependencies]
 dcontext = { path = "../dcontext" }
-dactor = { git = "https://github.com/Yaming-Hub/dactor.git", version = "0.2" }
+dactor = { git = "https://github.com/Yaming-Hub/dactor.git", version = "0.3" }
 tracing = "0.1"
 
 [dev-dependencies]
-dactor = { git = "https://github.com/Yaming-Hub/dactor.git", version = "0.2", features = ["test-support"] }
+dactor = { git = "https://github.com/Yaming-Hub/dactor.git", version = "0.3", features = ["test-support"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"

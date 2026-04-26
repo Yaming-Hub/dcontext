@@ -1,6 +1,7 @@
 use dactor::{
-    ActorContext, Disposition, HeaderValue, Headers, InboundContext, InboundInterceptor,
-    NodeId, ActorId, OutboundContext, OutboundInterceptor, RuntimeHeaders, SendMode,
+    ActorContext, Disposition, HeaderValue, Headers, InboundContext,
+    InboundInterceptor, NodeId, ActorId, OutboundContext, OutboundInterceptor, RuntimeHeaders,
+    SendMode,
 };
 use dcontext::ContextSnapshot;
 
@@ -365,6 +366,7 @@ fn end_to_end_remote_propagation() {
 
 // ── Async propagation test ─────────────────────────────────────
 
+#[allow(deprecated)]
 #[tokio::test]
 async fn with_propagated_context_establishes_scope() {
     init_registry();
@@ -393,6 +395,7 @@ async fn with_propagated_context_establishes_scope() {
     assert_eq!(result, "async-test");
 }
 
+#[allow(deprecated)]
 #[tokio::test]
 async fn with_propagated_context_passthrough_without_headers() {
     init_registry();
@@ -407,4 +410,179 @@ async fn with_propagated_context_passthrough_without_headers() {
 
     let result = crate::with_propagated_context(&actor_ctx, async { 42 }).await;
     assert_eq!(result, 42);
+}
+
+// ── wrap_handler tests ─────────────────────────────────────────
+
+#[test]
+fn wrap_handler_returns_some_when_snapshot_present() {
+    init_registry();
+
+    let snap = dcontext::force_thread_local(|| {
+        let _guard = dcontext::enter_scope();
+        dcontext::set_context("request_id", RequestId("wrap-test".into()));
+        dcontext::snapshot()
+    });
+
+    let interceptor = ContextInboundInterceptor::default();
+    let ctx = make_inbound_ctx();
+    let mut headers = Headers::new();
+    headers.insert(ContextSnapshotHeader { snapshot: snap });
+
+    let wrapper = interceptor.wrap_handler(&ctx, &headers);
+    assert!(wrapper.is_some(), "wrap_handler should return Some when snapshot header is present");
+}
+
+#[test]
+fn wrap_handler_returns_none_when_no_context() {
+    let interceptor = ContextInboundInterceptor::default();
+    let ctx = make_inbound_ctx();
+    let headers = Headers::new();
+
+    let wrapper = interceptor.wrap_handler(&ctx, &headers);
+    assert!(wrapper.is_none(), "wrap_handler should return None when no context headers");
+}
+
+#[tokio::test]
+async fn wrap_handler_restores_context_in_handler_future() {
+    init_registry();
+
+    let snap = dcontext::force_thread_local(|| {
+        let _guard = dcontext::enter_scope();
+        dcontext::set_context("request_id", RequestId("auto-restore".into()));
+        dcontext::snapshot()
+    });
+
+    let interceptor = ContextInboundInterceptor::default();
+    let ctx = make_inbound_ctx();
+    let mut headers = Headers::new();
+    headers.insert(ContextSnapshotHeader { snapshot: snap });
+
+    let wrapper = interceptor.wrap_handler(&ctx, &headers).unwrap();
+
+    // Simulate what the runtime does: wrap the handler future
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured_clone = captured.clone();
+
+    let inner: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(async move {
+            let rid: RequestId = dcontext::get_context("request_id");
+            *captured_clone.lock().await = rid.0;
+        });
+
+    let wrapped = wrapper(inner);
+    wrapped.await;
+
+    assert_eq!(*captured.lock().await, "auto-restore");
+}
+
+#[tokio::test]
+async fn wrap_handler_no_context_passthrough() {
+    init_registry();
+
+    let interceptor = ContextInboundInterceptor::default();
+    let ctx = make_inbound_ctx();
+    let headers = Headers::new();
+
+    // Should return None — no wrapping needed
+    let wrapper = interceptor.wrap_handler(&ctx, &headers);
+    assert!(wrapper.is_none());
+
+    // The handler future runs as-is (no context scope)
+    let result = async { 42 }.await;
+    assert_eq!(result, 42);
+}
+
+#[tokio::test]
+async fn wrap_handler_end_to_end_local() {
+    init_registry();
+
+    // Simulate: sender sets context → outbound captures → inbound normalizes → wrap_handler restores
+    // Use force_thread_local for the sender side to avoid task-local access errors in test.
+    let snap = dcontext::force_thread_local(|| {
+        let _guard = dcontext::enter_scope();
+        dcontext::set_context("request_id", RequestId("e2e-wrap-local".into()));
+        dcontext::snapshot()
+    });
+
+    // Outbound would capture snapshot for local target; simulate directly.
+    let rh = RuntimeHeaders::new();
+    let mut headers = Headers::new();
+    let msg = 42u64;
+
+    // Insert snapshot directly (simulates what outbound does for local targets)
+    headers.insert(ContextSnapshotHeader { snapshot: snap });
+
+    // Inbound: on_receive normalizes, wrap_handler wraps
+    let inbound = ContextInboundInterceptor::default();
+    let in_ctx = make_inbound_ctx();
+    inbound.on_receive(&in_ctx, &rh, &mut headers, &msg);
+
+    let wrapper = inbound.wrap_handler(&in_ctx, &headers);
+    assert!(wrapper.is_some(), "should wrap for local context");
+
+    let wrapper = wrapper.unwrap();
+
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured_clone = captured.clone();
+
+    let inner: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(async move {
+            let rid: RequestId = dcontext::get_context("request_id");
+            *captured_clone.lock().await = rid.0;
+        });
+
+    let wrapped = wrapper(inner);
+    wrapped.await;
+
+    assert_eq!(*captured.lock().await, "e2e-wrap-local");
+}
+
+#[tokio::test]
+async fn wrap_handler_end_to_end_remote() {
+    init_registry();
+
+    // Simulate remote path: wire bytes → inbound deserializes → wrap_handler restores
+    let wire_bytes = dcontext::force_thread_local(|| {
+        let _guard = dcontext::enter_scope();
+        dcontext::set_context("request_id", RequestId("e2e-wrap-remote".into()));
+        dcontext::serialize_context().unwrap()
+    });
+
+    let mut headers = Headers::new();
+    headers.insert(ContextHeader { bytes: wire_bytes });
+
+    let inbound = ContextInboundInterceptor::default();
+    let in_ctx = make_inbound_ctx();
+    let rh = RuntimeHeaders::new();
+    let msg = 42u64;
+    inbound.on_receive(&in_ctx, &rh, &mut headers, &msg);
+
+    let wrapper = inbound.wrap_handler(&in_ctx, &headers);
+    assert!(wrapper.is_some(), "should wrap for remote context");
+
+    let wrapper = wrapper.unwrap();
+
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured_clone = captured.clone();
+
+    let inner: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(async move {
+            let rid: RequestId = dcontext::get_context("request_id");
+            *captured_clone.lock().await = rid.0;
+        });
+
+    let wrapped = wrapper(inner);
+    wrapped.await;
+
+    assert_eq!(*captured.lock().await, "e2e-wrap-remote");
 }

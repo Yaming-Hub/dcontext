@@ -69,8 +69,8 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "dactor"
-version = "0.2.0"
-source = "git+https://github.com/Yaming-Hub/dactor.git#6ce99065f6a54d62ef9f18dcc3bba83b4e3f8fc7"
+version = "0.3.0"
+source = "git+https://github.com/Yaming-Hub/dactor.git#86105b25a749383f2fc5ed293251473ceccf40da"
 dependencies = [
  "async-trait",
  "futures",

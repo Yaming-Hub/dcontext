@@ -4,12 +4,13 @@
 //! actor messages.
 //!
 //! This crate bridges [`dcontext`] (distributed context propagation) with
-//! [`dactor`] (actor framework) by providing interceptors and helpers that
-//! automatically carry context across actor message boundaries.
+//! [`dactor`] (actor framework) by providing interceptors that automatically
+//! carry context across actor message boundaries — **no boilerplate needed
+//! in handlers**.
 //!
 //! ## How It Works
 //!
-//! Context propagation is a **three-stage pipeline**:
+//! Context propagation is a **two-stage interceptor pipeline**:
 //!
 //! 1. **Outbound interceptor** (sender side) — [`ContextOutboundInterceptor`]
 //!    captures the current dcontext and attaches it as message headers.
@@ -17,21 +18,16 @@
 //!    - Remote targets → [`ContextHeader`] (serialized wire bytes)
 //!
 //! 2. **Inbound interceptor** (receiver side) — [`ContextInboundInterceptor`]
-//!    normalizes the headers: if only wire bytes are present (remote hop), it
-//!    deserializes them into a [`ContextSnapshotHeader`]. **This does NOT
-//!    restore context into the async task** — it only prepares the snapshot
-//!    in headers for the handler.
+//!    performs two actions:
+//!    - `on_receive`: normalizes headers — deserializes wire bytes into a
+//!      [`ContextSnapshotHeader`] if needed.
+//!    - `wrap_handler`: wraps the handler future with
+//!      [`dcontext::with_context`], restoring the propagated snapshot into
+//!      the async task-local scope automatically.
 //!
-//! 3. **Handler helper** (inside the handler) — The handler calls
-//!    [`with_propagated_context`] to establish a dcontext task-local scope
-//!    for its async body. This is the step that actually makes `get_context` /
-//!    `set_context` work inside the handler.
-//!
-//! The reason the inbound interceptor cannot directly restore context is that
-//! dcontext's [`ScopeGuard`](dcontext::ScopeGuard) is `!Send`, so it cannot
-//! be held across the async handler boundary. Instead,
-//! [`with_propagated_context`] uses [`dcontext::with_context`] to wrap the
-//! handler future in a properly scoped task-local.
+//! This uses dactor 0.3's `wrap_handler` feature to wrap the handler future
+//! with a task-local context scope. `dcontext::get_context` /
+//! `dcontext::set_context` work transparently inside the handler.
 //!
 //! ## Error Handling
 //!
@@ -56,28 +52,29 @@
 //! ## Quick Start
 //!
 //! ```ignore
-//! use dcontext_dactor::{
-//!     ContextOutboundInterceptor,
-//!     ContextInboundInterceptor,
-//!     with_propagated_context,
-//! };
+//! use dcontext_dactor::{ContextOutboundInterceptor, ContextInboundInterceptor};
 //!
-//! // 1. Register interceptors on your runtime
+//! // Register interceptors on your runtime — that's it!
 //! runtime.add_outbound_interceptor(Box::new(ContextOutboundInterceptor::default()));
 //! runtime.add_inbound_interceptor(Box::new(ContextInboundInterceptor::default()));
 //!
-//! // 2. In your handler, wrap the body with propagated context
+//! // Handlers automatically have dcontext available — no boilerplate
 //! #[async_trait]
 //! impl Handler<MyMessage> for MyActor {
 //!     async fn handle(&mut self, msg: MyMessage, ctx: &mut ActorContext) -> () {
-//!         with_propagated_context(ctx, async {
-//!             // dcontext task-local scope is active here
-//!             let rid: RequestId = dcontext::get_context("request_id");
-//!             // ... handle message with context available ...
-//!         }).await;
+//!         // dcontext is automatically restored by the interceptor's wrap_handler
+//!         let rid: RequestId = dcontext::get_context("request_id");
+//!         // ... handle message with context available ...
 //!     }
 //! }
 //! ```
+//!
+//! ## Manual Extraction
+//!
+//! For advanced use cases (e.g., spawning sub-tasks that need context),
+//! [`extract_context`] is still available to pull the snapshot from headers.
+//! [`with_propagated_context`] is retained for backward compatibility but is
+//! no longer needed when using the interceptor pipeline.
 
 mod header;
 mod inbound;
@@ -87,7 +84,10 @@ mod propagation;
 pub use header::{ContextHeader, ContextSnapshotHeader};
 pub use inbound::ContextInboundInterceptor;
 pub use outbound::ContextOutboundInterceptor;
-pub use propagation::{extract_context, with_propagated_context};
+pub use propagation::extract_context;
+
+#[allow(deprecated)]
+pub use propagation::with_propagated_context;
 
 /// Controls how interceptors behave when serialization or deserialization fails.
 ///

@@ -1,30 +1,28 @@
 use std::any::Any;
 
 use dactor::{
-    Disposition, Headers, InboundContext, InboundInterceptor, Outcome, RuntimeHeaders,
+    Disposition, HandlerWrapper, Headers, InboundContext, InboundInterceptor, Outcome,
+    RuntimeHeaders,
 };
 
 use crate::header::{ContextHeader, ContextSnapshotHeader};
 use crate::propagation::bytes_to_snapshot;
 use crate::ErrorPolicy;
 
-/// Inbound interceptor that normalizes propagated dcontext in message headers.
+/// Inbound interceptor that propagates dcontext automatically through actor
+/// message handlers.
 ///
-/// This interceptor **does not restore context into the async task** — it only
-/// prepares a [`ContextSnapshotHeader`] in the message headers so the handler
-/// can uniformly consume it via [`with_propagated_context`](crate::with_propagated_context).
+/// This interceptor performs two complementary actions:
 ///
-/// The reason context cannot be restored here is that dcontext's
-/// [`ScopeGuard`](dcontext::ScopeGuard) is `!Send` and cannot be held across
-/// the async handler boundary. The handler must call
-/// [`with_propagated_context`](crate::with_propagated_context) to establish
-/// a properly scoped task-local via [`dcontext::with_context`].
+/// 1. **`on_receive`** — Normalizes context headers: if only wire bytes
+///    ([`ContextHeader`]) are present (remote hop), deserializes them into a
+///    [`ContextSnapshotHeader`]. Local snapshots are left as-is.
 ///
-/// ## Behavior
-///
-/// - If a [`ContextSnapshotHeader`] already exists (local hop), it is left as-is.
-/// - If only [`ContextHeader`] (wire bytes) exists (remote hop), deserializes
-///   it into a [`ContextSnapshotHeader`].
+/// 2. **`wrap_handler`** — Wraps the handler future with
+///    [`dcontext::with_context`], restoring the propagated context into the
+///    async task-local scope. This makes `dcontext::get_context` /
+///    `dcontext::set_context` work automatically inside the handler — **no
+///    manual `with_propagated_context()` call needed**.
 ///
 /// ## Error Handling
 ///
@@ -36,15 +34,20 @@ use crate::ErrorPolicy;
 /// # Usage
 ///
 /// ```ignore
-/// use dcontext_dactor::{ContextInboundInterceptor, ErrorPolicy};
+/// use dcontext_dactor::{ContextOutboundInterceptor, ContextInboundInterceptor};
 ///
-/// // Default: log and continue on deserialization errors
+/// // Register interceptors — context propagation is fully automatic
+/// runtime.add_outbound_interceptor(Box::new(ContextOutboundInterceptor::default()));
 /// runtime.add_inbound_interceptor(Box::new(ContextInboundInterceptor::default()));
 ///
-/// // Strict: reject messages with corrupt context bytes
-/// runtime.add_inbound_interceptor(Box::new(
-///     ContextInboundInterceptor::new(ErrorPolicy::Reject),
-/// ));
+/// // In the handler, dcontext is available without any boilerplate:
+/// #[async_trait]
+/// impl Handler<MyMessage> for MyActor {
+///     async fn handle(&mut self, msg: MyMessage, ctx: &mut ActorContext) -> () {
+///         let rid: RequestId = dcontext::get_context("request_id");
+///         // ... context is automatically restored by the interceptor
+///     }
+/// }
 /// ```
 pub struct ContextInboundInterceptor {
     error_policy: ErrorPolicy,
@@ -106,6 +109,18 @@ impl InboundInterceptor for ContextInboundInterceptor {
         Disposition::Continue
     }
 
+    fn wrap_handler<'a>(
+        &'a self,
+        _ctx: &InboundContext<'_>,
+        headers: &Headers,
+    ) -> Option<HandlerWrapper<'a>> {
+        // Extract the snapshot prepared by on_receive (or outbound for local hops).
+        let snapshot = headers.get::<ContextSnapshotHeader>()?.snapshot.clone();
+        Some(Box::new(move |next| {
+            Box::pin(dcontext::with_context(snapshot, next))
+        }))
+    }
+
     fn on_complete(
         &self,
         _ctx: &InboundContext<'_>,
@@ -113,7 +128,6 @@ impl InboundInterceptor for ContextInboundInterceptor {
         _headers: &Headers,
         _outcome: &Outcome<'_>,
     ) {
-        // No cleanup needed — context scope is managed by the handler via
-        // with_propagated_context().
+        // No cleanup needed — context scope ends when the wrapped future completes.
     }
 }
