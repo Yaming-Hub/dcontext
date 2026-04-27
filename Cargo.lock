@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "dcontext"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bincode",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "dcontext-dactor"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "dactor",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "dcontext-tracing"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dcontext",
  "serde",

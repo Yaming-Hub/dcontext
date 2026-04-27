@@ -9,7 +9,7 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use dcontext::{RegistryBuilder, initialize, enter_scope, get_context, set_context};
+//! use dcontext::{RegistryBuilder, initialize, enter_named_scope, get_context, set_context, scope_chain};
 //! use serde::{Serialize, Deserialize};
 //!
 //! #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -20,13 +20,20 @@
 //! builder.register::<RequestId>("request_id");
 //! initialize(builder); // freeze registry — all reads are lock-free
 //!
-//! let _guard = enter_scope();
+//! let _guard = enter_named_scope("ingress");
 //! set_context("request_id", RequestId("req-123".into()));
 //!
 //! let rid: RequestId = get_context("request_id");
 //! assert_eq!(rid.0, "req-123");
+//!
+//! // Query the scope chain — returns names of all active named scopes
+//! let chain = scope_chain(); // vec!["ingress"]
 //! # }
 //! ```
+//!
+//! See also: [`enter_scope`] for unnamed scopes, [`named_scope_async`] for
+//! async named scopes, and [`scope_chain`] for querying the full distributed
+//! call path (including remote prefix from cross-process propagation).
 
 pub mod error;
 mod value;

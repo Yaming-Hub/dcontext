@@ -16,17 +16,18 @@ and even process boundaries via serialization.
 - **Serializable** — Serialize context to bytes/string for cross-process propagation
 - **Local-only entries** — Non-serializable context that stays within the process
 - **Version migration** — Rolling upgrades with automatic old→new schema conversion
+- **Scope chain** — Named scopes with queryable distributed call chain (`scope_chain()`)
 - **O(1) lookups** — Index-based read cache for fast context access
 
 ## Quick Start
 
 ```toml
 [dependencies]
-dcontext = "0.2"
+dcontext = "0.3"
 ```
 
 ```rust
-use dcontext::{register, enter_scope, get_context, set_context};
+use dcontext::{register, enter_scope, enter_named_scope, get_context, set_context, scope_chain};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -36,9 +37,14 @@ fn main() {
     register::<RequestId>("request_id");
 
     {
-        let _guard = enter_scope();
+        let _guard = enter_named_scope("ingress");
         set_context("request_id", RequestId("req-123".into()));
+
         handle_request(); // sees "req-123"
+
+        // Query the scope chain
+        let chain = scope_chain(); // e.g. ["ingress"]
+        println!("scope chain: {:?}", chain);
     }
     // scope reverted — request_id is back to default
 }
@@ -62,7 +68,8 @@ fn main() {
 
 - **Context** — A `HashMap<String, Any>` of named, type-erased values
 - **Scope** — A stack frame that overlays the parent; changes revert on exit
-- **ScopeGuard** — RAII guard returned by `enter_scope()`; drops → reverts
+- **ScopeGuard** — RAII guard returned by `enter_scope()` / `enter_named_scope()`; drops → reverts
+- **Scope Chain** — Ordered list of named scope names (local + remote prefix); query with `scope_chain()`
 - **Snapshot** — A captured, cloneable, sendable copy of the current context
 - **Registry** — Global type registration for serialization support
 - **ContextKey\<T\>** — Optional typed key wrapper for compile-time safe access
@@ -105,6 +112,7 @@ Run any sample with `cargo run --bin <name>`:
 | `feature_flags` | Per-request feature flag overrides |
 | `size_limits` | `set_max_context_size` cap |
 | `tracing_scopes` | dcontext-tracing integration |
+| `scope_chain` | Named scopes and scope chain query |
 | `dactor_propagation` | dcontext-dactor propagation flow |
 
 ## License
