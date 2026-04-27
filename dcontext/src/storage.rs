@@ -31,7 +31,10 @@ tokio::task_local! {
 fn with_current_cell<R>(mut f: impl FnMut(&Cell<Option<ContextStore>>) -> R) -> R {
     #[cfg(feature = "tokio")]
     {
-        let force = FORCE_THREAD_LOCAL_DEPTH.with(|c| c.get()) > 0;
+        let force = FORCE_THREAD_LOCAL_DEPTH
+            .try_with(|c| c.get())
+            .unwrap_or(0)
+            > 0;
         if !force {
             let result: Cell<Option<R>> = Cell::new(None);
             let found = TASK_CONTEXT.try_with(|cell| {
@@ -45,7 +48,17 @@ fn with_current_cell<R>(mut f: impl FnMut(&Cell<Option<ContextStore>>) -> R) -> 
         }
     }
 
-    CONTEXT.with(|cell| f(cell))
+    // Use try_with to handle thread shutdown gracefully: if CONTEXT is
+    // already being destroyed (e.g. a value's Drop impl reads context
+    // during teardown), provide an empty Cell so callers see None ("busy")
+    // and return defaults.
+    match CONTEXT.try_with(|cell| f(cell)) {
+        Ok(r) => r,
+        Err(_) => {
+            let temp = Cell::new(None);
+            f(&temp)
+        }
+    }
 }
 
 /// Execute `f` with exclusive access to the context store.

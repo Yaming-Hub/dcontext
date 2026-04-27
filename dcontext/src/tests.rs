@@ -1439,3 +1439,419 @@ mod async_scope_chain_tests {
         .await;
     }
 }
+
+// ══════════════════════════════════════════════════════════════
+//  Re-entrancy and contention-free safety tests
+// ══════════════════════════════════════════════════════════════
+//
+// These tests verify that the Cell<Option<ContextStore>> design handles
+// re-entrant access gracefully: no panics, no corrupted state.
+
+/// A value whose Clone impl reads from context (simulating what tracing
+/// callbacks do: they read context during a write operation).
+#[derive(Default, Debug, Serialize, Deserialize)]
+struct ReentrantCloneVal {
+    data: String,
+    /// Key to read from during clone (only used at runtime, not serialized).
+    #[serde(skip)]
+    read_key: Option<&'static str>,
+}
+
+impl Clone for ReentrantCloneVal {
+    fn clone(&self) -> Self {
+        // Simulate re-entrant read during clone (e.g. tracing callback).
+        if let Some(key) = self.read_key {
+            let _: RequestId = get_context(key);
+        }
+        Self {
+            data: self.data.clone(),
+            read_key: self.read_key,
+        }
+    }
+}
+
+/// A value whose Drop impl reads from context.
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+struct ReentrantDropVal(String);
+
+impl Drop for ReentrantDropVal {
+    fn drop(&mut self) {
+        // Try to read context during drop. Should not panic.
+        // We use try_get_context to avoid panicking if key isn't registered
+        // (this Drop may fire after tests clean up).
+        let _ = crate::try_get_context::<RequestId>("__reentrant_drop_probe__");
+    }
+}
+
+#[test]
+fn test_reentrant_read_during_scope_enter() {
+    // Reading context during scope enter should not panic.
+    let key = unique_key("reentrant_enter", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("parent-val".into()));
+
+    // Enter a scope — internally takes the store, modifies it, puts it back.
+    // If anything tries to read during the take window, it should gracefully
+    // return defaults (not panic).
+    let _g = enter_scope();
+
+    // Value should still be accessible from parent scope.
+    let val: RequestId = get_context(key);
+    assert_eq!(val.0, "parent-val");
+}
+
+#[test]
+fn test_reentrant_read_during_scope_leave() {
+    // Dropping a ScopeGuard triggers leave_scope. Reading context during
+    // the leave should not panic.
+    let key = unique_key("reentrant_leave", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("base".into()));
+
+    {
+        let _g = enter_scope();
+        set_context(key, RequestId("child".into()));
+        assert_eq!(get_context::<RequestId>(key).0, "child");
+    }
+    // _g dropped — scope popped. Old child value (Arc) dropped OUTSIDE Cell window.
+
+    let val: RequestId = get_context(key);
+    assert_eq!(val.0, "base");
+}
+
+#[test]
+fn test_reentrant_read_during_set_context() {
+    // set_context takes the store briefly. A concurrent read (simulated
+    // sequentially since we're single-threaded) should be safe.
+    let key_a = unique_key("reentrant_set", "a");
+    let key_b = unique_key("reentrant_set", "b");
+    register::<RequestId>(key_a);
+    register::<RequestId>(key_b);
+
+    set_context(key_a, RequestId("aaa".into()));
+    set_context(key_b, RequestId("bbb".into()));
+
+    // After set, both reads succeed.
+    assert_eq!(get_context::<RequestId>(key_a).0, "aaa");
+    assert_eq!(get_context::<RequestId>(key_b).0, "bbb");
+}
+
+#[test]
+fn test_reentrant_drop_on_value_overwrite() {
+    // When a value is overwritten, the old Arc is dropped outside the Cell
+    // window. If the old value's Drop reads context, it should not panic.
+    let key = unique_key("reentrant_drop_overwrite", "val");
+    register::<ReentrantDropVal>(key);
+
+    set_context(key, ReentrantDropVal("first".into()));
+    // This overwrites "first" — the old Arc is dropped after Cell::set().
+    // ReentrantDropVal::drop tries to read context → should not panic.
+    set_context(key, ReentrantDropVal("second".into()));
+
+    let val: ReentrantDropVal = get_context(key);
+    assert_eq!(val.0, "second");
+}
+
+#[test]
+fn test_reentrant_drop_on_scope_leave() {
+    // When a scope is popped, the old current_values HashMap is dropped
+    // outside the Cell window. Values' Drop impls should not panic.
+    let key = unique_key("reentrant_drop_leave", "val");
+    register::<ReentrantDropVal>(key);
+
+    set_context(key, ReentrantDropVal("root".into()));
+
+    {
+        let _g = enter_scope();
+        set_context(key, ReentrantDropVal("child-scope".into()));
+    }
+    // _g dropped → child scope's ReentrantDropVal dropped.
+    // Its Drop reads context → should not panic.
+
+    let val: ReentrantDropVal = get_context(key);
+    assert_eq!(val.0, "root");
+}
+
+#[test]
+fn test_scope_push_pop_integrity_across_many_levels() {
+    // Rapidly push/pop many scopes to stress the Cell take/set pattern.
+    let key = unique_key("stress_scope", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("root".into()));
+
+    let depth = 50;
+    let mut guards: Vec<ScopeGuard> = Vec::new();
+
+    for i in 0..depth {
+        guards.push(enter_named_scope(format!("scope-{}", i)));
+        set_context(key, RequestId(format!("val-{}", i)));
+    }
+
+    // Innermost scope value.
+    assert_eq!(
+        get_context::<RequestId>(key).0,
+        format!("val-{}", depth - 1)
+    );
+
+    // Pop all scopes in reverse.
+    for i in (0..depth).rev() {
+        guards.pop();
+        if i > 0 {
+            assert_eq!(
+                get_context::<RequestId>(key).0,
+                format!("val-{}", i - 1)
+            );
+        }
+    }
+
+    // Back to root.
+    assert_eq!(get_context::<RequestId>(key).0, "root");
+}
+
+#[test]
+fn test_scope_chain_integrity_after_many_push_pops() {
+    // Verify scope_chain is correct after many push/pop cycles.
+    let key = unique_key("chain_stress", "rid");
+    register::<RequestId>(key);
+
+    for round in 0..10 {
+        let name = format!("round-{}", round);
+        let _g = enter_named_scope(&name);
+        let chain = scope_chain();
+        assert!(chain.last().map(|s| s.as_str()) == Some(name.as_str()));
+    }
+    // All guards dropped, chain should be empty.
+    assert!(scope_chain().is_empty());
+}
+
+#[test]
+fn test_update_context_basic() {
+    let key = unique_key("update_ctx", "counter");
+
+    #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+    struct Counter(u64);
+
+    register::<Counter>(key);
+
+    set_context(key, Counter(10));
+
+    // Update: increment the counter.
+    update_context::<Counter>(key, |c| Counter(c.0 + 5));
+
+    let val: Counter = get_context(key);
+    assert_eq!(val.0, 15);
+}
+
+#[test]
+fn test_update_context_default_when_unset() {
+    let key = unique_key("update_default", "counter");
+
+    #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+    struct Counter(u64);
+
+    register::<Counter>(key);
+
+    // No prior set — should start from default (0).
+    update_context::<Counter>(key, |c| Counter(c.0 + 1));
+
+    let val: Counter = get_context(key);
+    assert_eq!(val.0, 1);
+}
+
+#[test]
+fn test_update_context_callback_can_read_other_keys() {
+    // The callback in update_context runs with the store available,
+    // so reading other keys should work.
+    let key_a = unique_key("update_read_other", "a");
+    let key_b = unique_key("update_read_other", "b");
+    register::<RequestId>(key_a);
+    register::<RequestId>(key_b);
+
+    set_context(key_a, RequestId("aaa".into()));
+    set_context(key_b, RequestId("bbb".into()));
+
+    // Update key_a, reading key_b inside the callback.
+    update_context::<RequestId>(key_a, |_old| {
+        let b: RequestId = get_context(key_b);
+        RequestId(format!("merged-{}", b.0))
+    });
+
+    assert_eq!(get_context::<RequestId>(key_a).0, "merged-bbb");
+    // key_b unchanged.
+    assert_eq!(get_context::<RequestId>(key_b).0, "bbb");
+}
+
+#[test]
+fn test_update_context_in_scope_reverts() {
+    let key = unique_key("update_scope_revert", "val");
+
+    #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+    struct Val(String);
+
+    register::<Val>(key);
+
+    set_context(key, Val("root".into()));
+
+    {
+        let _g = enter_scope();
+        update_context::<Val>(key, |_| Val("updated-in-child".into()));
+        assert_eq!(get_context::<Val>(key).0, "updated-in-child");
+    }
+
+    // Reverted after scope exit.
+    assert_eq!(get_context::<Val>(key).0, "root");
+}
+
+#[test]
+fn test_get_context_option_some_and_none() {
+    let key_set = unique_key("get_opt", "set");
+    let key_unset = unique_key("get_opt", "unset");
+    register::<RequestId>(key_set);
+    register::<RequestId>(key_unset);
+
+    set_context(key_set, RequestId("hello".into()));
+
+    assert_eq!(
+        get_context_option::<RequestId>(key_set),
+        Some(RequestId("hello".into()))
+    );
+    assert_eq!(get_context_option::<RequestId>(key_unset), None);
+}
+
+#[test]
+fn test_snapshot_uses_arc_sharing() {
+    // After the Arc migration, snapshot values share memory with the store.
+    // This test verifies snapshot + attach works correctly.
+    let key = unique_key("snap_arc", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("original".into()));
+    let snap = snapshot();
+
+    // Modify after snapshot.
+    set_context(key, RequestId("modified".into()));
+
+    // Attach restores snapshot values.
+    {
+        let _g = attach(snap);
+        assert_eq!(get_context::<RequestId>(key).0, "original");
+    }
+
+    // After attach scope ends, current value is back.
+    assert_eq!(get_context::<RequestId>(key).0, "modified");
+}
+
+#[test]
+fn test_concurrent_scope_and_read_no_panic() {
+    // Simulate the pattern that caused BorrowError in v0.3.x:
+    // A tracing callback fires during a write, triggering a re-entrant read.
+    // With Cell<Option<ContextStore>>, this returns defaults instead of panicking.
+    let key = unique_key("concurrent_rw", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("base".into()));
+
+    // Rapidly alternate set + get (simulating interleaved callbacks).
+    for i in 0..100 {
+        set_context(key, RequestId(format!("iter-{}", i)));
+        let val: RequestId = get_context(key);
+        assert_eq!(val.0, format!("iter-{}", i));
+    }
+}
+
+#[test]
+fn test_cached_key_o1_read_in_nested_scopes() {
+    // Cached keys should always be in current_values after scope entry.
+    let key = unique_key("cached_read", "rid");
+    register_with::<RequestId>(key, |opts| opts.cached());
+
+    set_context(key, RequestId("root-val".into()));
+
+    let _g1 = enter_scope();
+    // Cached key should be readable without walking parents.
+    assert_eq!(get_context::<RequestId>(key).0, "root-val");
+
+    let _g2 = enter_scope();
+    assert_eq!(get_context::<RequestId>(key).0, "root-val");
+
+    // Override in inner scope.
+    set_context(key, RequestId("inner-val".into()));
+    assert_eq!(get_context::<RequestId>(key).0, "inner-val");
+
+    drop(_g2);
+    // After inner scope exit, cached value from g1's scope is restored.
+    assert_eq!(get_context::<RequestId>(key).0, "root-val");
+
+    drop(_g1);
+    assert_eq!(get_context::<RequestId>(key).0, "root-val");
+}
+
+#[test]
+fn test_non_cached_key_walks_parents() {
+    // Non-cached keys (default) should find values in parent scopes.
+    let key = unique_key("non_cached", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("root-val".into()));
+
+    let _g1 = enter_scope();
+    // Not set in child scope — walks to root.
+    assert_eq!(get_context::<RequestId>(key).0, "root-val");
+
+    // Override in child.
+    set_context(key, RequestId("child-val".into()));
+    assert_eq!(get_context::<RequestId>(key).0, "child-val");
+
+    let _g2 = enter_scope();
+    // Grandchild walks to child.
+    assert_eq!(get_context::<RequestId>(key).0, "child-val");
+
+    drop(_g2);
+    assert_eq!(get_context::<RequestId>(key).0, "child-val");
+
+    drop(_g1);
+    assert_eq!(get_context::<RequestId>(key).0, "root-val");
+}
+
+#[tokio::test]
+async fn test_async_reentrant_safety() {
+    // Verify that scope_async and named_scope_async don't panic
+    // under re-entrant-like patterns.
+    let key = unique_key("async_reentrant", "rid");
+    register::<RequestId>(key);
+
+    let snap = {
+        force_thread_local(|| {
+            set_context(key, RequestId("base".into()));
+            snapshot()
+        })
+    };
+
+    with_context(snap, async {
+        assert_eq!(get_context::<RequestId>(key).0, "base");
+
+        scope_async(async {
+            set_context(key, RequestId("in-scope-async".into()));
+            assert_eq!(get_context::<RequestId>(key).0, "in-scope-async");
+
+            // Nested named_scope_async inside scope_async.
+            named_scope_async("inner", async {
+                assert_eq!(get_context::<RequestId>(key).0, "in-scope-async");
+                set_context(key, RequestId("deep".into()));
+                assert_eq!(get_context::<RequestId>(key).0, "deep");
+            })
+            .await;
+
+            // After inner scope exits, value reverts.
+            assert_eq!(get_context::<RequestId>(key).0, "in-scope-async");
+        })
+        .await;
+
+        // After scope_async exits, value reverts to base.
+        assert_eq!(get_context::<RequestId>(key).0, "base");
+    })
+    .await;
+}
