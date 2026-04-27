@@ -21,7 +21,7 @@ pub(crate) fn push_guard(id: &span::Id, guard: dcontext::ScopeGuard) {
 ///
 /// The guard is extracted from the stack first, then dropped **outside** the
 /// `SCOPE_GUARDS` borrow. This prevents `ScopeGuard::drop` (which calls
-/// `leave_scope` → `borrow_mut CONTEXT`) from running while `SCOPE_GUARDS`
+/// `leave_scope` → `Cell::take CONTEXT`) from running while `SCOPE_GUARDS`
 /// is still mutably borrowed.
 pub(crate) fn pop_guard(id: &span::Id) {
     let guard = SCOPE_GUARDS.with(|stack| {

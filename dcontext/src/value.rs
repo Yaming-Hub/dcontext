@@ -2,7 +2,7 @@ use std::any::Any;
 
 use crate::error::ContextError;
 
-/// Type-erased context value. Stored as trait objects in the scope stack.
+/// Type-erased context value. Stored as `Arc<dyn ContextValue>` in the scope chain.
 pub(crate) trait ContextValue: Any + Send + Sync {
     /// Clone into a new boxed trait object.
     fn clone_boxed(&self) -> Box<dyn ContextValue>;
