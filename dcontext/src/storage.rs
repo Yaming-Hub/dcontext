@@ -32,20 +32,14 @@ pub(crate) fn with_current_stack<R>(mut f: impl FnMut(&RefCell<ContextStack>) ->
                     .expect("invariant: closure set the result when try_with succeeded");
             }
 
-            // No task-local. Are we inside an async runtime?
-            // (Skip this check during tests to avoid false panics)
-            #[cfg(not(test))]
-            if tokio::runtime::Handle::try_current().is_ok() {
-                panic!(
-                    "dcontext: context accessed inside Tokio runtime without \
-                     with_context(). Wrap your task with \
-                     dcontext::spawn_with_context_async() or dcontext::with_context()."
-                );
-            }
+            // No task-local found inside Tokio runtime.
+            // Fall through to thread-local storage instead of panicking.
+            // This is the correct behavior for startup code, tracing layer
+            // callbacks, and fire-and-forget tasks that have no request context.
         }
     }
 
-    // Pure sync path — use thread-local.
+    // Sync path or async-without-task-local — use thread-local.
     CONTEXT.with(|stack| f(stack))
 }
 
