@@ -2,9 +2,6 @@ use std::collections::HashMap;
 
 use crate::value::ContextValue;
 
-/// Maximum number of entries in a scope chain to prevent unbounded growth.
-pub(crate) const MAX_SCOPE_CHAIN_LEN: usize = 64;
-
 /// A single scope layer in the context stack.
 pub(crate) struct Scope {
     /// Optional human-readable name for this scope.
@@ -60,9 +57,32 @@ pub(crate) struct ContextStack {
     read_cache: HashMap<&'static str, usize>,
     /// Scope chain received from a remote caller (or snapshot restore).
     /// Represents the sender's full scope chain at the time of serialization.
+    ///
+    /// # Immutability guarantees
+    ///
+    /// The remote chain is **structurally read-only** from the user's perspective:
+    ///
+    /// - It is a plain `Vec<String>`, NOT backed by actual `Scope` entries in
+    ///   the stack. Remote scopes cannot be "popped" — they don't exist as
+    ///   stack frames, only as metadata.
+    /// - No public API exposes mutation of this field; users can only observe
+    ///   the chain via the public `scope_chain()` function.
+    /// - `set_remote_chain()` is `pub(crate)` and is only called by
+    ///   `deserialize_context()`, `attach()`, and `install_snapshot()`. Each
+    ///   call saves the previous chain on the current scope via
+    ///   `saved_remote_chain`, providing LIFO restoration when the scope is
+    ///   popped.
+    ///
+    /// Together these properties ensure that receiver code cannot exit past
+    /// the deserialization boundary or tamper with scope names that existed
+    /// only on the sender.
     pub(crate) remote_chain: Vec<String>,
     /// The scope index from which local names should be collected.
-    /// Scopes below this index are "covered" by remote_chain.
+    /// Scopes below this index are "covered" by remote_chain — their names
+    /// (if any) are not included in `scope_chain()` to avoid double-counting.
+    ///
+    /// Set by `set_remote_chain()` to `self.scopes.len()` at the time the
+    /// chain is installed, and by `from_values_with_chain()` to 1 (past root).
     remote_chain_base: usize,
 }
 
@@ -209,19 +229,17 @@ impl ContextStack {
             .filter_map(|s| s.name.as_ref().cloned())
             .collect::<Vec<_>>();
 
-        let total = self.remote_chain.len() + local_names.len();
-        if total <= MAX_SCOPE_CHAIN_LEN {
-            let mut chain = self.remote_chain.clone();
-            chain.extend(local_names);
-            chain
-        } else {
+        let max_len = crate::config::max_scope_chain_len();
+        let mut chain = self.remote_chain.clone();
+        chain.extend(local_names);
+
+        if max_len > 0 && chain.len() > max_len {
             // Truncate: keep the most recent entries (drop oldest from remote prefix).
-            let mut chain = self.remote_chain.clone();
-            chain.extend(local_names);
-            let start = chain.len().saturating_sub(MAX_SCOPE_CHAIN_LEN);
+            let start = chain.len() - max_len;
             chain.drain(..start);
-            chain
         }
+
+        chain
     }
 }
 

@@ -97,7 +97,8 @@ pub use wire::{serialize_context_string, deserialize_context_string};
 
 // ── Configuration ──────────────────────────────────────────────
 
-pub use config::{set_max_context_size, max_context_size};
+pub use config::{set_max_context_size, max_context_size,
+                 set_max_scope_chain_len, max_scope_chain_len};
 
 // ── Core get/set API ───────────────────────────────────────────
 
