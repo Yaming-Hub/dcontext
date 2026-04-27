@@ -5,10 +5,20 @@ use crate::registry;
 use crate::scope::ScopeGuard;
 use crate::storage;
 
-const WIRE_VERSION: u32 = 1;
+const WIRE_VERSION: u32 = 2;
 
+/// Wire format v2: includes scope chain alongside entries.
 #[derive(Serialize, Deserialize)]
 struct WireContext {
+    version: u32,
+    entries: Vec<WireEntry>,
+    /// The scope chain at serialization time. Empty for v1 messages.
+    scope_chain: Vec<String>,
+}
+
+/// Wire format v1: entries only, no scope chain.
+#[derive(Serialize, Deserialize)]
+struct WireContextV1 {
     version: u32,
     entries: Vec<WireEntry>,
 }
@@ -55,6 +65,7 @@ pub fn serialize_context() -> Result<Vec<u8>, ContextError> {
     let wire = WireContext {
         version: WIRE_VERSION,
         entries,
+        scope_chain: storage::collect_scope_chain(),
     };
 
     let bytes = bincode::serialize(&wire)
@@ -75,19 +86,17 @@ pub fn serialize_context_string() -> Result<String, ContextError> {
 
 /// Restore context from bytes. Pushes a new scope with deserialized values.
 pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
-    let wire: WireContext =
-        bincode::deserialize(bytes).map_err(|e| ContextError::DeserializationFailed(e.to_string()))?;
-
-    if wire.version != WIRE_VERSION {
-        return Err(ContextError::DeserializationFailed(format!(
-            "unsupported wire version: {} (expected {})",
-            wire.version, WIRE_VERSION
-        )));
-    }
+    // Parse version prefix to decide format.
+    let (entries, scope_chain) = deserialize_wire(bytes)?;
 
     let guard = storage::enter_scope();
 
-    for entry in &wire.entries {
+    // Restore remote scope chain.
+    if !scope_chain.is_empty() {
+        storage::set_remote_chain(scope_chain);
+    }
+
+    for entry in &entries {
         let key_str = entry.key.as_str();
         // Single registry lookup: find the right versioned deserializer.
         let restored = registry::with_registration(key_str, |reg| {
@@ -122,6 +131,29 @@ pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
     Ok(guard)
 }
 
+/// Deserialize wire bytes, handling both v1 and v2 formats.
+fn deserialize_wire(bytes: &[u8]) -> Result<(Vec<WireEntry>, Vec<String>), ContextError> {
+    // Try v2 first (current version).
+    if let Ok(wire) = bincode::deserialize::<WireContext>(bytes) {
+        if wire.version == 2 {
+            return Ok((wire.entries, wire.scope_chain));
+        }
+    }
+
+    // Fall back to v1.
+    let wire: WireContextV1 = bincode::deserialize(bytes)
+        .map_err(|e| ContextError::DeserializationFailed(e.to_string()))?;
+
+    if wire.version != 1 {
+        return Err(ContextError::DeserializationFailed(format!(
+            "unsupported wire version: {} (expected 1 or 2)",
+            wire.version
+        )));
+    }
+
+    Ok((wire.entries, Vec::new()))
+}
+
 /// Restore context from a base64-encoded string.
 #[cfg(feature = "base64")]
 pub fn deserialize_context_string(encoded: &str) -> Result<ScopeGuard, ContextError> {
@@ -139,21 +171,44 @@ pub fn deserialize_context_string(encoded: &str) -> Result<ScopeGuard, ContextEr
 /// In production, wire bytes come from `serialize_context()` on the sender.
 /// This function is useful in tests and samples to simulate cross-version
 /// scenarios within a single process.
+///
+/// The `wire_version` parameter controls which wire format version to emit.
+/// Use `1` to simulate a pre-scope-chain sender, or `2` (current) for full format.
 pub fn make_wire_bytes(key: &str, key_version: u32, value_bytes: &[u8]) -> Vec<u8> {
-    let wire = WireContext {
-        version: WIRE_VERSION,
-        entries: vec![WireEntry {
-            key: key.to_string(),
-            key_version,
-            value: value_bytes.to_vec(),
-        }],
-    };
-    bincode::serialize(&wire)
-        .expect("dcontext::make_wire_bytes: bincode serialization should not fail")
+    make_wire_bytes_v(2, key, key_version, value_bytes)
+}
+
+/// Like [`make_wire_bytes`] but allows specifying the wire format version.
+pub fn make_wire_bytes_v(wire_version: u32, key: &str, key_version: u32, value_bytes: &[u8]) -> Vec<u8> {
+    if wire_version == 1 {
+        // V1 format: no scope_chain field.
+        let wire = WireContextV1 {
+            version: 1,
+            entries: vec![WireEntry {
+                key: key.to_string(),
+                key_version,
+                value: value_bytes.to_vec(),
+            }],
+        };
+        bincode::serialize(&wire)
+            .expect("dcontext::make_wire_bytes_v: bincode serialization should not fail")
+    } else {
+        let wire = WireContext {
+            version: wire_version,
+            entries: vec![WireEntry {
+                key: key.to_string(),
+                key_version,
+                value: value_bytes.to_vec(),
+            }],
+            scope_chain: Vec::new(),
+        };
+        bincode::serialize(&wire)
+            .expect("dcontext::make_wire_bytes_v: bincode serialization should not fail")
+    }
 }
 
 /// Test helpers (re-exports make_wire_bytes for internal tests).
 #[cfg(test)]
 pub(crate) mod test_helpers {
-    pub use super::make_wire_bytes;
+    pub use super::{make_wire_bytes, make_wire_bytes_v};
 }

@@ -111,13 +111,20 @@ impl InboundInterceptor for ContextInboundInterceptor {
 
     fn wrap_handler<'a>(
         &'a self,
-        _ctx: &InboundContext<'_>,
+        ctx: &InboundContext<'_>,
         headers: &Headers,
     ) -> Option<HandlerWrapper<'a>> {
         // Extract the snapshot prepared by on_receive (or outbound for local hops).
         let snapshot = headers.get::<ContextSnapshotHeader>()?.snapshot.clone();
+        // Create a named scope for the remote call boundary, e.g. "remote:MyActor".
+        let scope_name = format!("remote:{}", ctx.actor_name);
         Some(Box::new(move |next| {
-            Box::pin(dcontext::with_context(snapshot, next))
+            Box::pin(async move {
+                let result = dcontext::with_context(snapshot, async move {
+                    dcontext::named_scope_async(scope_name, next).await
+                }).await;
+                result
+            })
         }))
     }
 

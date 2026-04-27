@@ -145,6 +145,10 @@ where
 /// Returns a ScopeGuard that pops on drop.
 fn install_snapshot(snap: &ContextSnapshot) -> crate::scope::ScopeGuard {
     let guard = storage::enter_scope();
+    // Restore the scope chain from the snapshot.
+    if !snap.scope_chain.is_empty() {
+        storage::set_remote_chain(snap.scope_chain.clone());
+    }
     for (key, val) in snap.values.iter() {
         storage::set_value(key, val.clone_boxed());
     }

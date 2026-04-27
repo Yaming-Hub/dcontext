@@ -58,6 +58,19 @@ pub fn enter_scope() -> ScopeGuard {
     })
 }
 
+/// Push a new **named** scope and return a guard.
+///
+/// Named scopes appear in [`scope_chain()`] — they form a lightweight call
+/// stack that is propagated across process boundaries.
+pub fn enter_named_scope(name: impl Into<String>) -> ScopeGuard {
+    let name = name.into();
+    with_current_stack(|cell| {
+        let mut stack = cell.borrow_mut();
+        let (id, depth) = stack.push_named_scope(name.clone());
+        ScopeGuard::new(id, depth)
+    })
+}
+
 /// Pop a scope (called by ScopeGuard::drop).
 pub(crate) fn leave_scope(expected_depth: usize) {
     with_current_stack(|cell| {
@@ -98,6 +111,35 @@ where
     result
 }
 
+/// Async version of [`enter_named_scope`]: execute a future in a new **named** scope.
+///
+/// Like [`scope_async`], this avoids holding the `!Send` [`ScopeGuard`] across
+/// `.await` points by manually managing push/pop.
+///
+/// Named scopes appear in [`scope_chain()`] and propagate across process
+/// boundaries via serialization.
+#[cfg(feature = "tokio")]
+pub async fn named_scope_async<F, R>(name: impl Into<String>, f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    let name = name.into();
+    let depth = with_current_stack(|cell| {
+        let mut stack = cell.borrow_mut();
+        let (_id, depth) = stack.push_named_scope(name.clone());
+        depth
+    });
+
+    let result = f.await;
+
+    with_current_stack(|cell| {
+        let mut stack = cell.borrow_mut();
+        stack.pop_scope(depth);
+    });
+
+    result
+}
+
 /// Get a value from the context. Returns a clone.
 /// The RefCell borrow is released before cloning user data (C3 safety).
 pub(crate) fn get_value(key: &str) -> Option<Box<dyn ContextValue>> {
@@ -129,6 +171,35 @@ pub(crate) fn collect_values() -> std::collections::HashMap<&'static str, Box<dy
             .into_iter()
             .map(|(k, v)| (k, v.clone_boxed()))
             .collect()
+    })
+}
+
+/// Return the current scope chain: remote prefix + local named scope names.
+///
+/// The scope chain is a lightweight representation of the execution path —
+/// similar to a call stack but expressed as a list of named scopes. It
+/// includes scope names from remote callers that were propagated via
+/// serialization, followed by local named scopes in the current process.
+///
+/// Unnamed scopes (created with [`enter_scope()`]) are invisible in the chain.
+pub fn scope_chain() -> Vec<String> {
+    with_current_stack(|cell| {
+        let stack = cell.borrow();
+        stack.scope_chain()
+    })
+}
+
+/// Collect the scope chain for serialization.
+pub(crate) fn collect_scope_chain() -> Vec<String> {
+    scope_chain()
+}
+
+/// Store a remote scope chain in the current context stack.
+/// The previous chain is saved on the topmost scope for LIFO restoration.
+pub(crate) fn set_remote_chain(chain: Vec<String>) {
+    with_current_stack(|cell| {
+        let mut stack = cell.borrow_mut();
+        stack.set_remote_chain(chain.clone());
     })
 }
 

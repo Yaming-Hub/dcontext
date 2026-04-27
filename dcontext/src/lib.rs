@@ -65,10 +65,10 @@ pub(crate) use registry::{register, try_register, register_with, try_register_wi
 
 // ── Scope management ───────────────────────────────────────────
 
-pub use storage::{enter_scope, scope, force_thread_local};
+pub use storage::{enter_scope, enter_named_scope, scope, scope_chain, force_thread_local};
 
 #[cfg(feature = "tokio")]
-pub use storage::scope_async;
+pub use storage::{scope_async, named_scope_async};
 
 // ── Snapshot / Clone ───────────────────────────────────────────
 
@@ -90,7 +90,7 @@ pub use context_future::{ContextFuture, with_context_future};
 
 // ── Serialization ──────────────────────────────────────────────
 
-pub use wire::{serialize_context, deserialize_context, make_wire_bytes};
+pub use wire::{serialize_context, deserialize_context, make_wire_bytes, make_wire_bytes_v};
 
 #[cfg(feature = "base64")]
 pub use wire::{serialize_context_string, deserialize_context_string};
