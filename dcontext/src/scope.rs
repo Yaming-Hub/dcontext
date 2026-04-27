@@ -260,6 +260,16 @@ impl ScopeGuard {
             _not_send: std::marker::PhantomData,
         }
     }
+
+    /// Create a no-op guard that does nothing on drop.
+    /// Used when a scope cannot be pushed due to re-entrant RefCell access.
+    pub(crate) fn noop() -> Self {
+        Self {
+            scope_id: 0,
+            expected_depth: usize::MAX,
+            _not_send: std::marker::PhantomData,
+        }
+    }
 }
 
 impl Drop for ScopeGuard {

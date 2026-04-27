@@ -44,32 +44,44 @@ pub(crate) fn with_current_stack<R>(mut f: impl FnMut(&RefCell<ContextStack>) ->
 }
 
 /// Push a new scope and return a guard.
+/// Returns a no-op guard if the RefCell is already borrowed (re-entrant access).
 pub fn enter_scope() -> ScopeGuard {
-    with_current_stack(|cell| {
-        let mut stack = cell.borrow_mut();
-        let (id, depth) = stack.push_scope();
-        ScopeGuard::new(id, depth)
+    with_current_stack(|cell| match cell.try_borrow_mut() {
+        Ok(mut stack) => {
+            let (id, depth) = stack.push_scope();
+            ScopeGuard::new(id, depth)
+        }
+        Err(_) => ScopeGuard::noop(),
     })
 }
 
 /// Push a new **named** scope and return a guard.
+/// Returns a no-op guard if the RefCell is already borrowed (re-entrant access).
 ///
 /// Named scopes appear in [`scope_chain()`] — they form a lightweight call
 /// stack that is propagated across process boundaries.
 pub fn enter_named_scope(name: impl Into<String>) -> ScopeGuard {
     let name = name.into();
-    with_current_stack(|cell| {
-        let mut stack = cell.borrow_mut();
-        let (id, depth) = stack.push_named_scope(name.clone());
-        ScopeGuard::new(id, depth)
+    with_current_stack(|cell| match cell.try_borrow_mut() {
+        Ok(mut stack) => {
+            let (id, depth) = stack.push_named_scope(name.clone());
+            ScopeGuard::new(id, depth)
+        }
+        Err(_) => ScopeGuard::noop(),
     })
 }
 
 /// Pop a scope (called by ScopeGuard::drop).
+/// Silently skips if the RefCell is already borrowed (re-entrant access)
+/// or if the guard is a noop sentinel (expected_depth == usize::MAX).
 pub(crate) fn leave_scope(expected_depth: usize) {
+    if expected_depth == usize::MAX {
+        return; // noop guard
+    }
     with_current_stack(|cell| {
-        let mut stack = cell.borrow_mut();
-        stack.pop_scope(expected_depth);
+        if let Ok(mut stack) = cell.try_borrow_mut() {
+            stack.pop_scope(expected_depth);
+        }
     })
 }
 
@@ -79,24 +91,42 @@ pub fn scope<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// RAII guard that pops a scope during unwind if the async future panics.
+/// On the normal path, the caller calls `std::mem::forget(cleanup)` to disarm it.
+#[cfg(feature = "tokio")]
+struct ScopeCleanup(usize);
+
+#[cfg(feature = "tokio")]
+impl Drop for ScopeCleanup {
+    fn drop(&mut self) {
+        with_current_stack(|cell| {
+            if let Ok(mut stack) = cell.try_borrow_mut() {
+                stack.pop_scope(self.0);
+            }
+            // If borrow fails during unwind, scope leaks — acceptable.
+        });
+    }
+}
+
 /// Async version: execute a future in a new scope.
 /// The scope is entered before polling and exited after the future completes.
+/// If the future panics, the scope is cleaned up during unwind.
 #[cfg(feature = "tokio")]
 pub async fn scope_async<F, R>(f: F) -> R
 where
     F: std::future::Future<Output = R>,
 {
-    // Enter scope and record the depth, but don't hold the !Send guard
-    // across the .await point. Instead, manually manage enter/leave.
     let depth = with_current_stack(|cell| {
         let mut stack = cell.borrow_mut();
         let (_id, depth) = stack.push_scope();
         depth
     });
 
+    let cleanup = ScopeCleanup(depth);
     let result = f.await;
 
-    // Manually pop the scope after the future completes.
+    // Normal path: disarm the cleanup guard and pop scope explicitly.
+    std::mem::forget(cleanup);
     with_current_stack(|cell| {
         let mut stack = cell.borrow_mut();
         stack.pop_scope(depth);
@@ -108,7 +138,8 @@ where
 /// Async version of [`enter_named_scope`]: execute a future in a new **named** scope.
 ///
 /// Like [`scope_async`], this avoids holding the `!Send` [`ScopeGuard`] across
-/// `.await` points by manually managing push/pop.
+/// `.await` points by manually managing push/pop. If the future panics, the
+/// scope is cleaned up during unwind.
 ///
 /// Named scopes appear in [`scope_chain()`] and propagate across process
 /// boundaries via serialization.
@@ -124,8 +155,10 @@ where
         depth
     });
 
+    let cleanup = ScopeCleanup(depth);
     let result = f.await;
 
+    std::mem::forget(cleanup);
     with_current_stack(|cell| {
         let mut stack = cell.borrow_mut();
         stack.pop_scope(depth);
@@ -135,51 +168,56 @@ where
 }
 
 /// Get a value from the context. Returns a clone.
-/// The RefCell borrow is released before cloning user data (C3 safety).
+/// Returns `None` if the RefCell is already mutably borrowed (re-entrant access).
 pub(crate) fn get_value(key: &str) -> Option<Box<dyn ContextValue>> {
     with_current_stack(|cell| {
-        let stack = cell.borrow();
-        stack.lookup(key).map(|v| v.clone_boxed())
-        // borrow released here
+        cell.try_borrow()
+            .ok()
+            .and_then(|stack| stack.lookup(key).map(|v| v.clone_boxed()))
     })
 }
 
 /// Set a value in the current topmost scope.
-/// Old value is dropped outside the RefCell borrow to prevent re-entrancy panics (B3).
+/// Silently skips if the RefCell is already borrowed (re-entrant access).
+/// Old value is dropped outside the RefCell borrow to prevent re-entrancy panics.
 pub(crate) fn set_value(key: &'static str, value: Box<dyn ContextValue>) {
     let mut value = Some(value);
     let _old = with_current_stack(|cell| {
-        let mut stack = cell.borrow_mut();
-        stack.set(key, value.take().expect("invariant: value is always Some on entry"))
-        // old value returned here, borrow released
+        match cell.try_borrow_mut() {
+            Ok(mut stack) => {
+                stack.set(key, value.take().expect("invariant: value is always Some on entry"))
+            }
+            Err(_) => None,
+        }
     });
     // _old dropped here, outside the borrow — safe if Drop calls get_context
 }
 
 /// Collect all effective values (for snapshot/serialization).
+/// Returns an empty map if the RefCell is already mutably borrowed.
 pub(crate) fn collect_values() -> std::collections::HashMap<&'static str, Box<dyn ContextValue>> {
     with_current_stack(|cell| {
-        let stack = cell.borrow();
-        stack
-            .merged_values()
-            .into_iter()
-            .map(|(k, v)| (k, v.clone_boxed()))
-            .collect()
+        match cell.try_borrow() {
+            Ok(stack) => stack
+                .merged_values()
+                .into_iter()
+                .map(|(k, v)| (k, v.clone_boxed()))
+                .collect(),
+            Err(_) => std::collections::HashMap::new(),
+        }
     })
 }
 
 /// Return the current scope chain: remote prefix + local named scope names.
 ///
-/// The scope chain is a lightweight representation of the execution path —
-/// similar to a call stack but expressed as a list of named scopes. It
-/// includes scope names from remote callers that were propagated via
-/// serialization, followed by local named scopes in the current process.
-///
-/// Unnamed scopes (created with [`enter_scope()`]) are invisible in the chain.
+/// Returns an empty `Vec` if the context stack is currently borrowed by a
+/// write operation (re-entrant access from tracing callbacks, etc.).
 pub fn scope_chain() -> Vec<String> {
     with_current_stack(|cell| {
-        let stack = cell.borrow();
-        stack.scope_chain()
+        match cell.try_borrow() {
+            Ok(stack) => stack.scope_chain(),
+            Err(_) => Vec::new(),
+        }
     })
 }
 
@@ -189,11 +227,12 @@ pub(crate) fn collect_scope_chain() -> Vec<String> {
 }
 
 /// Store a remote scope chain in the current context stack.
-/// The previous chain is saved on the topmost scope for LIFO restoration.
+/// Silently skips if the RefCell is already borrowed (re-entrant access).
 pub(crate) fn set_remote_chain(chain: Vec<String>) {
     with_current_stack(|cell| {
-        let mut stack = cell.borrow_mut();
-        stack.set_remote_chain(chain.clone());
+        if let Ok(mut stack) = cell.try_borrow_mut() {
+            stack.set_remote_chain(chain.clone());
+        }
     })
 }
 
