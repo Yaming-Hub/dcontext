@@ -17,27 +17,27 @@ where
 }
 
 /// Run an async block with the given snapshot established as task-local context.
-#[cfg(feature = "tokio")]
 pub async fn with_context<F, T>(snap: ContextSnapshot, f: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    use crate::scope::ContextStack;
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    use crate::storage::ContextStore;
     use crate::storage::TASK_CONTEXT;
-    use std::cell::RefCell;
 
     let chain = snap.scope_chain.clone();
     let values = snap
         .values
         .iter()
-        .map(|(k, v)| (*k, v.clone_boxed()))
+        .map(|(k, v)| (*k, Arc::clone(v)))
         .collect();
-    let stack = ContextStack::from_values_with_chain(values, chain);
-    TASK_CONTEXT.scope(RefCell::new(stack), f).await
+    let store = ContextStore::from_values_with_chain(values, chain);
+    TASK_CONTEXT.scope(Cell::new(Some(store)), f).await
 }
 
 /// Spawn a Tokio task that inherits the current context.
-#[cfg(feature = "tokio")]
 pub fn spawn_with_context_async<F>(future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: std::future::Future + Send + 'static,

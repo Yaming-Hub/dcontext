@@ -119,7 +119,7 @@ pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
 
         match restored {
             Some(Some((static_key, Ok(val)))) => {
-                storage::set_value(static_key, val);
+                storage::set_value(static_key, std::sync::Arc::from(val));
             }
             Some(Some((_, Err(e)))) => return Err(e),
             Some(None) | None => {

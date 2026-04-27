@@ -1,5 +1,36 @@
 # dcontext — Detailed Design
 
+> **v0.4.0 Architecture Change — Cell-based Contention-free Storage**
+>
+> Starting with v0.4.0, the internal storage was redesigned to eliminate
+> `RefCell` re-entrancy panics. The key changes:
+>
+> - **`Cell<Option<ContextStore>>`** replaces `RefCell<ContextStack>` in both
+>   thread-local and task-local storage. The `Cell` take/set pattern ensures
+>   that no user code (Clone, Drop, callbacks) runs while the store is
+>   temporarily moved out. Re-entrant access during the brief "busy" window
+>   sees `None` and returns defaults gracefully — no panics.
+>
+> - **`Arc<dyn ContextValue>`** replaces `Box<dyn ContextValue>` for all
+>   stored values. Scope push/pop only bumps reference counts (no user Clone).
+>   Values are shared cheaply across scope chain nodes and snapshots.
+>
+> - **Sparse scopes with parent-chain fallback**: each scope only stores keys
+>   that were explicitly set in that scope. Reads walk the parent chain
+>   (`O(depth)`). Keys registered with `.cached()` are eagerly copied
+>   (`Arc::clone`) into each new scope for `O(1)` reads.
+>
+> - **`ScopeNode`** (immutable, `Arc`-wrapped, `Send + Sync`) forms a
+>   persistent linked list of frozen parent scopes. `Arc::try_unwrap` on
+>   `leave_scope` enables zero-copy restoration when the node is unshared.
+>
+> - **`update_context`** API: read-modify-write as three separate operations.
+>   The callback runs with the store fully available (not "busy"), so
+>   re-entrant reads work. Last-writer-wins on concurrent updates — by design.
+>
+> The descriptions below of `RefCell`, `ContextStack`, and borrow safety
+> reflect the pre-v0.4.0 architecture and are retained for historical reference.
+
 ## 1. Overview
 
 `dcontext` is a **distributed context propagation** library for Rust. It provides a scoped, type-safe key–value store that travels with the execution flow — across function calls, async/sync boundaries, thread spawns, and even process boundaries via serialization.

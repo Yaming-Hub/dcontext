@@ -74,7 +74,6 @@ pub(crate) use registry::{register, try_register, register_with, try_register_wi
 
 pub use storage::{enter_scope, enter_named_scope, scope, scope_chain, force_thread_local};
 
-#[cfg(feature = "tokio")]
 pub use storage::{scope_async, named_scope_async};
 
 // ── Snapshot / Clone ───────────────────────────────────────────
@@ -87,7 +86,6 @@ pub use helpers::spawn_with_context;
 
 // ── Async helpers (feature-gated) ──────────────────────────────
 
-#[cfg(feature = "tokio")]
 pub use helpers::{with_context, spawn_with_context_async};
 
 // ── Runtime-agnostic async (feature-gated) ─────────────────────
@@ -122,6 +120,16 @@ where
         .unwrap_or_default()
 }
 
+/// Get a context value as `Option<T>`. Returns `None` if the key is not set.
+/// Panics if the key is not registered.
+pub fn get_context_option<T>(key: &'static str) -> Option<T>
+where
+    T: Clone + Default + Send + Sync + 'static,
+{
+    try_get_context::<T>(key)
+        .expect("dcontext::get_context_option: key not registered")
+}
+
 /// Get a context value. Returns `Ok(Some(T))` if set, `Ok(None)` if registered
 /// but not set, `Err` if not registered.
 pub fn try_get_context<T>(key: &'static str) -> Result<Option<T>, ContextError>
@@ -129,8 +137,8 @@ where
     T: Clone + Default + Send + Sync + 'static,
 {
     // Hot path: try to get the value from storage first (no registry lock).
-    let boxed = storage::get_value(key);
-    match boxed {
+    let arc = storage::get_value(key);
+    match arc {
         Some(val) => {
             let any_ref = val.as_any();
             match any_ref.downcast_ref::<T>() {
@@ -195,7 +203,7 @@ where
         Some(_) => {}
     }
 
-    storage::set_value(key, Box::new(value));
+    storage::set_value(key, std::sync::Arc::new(value));
     Ok(())
 }
 
@@ -225,8 +233,70 @@ where
         Some(_) => {}
     }
 
-    storage::set_value(key, Box::new(crate::value::LocalValue(value)));
+    storage::set_value(key, std::sync::Arc::new(crate::value::LocalValue(value)));
     Ok(())
+}
+
+// ── Update API (read-modify-write) ─────────────────────────────
+
+/// Update a context value using a callback. Reads the current value,
+/// passes it to `f`, and writes the result back.
+///
+/// This is **not atomic**: another write may interleave between the read
+/// and the write. Last writer wins — this is by design for contention-free
+/// access. The callback runs with the store fully available (no "busy"
+/// window), so re-entrant reads from tracing callbacks etc. work normally.
+///
+/// Panics if the key is not registered or type doesn't match.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// update_context::<Counter>("counter", |c| Counter(c.0 + 1));
+/// ```
+pub fn update_context<T>(key: &'static str, f: impl FnOnce(T) -> T)
+where
+    T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    try_update_context::<T>(key, f).expect("dcontext::update_context failed");
+}
+
+/// Update a context value using a callback. Returns Err on type mismatch
+/// or if the key is not registered.
+///
+/// See [`update_context`] for details on semantics and concurrency.
+pub fn try_update_context<T>(key: &'static str, f: impl FnOnce(T) -> T) -> Result<(), ContextError>
+where
+    T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    // Step 1: Read current value (brief store window — just Arc::clone).
+    let old = try_get_context::<T>(key)?.unwrap_or_default();
+
+    // Step 2: User callback — store is fully available.
+    let new = f(old);
+
+    // Step 3: Write new value (brief store window — just pointer swap).
+    try_set_context(key, new)
+}
+
+/// Update a local-only context value using a callback.
+/// Panics if the key is not registered or type doesn't match.
+pub fn update_context_local<T>(key: &'static str, f: impl FnOnce(T) -> T)
+where
+    T: Clone + Default + Send + Sync + 'static,
+{
+    try_update_context_local::<T>(key, f).expect("dcontext::update_context_local failed");
+}
+
+/// Update a local-only context value using a callback. Returns Err on type
+/// mismatch or if the key is not registered.
+pub fn try_update_context_local<T>(key: &'static str, f: impl FnOnce(T) -> T) -> Result<(), ContextError>
+where
+    T: Clone + Default + Send + Sync + 'static,
+{
+    let old = try_get_context::<T>(key)?.unwrap_or_default();
+    let new = f(old);
+    try_set_context_local(key, new)
 }
 
 // ── Tests ──────────────────────────────────────────────────────

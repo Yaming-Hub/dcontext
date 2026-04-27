@@ -39,7 +39,7 @@ use crate::storage;
 /// When `ContextFuture::poll()` is called by the executor, it calls
 /// `force_thread_local(|| { ... })`, which increments the thread-local
 /// `FORCE_THREAD_LOCAL_DEPTH` counter. This counter stays > 0 for the entire
-/// duration of the poll. The context dispatch function (`with_current_stack`)
+/// duration of the poll. The context dispatch function (`with_current_cell`)
 /// checks this counter first — if > 0, it skips task-local lookup and goes
 /// straight to thread-local storage. Since the snapshot has been installed in
 /// thread-local, all `get_context`/`set_context` calls during the poll will
@@ -64,7 +64,7 @@ use crate::storage;
 /// |---|---|---|
 /// | **Runtime** | Tokio only | Any executor |
 /// | **Mechanism** | `tokio::task_local!` | Thread-local + poll-wrapper |
-/// | **Feature flag** | `tokio` | `context-future` |
+/// | **Feature flag** | *(always available)* | `context-future` |
 /// | **Inner code needs wrappers?** | No | No |
 /// | **Overhead per poll** | None (task-local is persistent) | O(N) snapshot install/teardown |
 ///
@@ -150,7 +150,7 @@ fn install_snapshot(snap: &ContextSnapshot) -> crate::scope::ScopeGuard {
         storage::set_remote_chain(snap.scope_chain.clone());
     }
     for (key, val) in snap.values.iter() {
-        storage::set_value(key, val.clone_boxed());
+        storage::set_value(key, std::sync::Arc::clone(val));
     }
     guard
 }
