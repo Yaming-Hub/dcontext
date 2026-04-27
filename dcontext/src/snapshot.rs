@@ -8,7 +8,7 @@ use crate::value::ContextValue;
 /// An immutable snapshot of the current context. Clone + Send + Sync.
 #[derive(Clone)]
 pub struct ContextSnapshot {
-    pub(crate) values: Arc<HashMap<&'static str, Box<dyn ContextValue>>>,
+    pub(crate) values: Arc<HashMap<&'static str, Arc<dyn ContextValue>>>,
     /// The scope chain at the time the snapshot was taken.
     pub(crate) scope_chain: Vec<String>,
 }
@@ -51,9 +51,9 @@ pub fn attach(snap: ContextSnapshot) -> ScopeGuard {
     if !snap.scope_chain.is_empty() {
         storage::set_remote_chain(snap.scope_chain.clone());
     }
-    // Clone each value from the snapshot into the new scope.
+    // Clone each Arc value from the snapshot into the new scope.
     for (key, val) in snap.values.iter() {
-        storage::set_value(key, val.clone_boxed());
+        storage::set_value(key, Arc::clone(val));
     }
     guard
 }

@@ -108,6 +108,20 @@ builder.register_with::<TraceContext>("trace_ctx", |opts| {
 });
 ```
 
+### Per-scope caching
+
+By default, reading a value walks the parent scope chain (`O(depth)`).
+For lightweight values that are read frequently (e.g. request IDs, trace IDs),
+enable per-scope caching to get `O(1)` reads:
+
+```rust
+// Cached: effective value is Arc::cloned into each new scope on entry
+builder.register_with::<RequestId>("request_id", |opts| opts.cached());
+
+// Not cached (default): reads walk parent scopes, no copy on scope entry
+builder.register::<LargePayload>("payload");
+```
+
 See [Custom Codecs](#11-custom-codecs) and [Version Migration](#12-version-migration)
 for details.
 
@@ -208,6 +222,22 @@ match dcontext::try_get_context::<RequestId>("request_id") {
     Err(e)        => println!("error: {}", e),
 }
 ```
+
+### Updating values (read-modify-write)
+
+Use `update_context` to read the current value, transform it, and write back:
+
+```rust
+update_context::<Counter>("counter", |c| Counter(c.0 + 1));
+```
+
+This is a convenience over separate `get_context` + `set_context` calls. The
+callback runs with the store fully available — re-entrant reads from tracing
+callbacks work normally during the callback.
+
+> **Note:** `update_context` is **not atomic** — another write may interleave
+> between the read and the write. Last writer wins. This is by design for
+> contention-free access.
 
 ---
 
@@ -344,7 +374,7 @@ For executors other than Tokio (async-std, smol, etc.), enable the
 
 ```toml
 [dependencies]
-dcontext = { version = "0.3", features = ["context-future"] }
+dcontext = { version = "0.4", features = ["context-future"] }
 ```
 
 ### ContextFuture
@@ -892,11 +922,11 @@ ContextInboundInterceptor::new(ErrorPolicy::Reject);
 ### Minimal (no async)
 
 ```toml
-dcontext = { version = "0.3", default-features = false }
+dcontext = { version = "0.4", default-features = false }
 ```
 
 ### Full (all features)
 
 ```toml
-dcontext = { version = "0.3", features = ["context-future"] }
+dcontext = { version = "0.4", features = ["context-future"] }
 ```

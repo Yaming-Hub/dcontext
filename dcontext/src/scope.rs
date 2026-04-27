@@ -69,17 +69,12 @@ impl ContextStore {
     /// Build a store from a set of values and a remote scope chain.
     /// Used by snapshot attach and task-local initialization.
     pub(crate) fn from_values_with_chain(
-        values: HashMap<&'static str, Box<dyn ContextValue>>,
+        values: HashMap<&'static str, Arc<dyn ContextValue>>,
         remote_chain: Vec<String>,
     ) -> Self {
-        let current_values: HashMap<&'static str, Arc<dyn ContextValue>> = values
-            .into_iter()
-            .map(|(k, v)| (k, Arc::from(v)))
-            .collect();
-
         Self {
             scope_chain: None,
-            current_values,
+            current_values: values,
             current_name: None,
             depth: 1,
             remote_chain: Arc::new(remote_chain),

@@ -150,7 +150,7 @@ fn install_snapshot(snap: &ContextSnapshot) -> crate::scope::ScopeGuard {
         storage::set_remote_chain(snap.scope_chain.clone());
     }
     for (key, val) in snap.values.iter() {
-        storage::set_value(key, val.clone_boxed());
+        storage::set_value(key, std::sync::Arc::clone(val));
     }
     guard
 }
