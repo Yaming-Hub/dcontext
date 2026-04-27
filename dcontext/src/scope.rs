@@ -1,240 +1,263 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::value::ContextValue;
 
-/// A single scope layer in the context stack.
-pub(crate) struct Scope {
-    /// Optional human-readable name for this scope.
-    /// Named scopes appear in the scope chain; unnamed (`None`) are invisible.
+// ── Immutable scope node (frozen parent scopes) ────────────────
+
+/// A frozen scope in the parent chain. Immutable after creation.
+/// `Send + Sync` — safe inside `Arc`.
+pub(crate) struct ScopeNode {
+    /// Human-readable scope name. Named scopes appear in scope_chain().
     pub(crate) name: Option<String>,
-    pub(crate) values: HashMap<&'static str, Box<dyn ContextValue>>,
-    /// Saved remote chain + base from the parent — restored when this scope is popped.
-    /// Only set by `set_remote_chain()` to provide LIFO restore semantics.
-    pub(crate) saved_remote_chain: Option<(Vec<String>, usize)>,
+    /// Values set in this scope (sparse — only keys modified here).
+    pub(crate) values: HashMap<&'static str, Arc<dyn ContextValue>>,
+    /// Link to parent scope.
+    pub(crate) parent: Option<Arc<ScopeNode>>,
+    /// Scope depth at the time this node was created.
+    pub(crate) depth: usize,
+    /// Remote chain state saved at scope entry.
+    pub(crate) remote_chain: Arc<Vec<String>>,
+    pub(crate) remote_chain_base_depth: usize,
 }
 
-impl Scope {
+// ── Mutable context store ──────────────────────────────────────
+
+/// The active context state. Lives in `Cell<Option<ContextStore>>`.
+///
+/// ## Contention-free design
+///
+/// The store is accessed via the `Cell` take/set pattern:
+/// 1. `cell.take()` — move store out (Cell becomes `None` = "busy")
+/// 2. Modify store — only refcount bumps and pointer moves, no user code
+/// 3. `cell.set(Some(store))` — move store back
+///
+/// User code (Clone, Drop, callbacks) runs **after** step 3, when the
+/// Cell holds a valid store. Re-entrant access during user code succeeds.
+/// Re-entrant access during steps 1–3 sees `None` and returns defaults.
+pub(crate) struct ContextStore {
+    /// Frozen parent scope chain (immutable linked list).
+    pub(crate) scope_chain: Option<Arc<ScopeNode>>,
+    /// Active scope's values (sparse — only keys set in this scope).
+    /// For cached keys, the effective value is eagerly copied here on scope entry.
+    /// For non-cached keys, only values explicitly set in this scope appear.
+    pub(crate) current_values: HashMap<&'static str, Arc<dyn ContextValue>>,
+    /// Name of the active scope (if named).
+    pub(crate) current_name: Option<String>,
+    /// Current scope depth (1 = root scope).
+    pub(crate) depth: usize,
+    /// Remote scope chain (from cross-process propagation).
+    pub(crate) remote_chain: Arc<Vec<String>>,
+    /// Scope depth at which remote_chain was installed.
+    /// Local names at depth > this value are included in scope_chain().
+    pub(crate) remote_chain_base_depth: usize,
+}
+
+impl ContextStore {
+    /// Create a new store with an empty root scope.
     pub(crate) fn new() -> Self {
         Self {
-            name: None,
-            values: HashMap::new(),
-            saved_remote_chain: None,
+            scope_chain: None,
+            current_values: HashMap::new(),
+            current_name: None,
+            depth: 1,
+            remote_chain: Arc::new(Vec::new()),
+            remote_chain_base_depth: 0,
         }
     }
 
-    pub(crate) fn named(name: String) -> Self {
-        Self {
-            name: Some(name),
-            values: HashMap::new(),
-            saved_remote_chain: None,
-        }
-    }
-}
-
-/// The stack of scopes. Lives in thread-local or task-local storage.
-///
-/// ## Read cache (S3 optimization)
-///
-/// Lookups walk the scope stack top-down, which is O(depth). Since reads are
-/// expected to dominate writes, `ContextStack` maintains an **index cache** —
-/// a `HashMap` mapping each effective key to the scope index that holds its
-/// current value (topmost wins).
-///
-/// The cache stores only `(&'static str, usize)` pairs — no user values are
-/// cloned. This avoids running user `Clone` code during cache operations,
-/// which is critical for C3 re-entrancy safety.
-///
-/// Cache maintenance:
-/// - `push_scope`: no update needed (new scope is empty, doesn't shadow anything)
-/// - `pop_scope`: full rebuild (popped scope may have been shadowing parent values)
-/// - `set`: O(1) incremental update (insert/overwrite the key's index)
-/// - `lookup`: O(1) via `HashMap::get` + direct scope access
-pub(crate) struct ContextStack {
-    pub(crate) scopes: Vec<Scope>,
-    next_scope_id: u64,
-    /// Index cache: maps each effective key to the scope index holding its value.
-    /// Eagerly maintained — always valid. Stores only indices, never user data.
-    read_cache: HashMap<&'static str, usize>,
-    /// Scope chain received from a remote caller (or snapshot restore).
-    /// Represents the sender's full scope chain at the time of serialization.
-    ///
-    /// # Immutability guarantees
-    ///
-    /// The remote chain is **structurally read-only** from the user's perspective:
-    ///
-    /// - It is a plain `Vec<String>`, NOT backed by actual `Scope` entries in
-    ///   the stack. Remote scopes cannot be "popped" — they don't exist as
-    ///   stack frames, only as metadata.
-    /// - No public API exposes mutation of this field; users can only observe
-    ///   the chain via the public `scope_chain()` function.
-    /// - `set_remote_chain()` is `pub(crate)` and is only called by
-    ///   `deserialize_context()`, `attach()`, and `install_snapshot()`. Each
-    ///   call saves the previous chain on the current scope via
-    ///   `saved_remote_chain`, providing LIFO restoration when the scope is
-    ///   popped.
-    ///
-    /// Together these properties ensure that receiver code cannot exit past
-    /// the deserialization boundary or tamper with scope names that existed
-    /// only on the sender.
-    pub(crate) remote_chain: Vec<String>,
-    /// The scope index from which local names should be collected.
-    /// Scopes below this index are "covered" by remote_chain — their names
-    /// (if any) are not included in `scope_chain()` to avoid double-counting.
-    ///
-    /// Set by `set_remote_chain()` to `self.scopes.len()` at the time the
-    /// chain is installed, and by `from_values_with_chain()` to 1 (past root).
-    remote_chain_base: usize,
-}
-
-impl ContextStack {
-    pub(crate) fn new() -> Self {
-        Self {
-            scopes: vec![Scope::new()], // root scope always present
-            next_scope_id: 1,
-            read_cache: HashMap::new(),
-            remote_chain: Vec::new(),
-            remote_chain_base: 0,
-        }
-    }
-
-    pub(crate) fn push_scope(&mut self) -> (u64, usize) {
-        let id = self.next_scope_id;
-        self.next_scope_id += 1;
-        self.scopes.push(Scope::new());
-        // Cache stays valid — new scope is empty, doesn't shadow anything.
-        let depth = self.scopes.len();
-        (id, depth)
-    }
-
-    pub(crate) fn push_named_scope(&mut self, name: String) -> (u64, usize) {
-        let id = self.next_scope_id;
-        self.next_scope_id += 1;
-        self.scopes.push(Scope::named(name));
-        let depth = self.scopes.len();
-        (id, depth)
-    }
-
-    pub(crate) fn pop_scope(&mut self, expected_depth: usize) {
-        assert_eq!(
-            self.scopes.len(),
-            expected_depth,
-            "ScopeGuard dropped out of order: expected depth {}, got {}. \
-             Scopes must be exited in LIFO order.",
-            expected_depth,
-            self.scopes.len()
-        );
-        // Never pop the root scope
-        if self.scopes.len() > 1 {
-            if let Some(popped) = self.scopes.pop() {
-                // Restore remote_chain + base if this scope saved one.
-                if let Some((saved_chain, saved_base)) = popped.saved_remote_chain {
-                    self.remote_chain = saved_chain;
-                    self.remote_chain_base = saved_base;
-                }
-            }
-        }
-        self.rebuild_cache();
-    }
-
-    /// Look up a value by key. O(1) via the index cache.
-    pub(crate) fn lookup(&self, key: &str) -> Option<&dyn ContextValue> {
-        let &scope_idx = self.read_cache.get(key)?;
-        self.scopes[scope_idx].values.get(key).map(|v| v.as_ref())
-    }
-
-    /// Set a value in the topmost scope. Returns the old value if any.
-    /// O(1) incremental cache update.
-    pub(crate) fn set(&mut self, key: &'static str, value: Box<dyn ContextValue>) -> Option<Box<dyn ContextValue>> {
-        let scope_idx = self.scopes.len() - 1;
-        self.read_cache.insert(key, scope_idx);
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.values.insert(key, value)
-        } else {
-            None
-        }
-    }
-
-    /// Rebuild the index cache from scratch.
-    /// Only copies `(&'static str, usize)` pairs — no user data cloned.
-    fn rebuild_cache(&mut self) {
-        self.read_cache.clear();
-        for (idx, scope) in self.scopes.iter().enumerate() {
-            for key in scope.values.keys() {
-                self.read_cache.insert(key, idx);
-            }
-        }
-    }
-
-    /// Collect all effective values (merged view, topmost wins).
-    /// Uses the index cache to iterate only effective keys.
-    pub(crate) fn merged_values(&self) -> HashMap<&'static str, &dyn ContextValue> {
-        self.read_cache
-            .iter()
-            .filter_map(|(&key, &scope_idx)| {
-                self.scopes[scope_idx]
-                    .values
-                    .get(key)
-                    .map(|v| (key, v.as_ref()))
-            })
-            .collect()
-    }
-
-    /// Build a new ContextStack from a set of cloned values (for snapshots).
-    #[allow(dead_code)]
-    pub(crate) fn from_values(values: HashMap<&'static str, Box<dyn ContextValue>>) -> Self {
-        Self::from_values_with_chain(values, Vec::new())
-    }
-
-    /// Build a new ContextStack from values and a remote scope chain.
+    /// Build a store from a set of values and a remote scope chain.
+    /// Used by snapshot attach and task-local initialization.
     pub(crate) fn from_values_with_chain(
         values: HashMap<&'static str, Box<dyn ContextValue>>,
         remote_chain: Vec<String>,
     ) -> Self {
-        let read_cache: HashMap<&'static str, usize> = values.keys().map(|&k| (k, 0)).collect();
-        // The root scope (index 0) is the only scope; local names start after it.
-        // Since from_values creates a fresh stack, the base should be at 1
-        // (past the root scope) so no local names bleed into the remote chain.
+        let current_values: HashMap<&'static str, Arc<dyn ContextValue>> = values
+            .into_iter()
+            .map(|(k, v)| (k, Arc::from(v)))
+            .collect();
+
         Self {
-            scopes: vec![Scope { name: None, values, saved_remote_chain: None }],
-            next_scope_id: 1,
-            read_cache,
-            remote_chain,
-            remote_chain_base: 1, // local names start after root
+            scope_chain: None,
+            current_values,
+            current_name: None,
+            depth: 1,
+            remote_chain: Arc::new(remote_chain),
+            remote_chain_base_depth: 1,
         }
     }
 
-    /// Set the remote scope chain. Saves the previous chain + base on the
-    /// topmost scope so they can be restored when that scope is popped (LIFO safety).
-    pub(crate) fn set_remote_chain(&mut self, chain: Vec<String>) {
-        if let Some(top) = self.scopes.last_mut() {
-            if top.saved_remote_chain.is_none() {
-                top.saved_remote_chain = Some((
-                    std::mem::take(&mut self.remote_chain),
-                    self.remote_chain_base,
-                ));
+    /// Freeze the current scope into an immutable ScopeNode and push it
+    /// onto the scope chain. The new scope starts with only cached keys
+    /// pre-populated (their effective values are Arc::cloned in).
+    /// Non-cached keys are absent — reads walk the parent chain.
+    ///
+    /// Returns the new depth.
+    pub(crate) fn push_scope(&mut self, name: Option<String>) -> usize {
+        // For cached keys, look up their effective value BEFORE freezing.
+        // Since cached keys always exist in current_values (by invariant),
+        // this is just a HashMap lookup + Arc::clone.
+        let cached = crate::registry::cached_keys();
+        let mut cached_values: Vec<(&'static str, Arc<dyn ContextValue>)> = Vec::new();
+        for &key in &cached {
+            if let Some(val) = self.get_value(key) {
+                cached_values.push((key, val));
             }
         }
-        self.remote_chain = chain;
-        // Local names start from the CURRENT scope count (above existing scopes)
-        self.remote_chain_base = self.scopes.len();
+
+        let frozen_values = std::mem::take(&mut self.current_values);
+
+        let node = Arc::new(ScopeNode {
+            name: self.current_name.take(),
+            values: frozen_values,
+            parent: self.scope_chain.take(),
+            depth: self.depth,
+            remote_chain: Arc::clone(&self.remote_chain),
+            remote_chain_base_depth: self.remote_chain_base_depth,
+        });
+
+        self.scope_chain = Some(node);
+        self.current_name = name;
+        self.depth += 1;
+
+        // Pre-populate cached keys in the new scope for O(1) reads.
+        for (key, val) in cached_values {
+            self.current_values.insert(key, val);
+        }
+
+        self.depth
     }
 
-    /// Collect the full scope chain: remote prefix + local named scope names.
-    /// Only collects local names from scopes at or above `remote_chain_base`,
-    /// since scopes below that are "covered" by the remote chain.
+    /// Pop the current scope, restoring state from the frozen ScopeNode.
+    ///
+    /// Returns the garbage (old current_values) to be dropped OUTSIDE
+    /// the Cell window.
+    pub(crate) fn pop_scope(
+        &mut self,
+        expected_depth: usize,
+    ) -> Option<ScopeGarbage> {
+        if self.depth != expected_depth || self.depth <= 1 {
+            return None;
+        }
+
+        let node = self.scope_chain.take()?;
+
+        // Take current values first — must happen BEFORE restoring from node.
+        let old_current = std::mem::take(&mut self.current_values);
+
+        // Restore from popped node. Arc::try_unwrap for zero-copy when possible.
+        match Arc::try_unwrap(node) {
+            Ok(owned) => {
+                self.scope_chain = owned.parent;
+                self.current_name = owned.name;
+                self.current_values = owned.values;
+                self.depth = owned.depth;
+                self.remote_chain = owned.remote_chain;
+                self.remote_chain_base_depth = owned.remote_chain_base_depth;
+            }
+            Err(shared) => {
+                self.scope_chain = shared.parent.clone();
+                self.current_name = shared.name.clone();
+                self.current_values = shared.values.iter()
+                    .map(|(&k, v)| (k, Arc::clone(v)))
+                    .collect();
+                self.depth = shared.depth;
+                self.remote_chain = Arc::clone(&shared.remote_chain);
+                self.remote_chain_base_depth = shared.remote_chain_base_depth;
+            }
+        }
+
+        Some(ScopeGarbage {
+            _old_values: old_current,
+        })
+    }
+
+    /// Set a value in the current scope.
+    pub(crate) fn set_value(
+        &mut self,
+        key: &'static str,
+        value: Arc<dyn ContextValue>,
+    ) -> Option<Arc<dyn ContextValue>> {
+        self.current_values.insert(key, value)
+    }
+
+    /// Look up the effective value for a key.
+    /// Checks current_values first, then walks the parent scope chain.
+    /// For cached keys, the value is always in current_values (O(1)).
+    /// For non-cached keys, this is O(depth).
+    pub(crate) fn get_value(&self, key: &str) -> Option<Arc<dyn ContextValue>> {
+        // Check current scope first.
+        if let Some(v) = self.current_values.get(key) {
+            return Some(Arc::clone(v));
+        }
+        // Walk parent chain.
+        let mut node = self.scope_chain.as_ref();
+        while let Some(n) = node {
+            if let Some(v) = n.values.get(key) {
+                return Some(Arc::clone(v));
+            }
+            node = n.parent.as_ref();
+        }
+        None
+    }
+
+    /// Collect all effective values for snapshot/serialization.
+    /// Walks the full scope chain to build a merged view (topmost wins).
+    pub(crate) fn collect_values(&self) -> HashMap<&'static str, Arc<dyn ContextValue>> {
+        let mut result: HashMap<&'static str, Arc<dyn ContextValue>> = HashMap::new();
+
+        // Current scope values (highest priority).
+        for (&k, v) in &self.current_values {
+            result.insert(k, Arc::clone(v));
+        }
+
+        // Walk parent chain; only insert if not already shadowed.
+        let mut node = self.scope_chain.as_ref();
+        while let Some(n) = node {
+            for (&k, v) in &n.values {
+                result.entry(k).or_insert_with(|| Arc::clone(v));
+            }
+            node = n.parent.as_ref();
+        }
+
+        result
+    }
+
+    /// Set the remote scope chain.
+    pub(crate) fn set_remote_chain(&mut self, chain: Vec<String>) {
+        self.remote_chain = Arc::new(chain);
+        self.remote_chain_base_depth = self.depth;
+    }
+
+    /// Build the full scope chain: remote prefix + local named scope names.
     pub(crate) fn scope_chain(&self) -> Vec<String> {
-        let start = self.remote_chain_base.max(1); // always skip root (index 0)
-        let local_names = self.scopes.iter()
-            .skip(start)
-            .filter_map(|s| s.name.as_ref().cloned())
-            .collect::<Vec<_>>();
+        let mut local_names = Vec::new();
+
+        // Collect current scope name (if named).
+        if let Some(name) = &self.current_name {
+            if self.depth > self.remote_chain_base_depth {
+                local_names.push(name.clone());
+            }
+        }
+
+        // Walk parent chain, collecting names above remote_chain_base_depth.
+        let mut node = self.scope_chain.as_ref();
+        while let Some(n) = node {
+            if n.depth > self.remote_chain_base_depth {
+                if let Some(name) = &n.name {
+                    local_names.push(name.clone());
+                }
+            }
+            node = n.parent.as_ref();
+        }
+
+        local_names.reverse();
 
         let max_len = crate::config::max_scope_chain_len();
-        let mut chain = self.remote_chain.clone();
+        let mut chain: Vec<String> = (*self.remote_chain).clone();
         chain.extend(local_names);
 
         if max_len > 0 && chain.len() > max_len {
-            // Truncate: keep the most recent entries (drop oldest from remote prefix).
             let start = chain.len() - max_len;
             chain.drain(..start);
         }
@@ -243,29 +266,36 @@ impl ContextStack {
     }
 }
 
+// ── Garbage bag ────────────────────────────────────────────────
+
+/// Holds old values that should be dropped outside the Cell window.
+/// When this struct is dropped, Arc refcounts are decremented, potentially
+/// running user Drop code. By that time, the Cell has been restored.
+pub(crate) struct ScopeGarbage {
+    _old_values: HashMap<&'static str, Arc<dyn ContextValue>>,
+}
+
+// ── Scope guard ────────────────────────────────────────────────
+
 /// RAII guard that reverts a scope on drop.
 /// Not Send/Sync — scopes are bound to their storage context.
 pub struct ScopeGuard {
-    #[allow(dead_code)]
-    scope_id: u64,
     expected_depth: usize,
     _not_send: std::marker::PhantomData<*const ()>,
 }
 
 impl ScopeGuard {
-    pub(crate) fn new(scope_id: u64, expected_depth: usize) -> Self {
+    pub(crate) fn new(expected_depth: usize) -> Self {
         Self {
-            scope_id,
             expected_depth,
             _not_send: std::marker::PhantomData,
         }
     }
 
     /// Create a no-op guard that does nothing on drop.
-    /// Used when a scope cannot be pushed due to re-entrant RefCell access.
+    /// Used when a scope cannot be pushed (re-entrant access / busy store).
     pub(crate) fn noop() -> Self {
         Self {
-            scope_id: 0,
             expected_depth: usize::MAX,
             _not_send: std::marker::PhantomData,
         }

@@ -26,6 +26,11 @@ pub(crate) struct Registration {
     pub local_only: bool,
     /// Custom serializer. If None, uses ContextValue::serialize_value() (bincode).
     pub serialize_fn: Option<SerializeFn>,
+    /// If true, the effective value is eagerly copied into each new scope
+    /// on scope entry. This gives O(1) reads at the cost of an Arc::clone
+    /// per scope entry. Suitable for lightweight values (request IDs, trace IDs).
+    /// Default: false (reads walk the parent scope chain, O(depth)).
+    pub cached: bool,
 }
 
 // ── Two-phase storage ──────────────────────────────────────────
@@ -69,6 +74,7 @@ fn lock_build() -> std::sync::MutexGuard<'static, Option<RegistryMap>> {
 pub struct RegistrationOptions<T: 'static> {
     version: u32,
     local_only: bool,
+    cached: bool,
     encode: Option<Box<dyn Fn(&T) -> Result<Vec<u8>, String> + Send + Sync>>,
     decode: Option<Box<dyn Fn(&[u8]) -> Result<T, String> + Send + Sync>>,
 }
@@ -78,6 +84,7 @@ impl<T: 'static> RegistrationOptions<T> {
         Self {
             version: 1,
             local_only: false,
+            cached: false,
             encode: None,
             decode: None,
         }
@@ -93,6 +100,15 @@ impl<T: 'static> RegistrationOptions<T> {
     /// serialization. The type does not need `Serialize`/`DeserializeOwned`.
     pub fn local_only(mut self) -> Self {
         self.local_only = true;
+        self
+    }
+
+    /// Enable per-scope caching: the effective value is eagerly copied (Arc::clone)
+    /// into each new scope on entry, giving O(1) reads. Best for lightweight values
+    /// like request IDs or trace IDs. Without this, reads walk the parent scope
+    /// chain (O(depth)).
+    pub fn cached(mut self) -> Self {
+        self.cached = true;
         self
     }
 
@@ -194,6 +210,7 @@ where
             type_name: std::any::type_name::<T>(),
             local_only: opts.local_only,
             serialize_fn,
+            cached: opts.cached,
         },
     );
     Ok(())
@@ -225,6 +242,7 @@ where
             type_name: std::any::type_name::<T>(),
             local_only: true,
             serialize_fn: None,
+            cached: false,
         },
     );
     Ok(())
@@ -555,6 +573,33 @@ pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
     }
     let guard = lock_build();
     guard.as_ref().and_then(|map| map.get(key).map(extract))
+}
+
+/// Return all registered key names.
+/// After [`initialize`]: lock-free. Before: acquires Mutex.
+pub(crate) fn all_keys() -> Vec<&'static str> {
+    if let Some(frozen) = FROZEN.get() {
+        return frozen.keys().copied().collect();
+    }
+    let guard = lock_build();
+    guard.as_ref().map_or_else(Vec::new, |m| m.keys().copied().collect())
+}
+
+/// Return registered keys that have per-scope caching enabled.
+/// These keys will have their effective values eagerly copied into each
+/// new scope on entry, giving O(1) reads.
+pub(crate) fn cached_keys() -> Vec<&'static str> {
+    let filter = |map: &RegistryMap| -> Vec<&'static str> {
+        map.iter()
+            .filter(|(_, r)| r.cached)
+            .map(|(&k, _)| k)
+            .collect()
+    };
+    if let Some(frozen) = FROZEN.get() {
+        return filter(frozen);
+    }
+    let guard = lock_build();
+    guard.as_ref().map_or_else(Vec::new, filter)
 }
 
 #[cfg(test)]
