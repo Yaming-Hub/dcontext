@@ -1149,7 +1149,6 @@ fn test_context_future_nested() {
 //  Async tests (tokio)
 // ══════════════════════════════════════════════════════════════
 
-#[cfg(feature = "tokio")]
 mod async_tests {
     use super::*;
 

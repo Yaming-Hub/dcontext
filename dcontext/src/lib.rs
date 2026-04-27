@@ -74,7 +74,6 @@ pub(crate) use registry::{register, try_register, register_with, try_register_wi
 
 pub use storage::{enter_scope, enter_named_scope, scope, scope_chain, force_thread_local};
 
-#[cfg(feature = "tokio")]
 pub use storage::{scope_async, named_scope_async};
 
 // ── Snapshot / Clone ───────────────────────────────────────────
@@ -87,7 +86,6 @@ pub use helpers::spawn_with_context;
 
 // ── Async helpers (feature-gated) ──────────────────────────────
 
-#[cfg(feature = "tokio")]
 pub use helpers::{with_context, spawn_with_context_async};
 
 // ── Runtime-agnostic async (feature-gated) ─────────────────────

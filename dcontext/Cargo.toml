@@ -14,11 +14,10 @@ bincode = "1"
 base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync"], optional = true }
+tokio = { version = "1", features = ["rt", "sync"] }
 
 [features]
-default = ["tokio", "base64", "context-key"]
-tokio = ["dep:tokio"]
+default = ["base64", "context-key"]
 base64 = ["dep:base64"]
 context-key = []
 context-future = []
