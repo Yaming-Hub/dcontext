@@ -208,8 +208,14 @@ where
         // This is necessary because on_enter/on_exit are synchronous callbacks
         // that may be called inside a tokio runtime (e.g., via Instrument).
         dcontext::force_thread_local(|| {
-            // Level 1: Create a new dcontext scope
-            let guard = dcontext::enter_scope();
+            // Level 1: Create a new named dcontext scope (span name as scope name).
+            // Named scopes appear in the scope chain for cross-process visibility.
+            let guard = if let Some(span) = ctx.span(id) {
+                let name = span.metadata().name();
+                dcontext::enter_named_scope(name)
+            } else {
+                dcontext::enter_scope()
+            };
 
             // Level 2: Apply field mappings from extracted values
             if !self.field_mappings.is_empty() {

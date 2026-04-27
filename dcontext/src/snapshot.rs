@@ -9,6 +9,8 @@ use crate::value::ContextValue;
 #[derive(Clone)]
 pub struct ContextSnapshot {
     pub(crate) values: Arc<HashMap<&'static str, Box<dyn ContextValue>>>,
+    /// The scope chain at the time the snapshot was taken.
+    pub(crate) scope_chain: Vec<String>,
 }
 
 impl ContextSnapshot {
@@ -16,7 +18,13 @@ impl ContextSnapshot {
     pub fn empty() -> Self {
         Self {
             values: Arc::new(HashMap::new()),
+            scope_chain: Vec::new(),
         }
+    }
+
+    /// Return the scope chain captured in this snapshot.
+    pub fn scope_chain(&self) -> &[String] {
+        &self.scope_chain
     }
 }
 
@@ -29,14 +37,20 @@ impl Default for ContextSnapshot {
 /// Capture a snapshot of the current effective context.
 pub fn snapshot() -> ContextSnapshot {
     let values = storage::collect_values();
+    let scope_chain = storage::collect_scope_chain();
     ContextSnapshot {
         values: Arc::new(values),
+        scope_chain,
     }
 }
 
 /// Restore a snapshot by pushing a new scope with its values.
 pub fn attach(snap: ContextSnapshot) -> ScopeGuard {
     let guard = storage::enter_scope();
+    // Restore the scope chain from the snapshot as the remote prefix.
+    if !snap.scope_chain.is_empty() {
+        storage::set_remote_chain(snap.scope_chain.clone());
+    }
     // Clone each value from the snapshot into the new scope.
     for (key, val) in snap.values.iter() {
         storage::set_value(key, val.clone_boxed());

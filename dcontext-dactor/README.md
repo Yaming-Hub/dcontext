@@ -16,8 +16,8 @@ deserialization, and scope restoration automatically.
 
 ```toml
 [dependencies]
-dcontext = "0.2"
-dcontext-dactor = "0.2"
+dcontext = "0.3"
+dcontext-dactor = "0.3"
 dactor = "0.3.1"
 ```
 
@@ -48,6 +48,7 @@ OutboundInterceptor                 InboundInterceptor
   │   └─ attach ContextSnapshot         ├─ wire header? deserialize → snapshot
   └─ remote target?                     └─ normalize to ContextSnapshotHeader
       └─ serialize → ContextHeader    Stage 2: wrap_handler()
+         (includes scope chain)          ├─ enter named scope "remote:<actor_name>"
                                          └─ wrap future with dcontext::with_context()
 ```
 
@@ -121,6 +122,26 @@ async fn my_handler(ctx: &ActorContext, msg: MyMessage) {
 
 See [`samples/src/bin/dactor_propagation.rs`](../samples/src/bin/dactor_propagation.rs)
 for a complete working example.
+
+## Scope Chain Integration
+
+The inbound interceptor's `wrap_handler` automatically creates a named scope
+`remote:<actor_name>` for each inbound message. This makes distributed call
+boundaries visible in the scope chain:
+
+```rust
+// Caller (e.g., API gateway) sets up context and sends a message:
+let _guard = dcontext::enter_named_scope("api-gateway");
+actor_ref.send(MyMessage { ... }).await;
+
+// Inside the receiving actor handler ("OrderActor"):
+let chain = dcontext::scope_chain();
+// chain == ["api-gateway", "remote:OrderActor"]
+```
+
+This gives you a full distributed call path without manual instrumentation.
+The scope chain propagates through serialization (wire format v2), so the
+chain accumulates as requests traverse multiple services and actors.
 
 ## API Reference
 

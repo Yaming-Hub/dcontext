@@ -14,8 +14,8 @@ values follow the natural span lifecycle — no manual scope management needed.
 
 ```toml
 [dependencies]
-dcontext = "0.2"
-dcontext-tracing = "0.2"
+dcontext = "0.3"
+dcontext-tracing = "0.3"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 ```
@@ -209,6 +209,32 @@ reverting context changes. This mirrors the approach used by
 
 All dcontext operations in callbacks use `force_thread_local()` to ensure
 correct behavior inside tokio runtimes.
+
+## Scope Chain Integration
+
+Span names automatically become named scopes in the dcontext scope chain.
+Each time a span is entered, the layer calls `enter_named_scope(span_name)`,
+so `scope_chain()` reflects the tracing span hierarchy:
+
+```rust
+let _outer = tracing::info_span!("api_handler").entered();
+{
+    let _inner = tracing::info_span!("db_query").entered();
+    let chain = dcontext::scope_chain();
+    // chain == ["api_handler", "db_query"]
+}
+// After _inner exits: chain == ["api_handler"]
+```
+
+This works transparently — no extra configuration needed beyond installing
+the `DcontextLayer`.
+
+> **Thread-local limitation:** Because `dcontext-tracing` uses
+> `force_thread_local()`, the scope chain reflects thread-local state. In
+> async code with `Instrument`, the chain is correct during each `poll()`
+> but may not persist across `.await` points. For full async chain
+> propagation, combine with `dcontext::with_context()` or
+> `dcontext::named_scope_async()`.
 
 ## Related
 

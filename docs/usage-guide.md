@@ -21,10 +21,11 @@ async integration, and actor framework support.
 11. [Custom Codecs](#11-custom-codecs)
 12. [Version Migration](#12-version-migration)
 13. [Configuration](#13-configuration)
-14. [Convenience Macros](#14-convenience-macros)
-15. [Error Handling](#15-error-handling)
-16. [Integration with dactor](#16-integration-with-dactor)
-17. [Cargo Features](#17-cargo-features)
+14. [Scope Chain](#14-scope-chain)
+15. [Convenience Macros](#15-convenience-macros)
+16. [Error Handling](#16-error-handling)
+17. [Integration with dactor](#17-integration-with-dactor)
+18. [Cargo Features](#18-cargo-features)
 
 ---
 
@@ -34,7 +35,7 @@ Add `dcontext` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-dcontext = "0.1"
+dcontext = "0.3"
 ```
 
 Define a context type, register it, and use it:
@@ -343,7 +344,7 @@ For executors other than Tokio (async-std, smol, etc.), enable the
 
 ```toml
 [dependencies]
-dcontext = { version = "0.1", features = ["context-future"] }
+dcontext = { version = "0.3", features = ["context-future"] }
 ```
 
 ### ContextFuture
@@ -630,7 +631,124 @@ Default is `0` (no limit). Set this early in application startup.
 
 ---
 
-## 14. Convenience Macros
+## 14. Scope Chain
+
+The scope chain gives you a queryable call path that spans both local scopes
+and remote process boundaries. Named scopes form the chain; unnamed scopes
+(from plain `enter_scope()`) do not appear.
+
+### Named scopes
+
+Create named scopes with `enter_named_scope` (sync) or `named_scope_async`
+(async):
+
+```rust
+use dcontext::{enter_named_scope, scope_chain};
+
+let _guard = enter_named_scope("api-gateway");
+{
+    let _inner = enter_named_scope("auth-check");
+    let chain = scope_chain();
+    // chain == vec!["api-gateway", "auth-check"]
+}
+```
+
+For async code (requires `tokio` feature):
+
+```rust
+use dcontext::named_scope_async;
+
+named_scope_async("process-order", async {
+    // scope chain includes "process-order" across .await points
+    do_async_work().await;
+}).await;
+```
+
+### Querying the chain
+
+`scope_chain()` returns `Vec<String>` with the full chain — remote prefix
+entries (from deserialized context) followed by local named scopes:
+
+```rust
+let chain: Vec<String> = dcontext::scope_chain();
+// e.g. ["remote:service-a", "api-handler", "db-query"]
+```
+
+### Cross-process propagation
+
+When context is serialized (wire format v2), the current scope chain is
+included in the wire bytes. On the receiving side, `deserialize_context`
+restores the remote chain as a prefix. New local named scopes are appended:
+
+```rust
+// Process A
+let _guard = enter_named_scope("service-a");
+let bytes = dcontext::serialize_context().unwrap();
+
+// Process B (after deserialize_context)
+let _guard = enter_named_scope("service-b");
+let chain = scope_chain();
+// chain == ["service-a", "service-b"]
+```
+
+Wire format v1 payloads (from older senders) are still readable — the scope
+chain will simply be empty for the remote prefix.
+
+### Configuring max chain length
+
+Prevent unbounded chain growth in deep call graphs:
+
+```rust
+use dcontext::{set_max_scope_chain_len, max_scope_chain_len};
+
+set_max_scope_chain_len(32); // cap at 32 entries
+
+let current = max_scope_chain_len(); // read current limit
+```
+
+Default is `64`. Set to `0` for unlimited. When the limit is reached, new
+named scopes still create context scopes, but their names are not appended
+to the chain.
+
+### Snapshots carry the scope chain
+
+`ContextSnapshot` includes the scope chain at capture time. Access it via:
+
+```rust
+let snap = dcontext::snapshot();
+let chain: &[String] = snap.scope_chain();
+```
+
+### Integration with tracing spans
+
+When using `dcontext-tracing`, span names automatically become scope names.
+Each span enter pushes the span name onto the chain:
+
+```rust
+let _span = tracing::info_span!("handle_request").entered();
+let chain = dcontext::scope_chain();
+// chain includes "handle_request"
+```
+
+> **Note:** `dcontext-tracing` uses `force_thread_local()`, so the chain
+> reflects thread-local state. For full async propagation, combine with
+> `dcontext::with_context()`.
+
+### Integration with dactor
+
+When using `dcontext-dactor`, the inbound interceptor's `wrap_handler`
+automatically creates a named scope `remote:<actor_name>` for each inbound
+message. This makes the distributed call boundary visible in the chain:
+
+```rust
+// Inside an actor handler for "OrderActor":
+let chain = dcontext::scope_chain();
+// e.g. ["api-gateway", "remote:OrderActor"]
+```
+
+---
+
+## 15. Convenience Macros
 
 ### `register_contexts!`
 
@@ -667,7 +785,7 @@ with_scope! {
 
 ---
 
-## 15. Error Handling
+## 16. Error Handling
 
 All errors are represented by `dcontext::ContextError`:
 
@@ -691,7 +809,7 @@ All errors are represented by `dcontext::ContextError`:
 
 ---
 
-## 16. Integration with dactor
+## 17. Integration with dactor
 
 The `dcontext-dactor` crate provides automatic context propagation through
 [dactor](https://github.com/Yaming-Hub/dactor) actor messages.
@@ -700,8 +818,8 @@ The `dcontext-dactor` crate provides automatic context propagation through
 
 ```toml
 [dependencies]
-dcontext = "0.1"
-dcontext-dactor = "0.1"
+dcontext = "0.3"
+dcontext-dactor = "0.3"
 ```
 
 ```rust
@@ -762,7 +880,7 @@ ContextInboundInterceptor::new(ErrorPolicy::Reject);
 
 ---
 
-## 17. Cargo Features
+## 18. Cargo Features
 
 | Feature | Default | Description |
 |---------|---------|-------------|
@@ -774,11 +892,11 @@ ContextInboundInterceptor::new(ErrorPolicy::Reject);
 ### Minimal (no async)
 
 ```toml
-dcontext = { version = "0.1", default-features = false }
+dcontext = { version = "0.3", default-features = false }
 ```
 
 ### Full (all features)
 
 ```toml
-dcontext = { version = "0.1", features = ["context-future"] }
+dcontext = { version = "0.3", features = ["context-future"] }
 ```

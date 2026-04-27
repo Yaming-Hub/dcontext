@@ -1268,3 +1268,174 @@ mod async_tests {
         .await;
     }
 }
+
+// ══════════════════════════════════════════════════════════════
+//  Scope chain tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_scope_chain_empty_by_default() {
+    let chain = scope_chain();
+    assert!(chain.is_empty(), "default scope chain should be empty");
+}
+
+#[test]
+fn test_scope_chain_named_scope() {
+    let _g = enter_named_scope("outer");
+    assert_eq!(scope_chain(), vec!["outer"]);
+    {
+        let _g2 = enter_named_scope("inner");
+        assert_eq!(scope_chain(), vec!["outer", "inner"]);
+    }
+    assert_eq!(scope_chain(), vec!["outer"]);
+}
+
+#[test]
+fn test_scope_chain_unnamed_invisible() {
+    let _g1 = enter_named_scope("named");
+    let _g2 = enter_scope();
+    let _g3 = enter_named_scope("also-named");
+    assert_eq!(scope_chain(), vec!["named", "also-named"]);
+}
+
+#[test]
+fn test_scope_chain_snapshot_preserves_chain() {
+    let _g = enter_named_scope("request-handler");
+    let snap = snapshot();
+    assert_eq!(snap.scope_chain(), &["request-handler"]);
+
+    // Restore in a new scope — the chain becomes remote_chain
+    scope(|| {
+        let _guard = attach(snap.clone());
+        assert_eq!(scope_chain(), vec!["request-handler"]);
+
+        // Push local named scopes
+        let _g2 = enter_named_scope("sub-handler");
+        assert_eq!(scope_chain(), vec!["request-handler", "sub-handler"]);
+    });
+}
+
+#[test]
+fn test_scope_chain_serialize_roundtrip() {
+    let key = unique_key("sc_serde", "rid");
+    register::<RequestId>(key);
+
+    let _g1 = enter_named_scope("app");
+    let _g2 = enter_named_scope("service");
+    set_context(key, RequestId("req-1".into()));
+
+    let bytes = serialize_context().unwrap();
+
+    // Deserialize in a clean scope
+    scope(|| {
+        let _guard = deserialize_context(&bytes).unwrap();
+        // Values restored
+        assert_eq!(get_context::<RequestId>(key).0, "req-1");
+        // Scope chain restored as remote prefix
+        assert_eq!(scope_chain(), vec!["app", "service"]);
+
+        // Push more local scopes
+        let _g3 = enter_named_scope("handler");
+        assert_eq!(scope_chain(), vec!["app", "service", "handler"]);
+    });
+}
+
+#[test]
+fn test_scope_chain_wire_v1_compat() {
+    let key = unique_key("sc_v1", "rid");
+    register::<RequestId>(key);
+
+    // Create v1 wire bytes (no scope chain)
+    let value_bytes = bincode::serialize(&RequestId("v1-value".into())).unwrap();
+    let v1_bytes = make_wire_bytes_v(1, key, 1, &value_bytes);
+
+    scope(|| {
+        let _guard = deserialize_context(&v1_bytes).unwrap();
+        assert_eq!(get_context::<RequestId>(key).0, "v1-value");
+        // No scope chain from v1
+        assert!(scope_chain().is_empty());
+    });
+}
+
+#[test]
+fn test_scope_chain_remote_chain_lifo_restore() {
+    // Simulate nested deserialization (e.g., nested remote calls)
+    let key = unique_key("sc_lifo", "rid");
+    register::<RequestId>(key);
+
+    let _g = enter_named_scope("local-root");
+
+    // First "remote" call
+    let _g1 = enter_named_scope("sender-scope");
+    set_context(key, RequestId("first".into()));
+    let bytes1 = serialize_context().unwrap();
+
+    scope(|| {
+        let _guard1 = deserialize_context(&bytes1).unwrap();
+        // Chain shows the sender's full chain
+        assert_eq!(scope_chain(), vec!["local-root", "sender-scope"]);
+
+        // Second nested "remote" call
+        let _g2 = enter_named_scope("nested-scope");
+        let bytes2 = serialize_context().unwrap();
+
+        scope(|| {
+            let _guard2 = deserialize_context(&bytes2).unwrap();
+            assert_eq!(
+                scope_chain(),
+                vec!["local-root", "sender-scope", "nested-scope"]
+            );
+        });
+
+        // After inner scope ends, original chain is restored
+        assert_eq!(
+            scope_chain(),
+            vec!["local-root", "sender-scope", "nested-scope"]
+        );
+    });
+}
+
+mod async_scope_chain_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_scope_chain_with_context() {
+        let _g = enter_named_scope("pre-send");
+        let snap = snapshot();
+
+        with_context(snap, async {
+            // The remote_chain from the snapshot is restored
+            assert_eq!(scope_chain(), vec!["pre-send"]);
+
+            // named_scope_async adds to the chain
+            named_scope_async("handler", async {
+                assert_eq!(scope_chain(), vec!["pre-send", "handler"]);
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_named_scope_async_basic() {
+        let snap = {
+            force_thread_local(|| {
+                let _g = enter_named_scope("root");
+                snapshot()
+            })
+        };
+
+        with_context(snap, async {
+            named_scope_async("level-1", async {
+                assert_eq!(scope_chain(), vec!["root", "level-1"]);
+
+                named_scope_async("level-2", async {
+                    assert_eq!(scope_chain(), vec!["root", "level-1", "level-2"]);
+                })
+                .await;
+            })
+            .await;
+        })
+        .await;
+    }
+}

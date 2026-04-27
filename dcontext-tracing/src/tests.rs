@@ -424,3 +424,41 @@ async fn async_nested_instrument() {
         .instrument(tracing::info_span!("outer_span"))
         .await;
 }
+
+// --- Scope chain tests ---
+
+#[test]
+fn scope_chain_from_span_names() {
+    with_layer(DcontextLayer::new(), || {
+        let _outer = tracing::info_span!("api_handler").entered();
+        assert_eq!(
+            dcontext::force_thread_local(dcontext::scope_chain),
+            vec!["api_handler"]
+        );
+
+        let _inner = tracing::info_span!("db_query").entered();
+        assert_eq!(
+            dcontext::force_thread_local(dcontext::scope_chain),
+            vec!["api_handler", "db_query"]
+        );
+    });
+}
+
+#[test]
+fn scope_chain_reverts_on_exit() {
+    with_layer(DcontextLayer::new(), || {
+        let _outer = tracing::info_span!("root").entered();
+        {
+            let _inner = tracing::info_span!("child").entered();
+            assert_eq!(
+                dcontext::force_thread_local(dcontext::scope_chain),
+                vec!["root", "child"]
+            );
+        }
+        // Child exited — chain should only have root
+        assert_eq!(
+            dcontext::force_thread_local(dcontext::scope_chain),
+            vec!["root"]
+        );
+    });
+}

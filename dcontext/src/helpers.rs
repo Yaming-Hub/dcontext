@@ -26,12 +26,13 @@ where
     use crate::storage::TASK_CONTEXT;
     use std::cell::RefCell;
 
+    let chain = snap.scope_chain.clone();
     let values = snap
         .values
         .iter()
         .map(|(k, v)| (*k, v.clone_boxed()))
         .collect();
-    let stack = ContextStack::from_values(values);
+    let stack = ContextStack::from_values_with_chain(values, chain);
     TASK_CONTEXT.scope(RefCell::new(stack), f).await
 }
 
