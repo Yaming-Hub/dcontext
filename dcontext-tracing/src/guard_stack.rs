@@ -19,18 +19,20 @@ pub(crate) fn push_guard(id: &span::Id, guard: dcontext::ScopeGuard) {
 
 /// Pop the most recent scope guard matching the given span ID.
 ///
-/// Searches from the back (most recent) to handle nesting correctly.
-/// The guard is dropped, which reverts the dcontext scope.
+/// The guard is extracted from the stack first, then dropped **outside** the
+/// `SCOPE_GUARDS` borrow. This prevents `ScopeGuard::drop` (which calls
+/// `leave_scope` → `borrow_mut CONTEXT`) from running while `SCOPE_GUARDS`
+/// is still mutably borrowed.
 pub(crate) fn pop_guard(id: &span::Id) {
-    SCOPE_GUARDS.with(|stack| {
+    let guard = SCOPE_GUARDS.with(|stack| {
         let mut stack = stack.borrow_mut();
         let target = id.into_u64();
-        // Search from back — most recent entry for this span
-        if let Some(pos) = stack.iter().rposition(|(sid, _)| *sid == target) {
-            stack.remove(pos);
-            // guard dropped here → scope reverts
-        }
+        stack
+            .iter()
+            .rposition(|(sid, _)| *sid == target)
+            .map(|pos| stack.remove(pos).1)
     });
+    drop(guard); // ScopeGuard dropped here, outside all borrows
 }
 
 #[cfg(test)]
