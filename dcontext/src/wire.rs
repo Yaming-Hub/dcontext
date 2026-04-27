@@ -138,6 +138,14 @@ fn deserialize_wire(bytes: &[u8]) -> Result<(Vec<WireEntry>, Vec<String>), Conte
         if wire.version == 2 {
             return Ok((wire.entries, wire.scope_chain));
         }
+        // Future versions (v3+) that happen to deserialize as v2 struct:
+        // reject with a clear error rather than falling through to v1.
+        if wire.version > 2 {
+            return Err(ContextError::DeserializationFailed(format!(
+                "unsupported wire version: {} (this library supports versions 1 and 2)",
+                wire.version
+            )));
+        }
     }
 
     // Fall back to v1.
