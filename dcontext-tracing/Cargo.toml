@@ -1,9 +1,10 @@
 [package]
 name = "dcontext-tracing"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Automatic dcontext scope management via tracing spans"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/Yaming-Hub/dcontext"
 keywords = ["context", "tracing", "distributed", "propagation", "spans"]
 categories = ["development-tools::debugging", "development-tools::profiling"]

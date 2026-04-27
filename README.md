@@ -22,7 +22,7 @@ and even process boundaries via serialization.
 
 ```toml
 [dependencies]
-dcontext = "0.1"
+dcontext = "0.2"
 ```
 
 ```rust
@@ -67,6 +67,13 @@ fn main() {
 - **Registry** — Global type registration for serialization support
 - **ContextKey\<T\>** — Optional typed key wrapper for compile-time safe access
 
+## Integration Crates
+
+| Crate | Description |
+|-------|-------------|
+| [dcontext-dactor](dcontext-dactor/) | Automatic context propagation through [dactor](https://crates.io/crates/dactor) actor messages |
+| [dcontext-tracing](dcontext-tracing/) | Automatic context scoping via [tracing](https://crates.io/crates/tracing) spans |
+
 ## Cargo Features
 
 | Feature | Default | Description |
@@ -80,6 +87,25 @@ fn main() {
 
 - **[Usage Guide](docs/usage-guide.md)** — Comprehensive guide covering all features with examples
 - **[Design Document](docs/dcontext-design.md)** — Internal architecture and design decisions
+
+## Samples
+
+Run any sample with `cargo run --bin <name>`:
+
+| Sample | Description |
+|--------|-------------|
+| `basic_scope` | Core get/set/scope API |
+| `cross_thread` | Thread propagation via `spawn_with_context` |
+| `async_tasks` | Tokio propagation via `with_context` |
+| `async_scopes` | `scope_async` across `.await` points |
+| `cross_process` | Serialization (bytes/base64) |
+| `typed_keys` | `ContextKey<T>` type safety |
+| `macros` | `register_contexts!` & `with_scope!` |
+| `worker_pool` | Context-aware work dispatch |
+| `feature_flags` | Per-request feature flag overrides |
+| `size_limits` | `set_max_context_size` cap |
+| `tracing_scopes` | dcontext-tracing integration |
+| `dactor_propagation` | dcontext-dactor propagation flow |
 
 ## License
 
