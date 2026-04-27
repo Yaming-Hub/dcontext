@@ -70,6 +70,22 @@ pub trait FromFieldValue: Clone + Default + Send + Sync + serde::Serialize + ser
     }
 }
 
+/// Built-in implementation for `String`, allowing direct field-to-context
+/// mapping without a newtype wrapper:
+///
+/// ```rust,no_run
+/// # use dcontext_tracing::DcontextLayer;
+/// # use tracing_subscriber::Registry;
+/// let layer: DcontextLayer<Registry> = DcontextLayer::builder()
+///     .map_field::<String>("job_id")
+///     .build();
+/// ```
+impl FromFieldValue for String {
+    fn from_str_value(s: &str) -> Option<Self> {
+        Some(s.to_string())
+    }
+}
+
 /// A concrete FieldSetter for a specific type T.
 pub(crate) struct TypedFieldSetter<T> {
     _marker: std::marker::PhantomData<T>,

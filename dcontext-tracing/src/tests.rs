@@ -445,6 +445,27 @@ fn scope_chain_from_span_names() {
 }
 
 #[test]
+fn map_field_string_directly() {
+    // Users can map span string fields directly to dcontext String values
+    // without needing a newtype wrapper.
+    let layer = DcontextLayer::builder()
+        .map_field::<String>("tenant")
+        .build();
+
+    with_layer(layer, || {
+        {
+            let _span = tracing::info_span!("handler", tenant = "acme-corp").entered();
+            let t: String = dcontext::force_thread_local(|| dcontext::get_context("tenant"));
+            assert_eq!(t, "acme-corp");
+        }
+
+        // After span exit, the mapped value should be reverted
+        let t: String = dcontext::force_thread_local(|| dcontext::get_context("tenant"));
+        assert_eq!(t, String::default());
+    });
+}
+
+#[test]
 fn scope_chain_reverts_on_exit() {
     with_layer(DcontextLayer::new(), || {
         let _outer = tracing::info_span!("root").entered();
