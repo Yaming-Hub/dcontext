@@ -154,6 +154,9 @@ where
 
         // Mark any record_field that was explicitly set by the user as user-set.
         // These should NOT be overwritten by auto-record.
+        // Note: tracing's Value trait only supports these 4 primitive types
+        // (string, u64, i64, bool). All other types are formatted via Debug
+        // and stored as strings. So checking these 4 maps covers all possible values.
         for &rf in &record_fields {
             if extractor.extracted.string_values.contains_key(rf)
                 || extractor.extracted.u64_values.contains_key(rf)
