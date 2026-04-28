@@ -985,15 +985,34 @@ Different metadata types coexist independently — one value per type per key.
 
 ### 19.2 TracingField Builder
 
-`TracingField` is built with a fluent builder that controls two directions:
+`TracingField` is built with a fluent builder that controls three directions:
 
-**Enrich** (context → log output):
+**Enrich — shorthand** (context → both log output AND span fields):
 
 | Method | Formats via | Best for |
 |--------|-------------|----------|
 | `.enrich_display::<T>()` | `Display` trait | Strings, IDs, numbers |
 | `.enrich_debug::<T>()` | `Debug` trait | Structs without Display |
 | `.enrich_custom::<T>(f)` | Custom closure | Special formatting |
+
+**Enrich log only** (context → log event, via `WithContextFields`):
+
+| Method | Formats via |
+|--------|-------------|
+| `.enrich_log_display::<T>()` | `Display` trait |
+| `.enrich_log_debug::<T>()` | `Debug` trait |
+| `.enrich_log_custom::<T>(f)` | Custom closure |
+
+**Record span only** (context → span field, on span enter):
+
+| Method | Formats via |
+|--------|-------------|
+| `.enrich_span_display::<T>()` | `Display` trait |
+| `.enrich_span_debug::<T>()` | `Debug` trait |
+| `.enrich_span_custom::<T>(f)` | Custom closure |
+
+> **Important:** Span recording only works on fields pre-declared with
+> `tracing::field::Empty`. Spans without the field are silently skipped.
 
 **Extract** (span field → context):
 
@@ -1007,31 +1026,38 @@ Different metadata types coexist independently — one value per type per key.
 ```rust
 use dcontext_tracing::TracingField;
 
-// Both directions — extract from spans AND enrich logs
+// All directions — extract from spans AND enrich both logs + span fields
 TracingField::builder("rid")
     .extract_from_str(|s| Some(s.to_string()))
     .enrich_display::<String>()
     .build()
 
-// Enrich only — no extraction
+// Log enrichment only — no span recording
 TracingField::builder("retry")
-    .enrich_debug::<RetryCount>()
+    .enrich_log_debug::<RetryCount>()
     .build()
 
-// Extract only — no log enrichment
+// Span recording only — no log enrichment
+TracingField::builder("job_id")
+    .enrich_span_display::<String>()
+    .build()
+
+// Extract only — no enrichment at all
 TracingField::builder("request_id")
     .extract_from_str(|s| Some(RequestId(s.to_string())))
     .build()
 
-// Custom formatter
+// Custom formatter with span field name override
 TracingField::builder("uid")
+    .record_as("user_id")  // span field name differs from log_name
     .enrich_custom::<UserId>(|u| format!("user:{}", u.0))
     .build()
 ```
 
 The first argument to `builder()` is the `log_name` — the field name in log
-output. Use `.span_field("other_name")` if the span field name differs from
-the context key.
+output. Use `.span_field("other_name")` if the extraction span field name
+differs from the context key, and `.record_as("field")` if the span field to
+record into differs from `log_name`.
 
 ### 19.3 WithContextFields Formatter
 

@@ -1,13 +1,15 @@
-//! Unified tracing metadata for context-to-log and span-to-context integration.
+//! Unified tracing metadata for context-to-log, context-to-span, and span-to-context integration.
 //!
-//! [`TracingField`] is the single metadata type that controls both directions:
+//! [`TracingField`] is the single metadata type that controls all three directions:
 //!
 //! - **Extract** (span field → context): When a tracing span contains a matching
 //!   field, the value is extracted and set as a context variable.
-//! - **Enrich** (context → log): The current context value is formatted and
-//!   included in every log event via [`WithContextFields`](crate::WithContextFields).
+//! - **Enrich log** (context → log event): The current context value is formatted
+//!   and included in every log event via [`WithContextFields`](crate::WithContextFields).
+//! - **Record span** (context → span field): The current context value is recorded
+//!   into pre-declared span fields on span enter.
 //!
-//! Both behaviors are opt-in per key, configured at registration time.
+//! All behaviors are opt-in per key, configured at registration time.
 
 use std::any::Any;
 use std::fmt;
@@ -17,9 +19,10 @@ use std::sync::{Arc, OnceLock};
 
 /// Unified tracing metadata for a context key.
 ///
-/// Controls two behaviors:
+/// Controls three behaviors:
 /// - **Extract**: populate a context variable from a tracing span field
-/// - **Enrich**: include the context value in log output
+/// - **Enrich log**: include the context value in log output
+/// - **Record span**: record the context value into span fields
 ///
 /// Created via [`TracingFieldBuilder`]:
 ///
@@ -30,21 +33,24 @@ use std::sync::{Arc, OnceLock};
 ///     opts.cached().with_metadata(
 ///         TracingField::builder("rid")
 ///             .extract_from_str(|s| Some(s.to_string()))
-///             .enrich_display::<String>()
+///             .enrich_display::<String>()  // enables both log + span
 ///             .build()
 ///     )
 /// });
 /// ```
 pub struct TracingField {
-    /// Field name for log output (the "enrichment name").
+    /// Field name for log output and span recording.
     log_name: &'static str,
     /// Span field name to extract from. If `None`, uses the context key.
     span_field: Option<&'static str>,
+    /// Span field name to record into. If `None`, uses `log_name`.
+    record_field: Option<&'static str>,
     /// Extract closures: each calls `dcontext::set_context` internally.
-    /// The `&'static str` arg is the context key (bound at discovery time).
     extract: Option<ExtractFns>,
-    /// Format function for log enrichment.
-    fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
+    /// Format function for log enrichment (context → log event).
+    log_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
+    /// Format function for span recording (context → span field).
+    span_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
 }
 
 /// Closures for extracting tracing field values into context.
@@ -61,17 +67,19 @@ pub(crate) struct ExtractFns {
 impl TracingField {
     /// Start building a `TracingField` with the given log field name.
     ///
-    /// The `log_name` is the field name used in log output (enrichment direction).
-    /// It can differ from the context key.
+    /// The `log_name` is the field name used in log output and (by default)
+    /// span recording. It can differ from the context key.
     pub fn builder(log_name: &'static str) -> TracingFieldBuilder {
         TracingFieldBuilder {
             log_name,
             span_field: None,
+            record_field: None,
             from_str: None,
             from_u64: None,
             from_i64: None,
             from_bool: None,
-            fmt_fn: None,
+            log_fmt_fn: None,
+            span_fmt_fn: None,
         }
     }
 
@@ -85,25 +93,42 @@ impl TracingField {
         self.span_field
     }
 
+    /// The span field name to record into.
+    /// Returns `record_field` if set, otherwise `log_name`.
+    pub fn record_field(&self) -> &'static str {
+        self.record_field.unwrap_or(self.log_name)
+    }
+
     /// Whether this field has extraction enabled.
     pub fn has_extract(&self) -> bool {
         self.extract.is_some()
     }
 
-    /// Whether this field has enrichment enabled.
+    /// Whether this field has any enrichment enabled (log or span).
     pub fn has_enrich(&self) -> bool {
-        self.fmt_fn.is_some()
+        self.log_fmt_fn.is_some() || self.span_fmt_fn.is_some()
+    }
+
+    /// Whether this field has log enrichment enabled.
+    pub fn has_log_enrich(&self) -> bool {
+        self.log_fmt_fn.is_some()
+    }
+
+    /// Whether this field has span recording enabled.
+    pub fn has_span_record(&self) -> bool {
+        self.span_fmt_fn.is_some()
     }
 
     /// Format a type-erased value for log enrichment.
-    /// Returns `None` if enrichment is not enabled or the type doesn't match.
+    /// Returns `None` if log enrichment is not enabled or the type doesn't match.
     pub fn format(&self, any_val: &dyn Any) -> Option<String> {
-        self.fmt_fn.as_ref().and_then(|f| f(any_val))
+        self.log_fmt_fn.as_ref().and_then(|f| f(any_val))
     }
 
-    /// Access the extract functions (used by the layer).
-    pub(crate) fn extract_fns(&self) -> Option<&ExtractFns> {
-        self.extract.as_ref()
+    /// Format a type-erased value for span recording.
+    /// Returns `None` if span recording is not enabled or the type doesn't match.
+    pub fn format_for_span(&self, any_val: &dyn Any) -> Option<String> {
+        self.span_fmt_fn.as_ref().and_then(|f| f(any_val))
     }
 }
 
@@ -113,20 +138,32 @@ impl TracingField {
 pub struct TracingFieldBuilder {
     log_name: &'static str,
     span_field: Option<&'static str>,
+    record_field: Option<&'static str>,
     from_str: Option<Arc<dyn Fn(&str, &'static str) + Send + Sync>>,
     from_u64: Option<Arc<dyn Fn(u64, &'static str) + Send + Sync>>,
     from_i64: Option<Arc<dyn Fn(i64, &'static str) + Send + Sync>>,
     from_bool: Option<Arc<dyn Fn(bool, &'static str) + Send + Sync>>,
-    fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
+    log_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
+    span_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
 }
 
 impl TracingFieldBuilder {
     /// Set the span field name to extract from.
     ///
     /// If not set, the context key (from registration) is used as the
-    /// span field name.
+    /// span field name for extraction.
     pub fn span_field(mut self, name: &'static str) -> Self {
         self.span_field = Some(name);
+        self
+    }
+
+    /// Set the span field name to record into.
+    ///
+    /// If not set, `log_name` is used as the span field name for recording.
+    /// Use this when the span field you want to record into differs from
+    /// the log output field name.
+    pub fn record_as(mut self, name: &'static str) -> Self {
+        self.record_field = Some(name);
         self
     }
 
@@ -187,30 +224,116 @@ impl TracingFieldBuilder {
         self
     }
 
-    // ── Enrich (context → log) ─────────────────────────────────
+    // ── Enrich: shorthand (enables BOTH log + span) ────────────
 
-    /// Enrich log output using [`Display`](std::fmt::Display).
-    pub fn enrich_display<T: fmt::Display + 'static>(mut self) -> Self {
-        self.fmt_fn = Some(Arc::new(|any_val| {
+    /// Enrich both log output and span fields using [`Display`](std::fmt::Display).
+    ///
+    /// This is shorthand for calling both `.enrich_log_display::<T>()`
+    /// and `.enrich_span_display::<T>()`.
+    pub fn enrich_display<T: fmt::Display + 'static>(self) -> Self {
+        let fmt: Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync> =
+            Arc::new(|any_val| any_val.downcast_ref::<T>().map(|v| v.to_string()));
+        Self {
+            log_fmt_fn: Some(Arc::clone(&fmt)),
+            span_fmt_fn: Some(fmt),
+            ..self
+        }
+    }
+
+    /// Enrich both log output and span fields using [`Debug`](std::fmt::Debug).
+    ///
+    /// This is shorthand for calling both `.enrich_log_debug::<T>()`
+    /// and `.enrich_span_debug::<T>()`.
+    pub fn enrich_debug<T: fmt::Debug + 'static>(self) -> Self {
+        let fmt: Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync> =
+            Arc::new(|any_val| any_val.downcast_ref::<T>().map(|v| format!("{:?}", v)));
+        Self {
+            log_fmt_fn: Some(Arc::clone(&fmt)),
+            span_fmt_fn: Some(fmt),
+            ..self
+        }
+    }
+
+    /// Enrich both log output and span fields with a custom formatting function.
+    ///
+    /// This is shorthand for calling both `.enrich_log_custom::<T>(f)`
+    /// and `.enrich_span_custom::<T>(f)` with the same function.
+    pub fn enrich_custom<T: 'static>(
+        self,
+        f: impl Fn(&T) -> String + Send + Sync + 'static,
+    ) -> Self {
+        let fmt: Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync> =
+            Arc::new(move |any_val| any_val.downcast_ref::<T>().map(&f));
+        Self {
+            log_fmt_fn: Some(Arc::clone(&fmt)),
+            span_fmt_fn: Some(fmt),
+            ..self
+        }
+    }
+
+    // ── Enrich log only (context → log event) ──────────────────
+
+    /// Enrich log output only using [`Display`](std::fmt::Display).
+    ///
+    /// The value will appear in log events via [`WithContextFields`](crate::WithContextFields)
+    /// but will NOT be automatically recorded into span fields.
+    pub fn enrich_log_display<T: fmt::Display + 'static>(mut self) -> Self {
+        self.log_fmt_fn = Some(Arc::new(|any_val| {
             any_val.downcast_ref::<T>().map(|v| v.to_string())
         }));
         self
     }
 
-    /// Enrich log output using [`Debug`](std::fmt::Debug).
-    pub fn enrich_debug<T: fmt::Debug + 'static>(mut self) -> Self {
-        self.fmt_fn = Some(Arc::new(|any_val| {
+    /// Enrich log output only using [`Debug`](std::fmt::Debug).
+    pub fn enrich_log_debug<T: fmt::Debug + 'static>(mut self) -> Self {
+        self.log_fmt_fn = Some(Arc::new(|any_val| {
             any_val.downcast_ref::<T>().map(|v| format!("{:?}", v))
         }));
         self
     }
 
-    /// Enrich log output with a custom formatting function.
-    pub fn enrich_custom<T: 'static>(
+    /// Enrich log output only with a custom formatting function.
+    pub fn enrich_log_custom<T: 'static>(
         mut self,
         f: impl Fn(&T) -> String + Send + Sync + 'static,
     ) -> Self {
-        self.fmt_fn = Some(Arc::new(move |any_val| {
+        self.log_fmt_fn = Some(Arc::new(move |any_val| {
+            any_val.downcast_ref::<T>().map(&f)
+        }));
+        self
+    }
+
+    // ── Record span only (context → span field) ────────────────
+
+    /// Record into span fields using [`Display`](std::fmt::Display).
+    ///
+    /// On span enter, the current context value is formatted and recorded
+    /// into the span field (must be pre-declared with `tracing::field::Empty`).
+    /// Spans without the field are silently skipped.
+    pub fn enrich_span_display<T: fmt::Display + 'static>(mut self) -> Self {
+        self.span_fmt_fn = Some(Arc::new(|any_val| {
+            any_val.downcast_ref::<T>().map(|v| v.to_string())
+        }));
+        self
+    }
+
+    /// Record into span fields using [`Debug`](std::fmt::Debug).
+    pub fn enrich_span_debug<T: fmt::Debug + 'static>(mut self) -> Self {
+        self.span_fmt_fn = Some(Arc::new(|any_val| {
+            any_val.downcast_ref::<T>().map(|v| format!("{:?}", v))
+        }));
+        self
+    }
+
+    /// Record into span fields with a custom formatting function.
+    ///
+    /// On span enter, the current context value is passed to `f` and the
+    /// result is recorded into the span field.
+    pub fn enrich_span_custom<T: 'static>(
+        mut self,
+        f: impl Fn(&T) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.span_fmt_fn = Some(Arc::new(move |any_val| {
             any_val.downcast_ref::<T>().map(&f)
         }));
         self
@@ -236,8 +359,10 @@ impl TracingFieldBuilder {
         TracingField {
             log_name: self.log_name,
             span_field: self.span_field,
+            record_field: self.record_field,
             extract,
-            fmt_fn: self.fmt_fn,
+            log_fmt_fn: self.log_fmt_fn,
+            span_fmt_fn: self.span_fmt_fn,
         }
     }
 }
@@ -249,12 +374,16 @@ pub(crate) struct TracingFieldEntry {
     pub context_key: &'static str,
     /// Span field name for extraction (may differ from context_key).
     pub span_field: &'static str,
+    /// Span field name to record into.
+    pub record_field: &'static str,
     /// Extract closures (if extraction is enabled).
     pub extract: Option<ExtractFns>,
-    /// Log field name (for enrichment output).
+    /// Log field name (for log enrichment output).
     pub log_name: &'static str,
-    /// Format function (if enrichment is enabled).
-    pub fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
+    /// Format function for log enrichment.
+    pub log_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
+    /// Format function for span recording.
+    pub span_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
 }
 
 /// Global cache of discovered TracingField entries.
@@ -266,9 +395,11 @@ pub(crate) fn get_tracing_fields() -> &'static [TracingFieldEntry] {
     TRACING_FIELDS.get_or_init(|| {
         dcontext::keys_with_metadata::<TracingField, _>(|key, meta| {
             let span_field = meta.span_field.unwrap_or(key);
+            let record_field = meta.record_field.unwrap_or(meta.log_name);
             TracingFieldEntry {
                 context_key: key,
                 span_field,
+                record_field,
                 extract: meta.extract.as_ref().map(|e| ExtractFns {
                     from_str: e.from_str.as_ref().map(Arc::clone),
                     from_u64: e.from_u64.as_ref().map(Arc::clone),
@@ -276,7 +407,8 @@ pub(crate) fn get_tracing_fields() -> &'static [TracingFieldEntry] {
                     from_bool: e.from_bool.as_ref().map(Arc::clone),
                 }),
                 log_name: meta.log_name,
-                fmt_fn: meta.fmt_fn.as_ref().map(Arc::clone),
+                log_fmt_fn: meta.log_fmt_fn.as_ref().map(Arc::clone),
+                span_fmt_fn: meta.span_fmt_fn.as_ref().map(Arc::clone),
             }
         })
     })
@@ -286,7 +418,7 @@ pub(crate) fn get_tracing_fields() -> &'static [TracingFieldEntry] {
 
 /// Collect the current context log fields as `(name, formatted_value)` pairs.
 ///
-/// Returns only fields that have enrichment enabled and a value set in the
+/// Returns only fields that have log enrichment enabled and a value set in the
 /// current context. Never panics.
 ///
 /// This is the public primitive for custom formatters.
@@ -294,7 +426,7 @@ pub fn collect_log_fields() -> Vec<(&'static str, String)> {
     let entries = get_tracing_fields();
     let mut result = Vec::new();
     for entry in entries {
-        if let Some(ref fmt_fn) = entry.fmt_fn {
+        if let Some(ref fmt_fn) = entry.log_fmt_fn {
             if let Some(formatted) = dcontext::with_context_value(entry.context_key, |any_val| {
                 fmt_fn(any_val)
             })
@@ -361,7 +493,7 @@ where
     ) -> fmt::Result {
         let entries = get_tracing_fields();
         for entry in entries {
-            if let Some(ref fmt_fn) = entry.fmt_fn {
+            if let Some(ref fmt_fn) = entry.log_fmt_fn {
                 if let Some(formatted) =
                     dcontext::with_context_value(entry.context_key, |any_val| fmt_fn(any_val))
                         .flatten()

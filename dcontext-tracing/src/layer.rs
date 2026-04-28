@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::marker::PhantomData;
 
 use tracing::Subscriber;
@@ -8,6 +9,11 @@ use crate::field_mapping::{ExtractedFields, FieldExtractor};
 use crate::guard_stack;
 use crate::span_info::{SpanInfo, SPAN_INFO_KEY};
 use crate::tracing_field::get_tracing_fields;
+
+// Flag to prevent on_record from processing values recorded by our own layer.
+thread_local! {
+    static SELF_RECORDING: Cell<bool> = const { Cell::new(false) };
+}
 
 /// A [`tracing_subscriber::Layer`] that automatically creates dcontext scopes
 /// when tracing spans are entered.
@@ -114,13 +120,21 @@ where
         ctx: Context<'_, S>,
     ) {
         let metadata_fields = get_tracing_fields();
+
+        // Collect fields to extract AND record_field names to track user-set fields
         let extract_names: Vec<&'static str> = metadata_fields
             .iter()
             .filter(|e| e.extract.is_some())
             .map(|e| e.span_field)
             .collect();
 
-        if extract_names.is_empty() {
+        let record_fields: Vec<&'static str> = metadata_fields
+            .iter()
+            .filter(|e| e.span_fmt_fn.is_some())
+            .map(|e| e.record_field)
+            .collect();
+
+        if extract_names.is_empty() && record_fields.is_empty() {
             return;
         }
 
@@ -129,10 +143,33 @@ where
             None => return,
         };
 
-        let mut extractor = FieldExtractor::new(&extract_names);
+        // Extract target fields from span attributes
+        let all_target: Vec<&'static str> = extract_names
+            .iter()
+            .chain(record_fields.iter())
+            .copied()
+            .collect();
+        let mut extractor = FieldExtractor::new(&all_target);
         attrs.record(&mut extractor);
 
-        if !extractor.extracted.is_empty() {
+        // Mark any record_field that was explicitly set by the user as user-set.
+        // These should NOT be overwritten by auto-record.
+        // Note: tracing's Value trait only supports these 4 primitive types
+        // (string, u64, i64, bool). All other types are formatted via Debug
+        // and stored as strings. So checking these 4 maps covers all possible values.
+        for &rf in &record_fields {
+            if extractor.extracted.string_values.contains_key(rf)
+                || extractor.extracted.u64_values.contains_key(rf)
+                || extractor.extracted.i64_values.contains_key(rf)
+                || extractor.extracted.bool_values.contains_key(rf)
+            {
+                extractor.extracted.mark_user_set(rf);
+            }
+        }
+
+        // Only keep extraction fields in extracted (remove record-only fields)
+        // Actually we keep all — the extraction logic only looks at extract_names
+        if !extractor.extracted.is_empty() || !extractor.extracted.user_set_fields.is_empty() {
             let mut extensions = span.extensions_mut();
             extensions.insert(extractor.extracted);
         }
@@ -144,6 +181,11 @@ where
         values: &span::Record<'_>,
         ctx: Context<'_, S>,
     ) {
+        // Skip processing if this on_record was triggered by our own auto-recording
+        if SELF_RECORDING.with(|f| f.get()) {
+            return;
+        }
+
         let metadata_fields = get_tracing_fields();
         let extract_names: Vec<&'static str> = metadata_fields
             .iter()
@@ -151,7 +193,13 @@ where
             .map(|e| e.span_field)
             .collect();
 
-        if extract_names.is_empty() {
+        let record_fields: Vec<&'static str> = metadata_fields
+            .iter()
+            .filter(|e| e.span_fmt_fn.is_some())
+            .map(|e| e.record_field)
+            .collect();
+
+        if extract_names.is_empty() && record_fields.is_empty() {
             return;
         }
 
@@ -160,16 +208,34 @@ where
             None => return,
         };
 
-        let mut extractor = FieldExtractor::new(&extract_names);
+        let all_target: Vec<&'static str> = extract_names
+            .iter()
+            .chain(record_fields.iter())
+            .copied()
+            .collect();
+        let mut extractor = FieldExtractor::new(&all_target);
         values.record(&mut extractor);
 
         if !extractor.extracted.is_empty() {
             let mut extensions = span.extensions_mut();
+
+            // Mark user-set record fields
+            for &rf in &record_fields {
+                if extractor.extracted.string_values.contains_key(rf)
+                    || extractor.extracted.u64_values.contains_key(rf)
+                    || extractor.extracted.i64_values.contains_key(rf)
+                    || extractor.extracted.bool_values.contains_key(rf)
+                {
+                    extractor.extracted.mark_user_set(rf);
+                }
+            }
+
             if let Some(existing) = extensions.get_mut::<ExtractedFields>() {
                 existing.string_values.extend(extractor.extracted.string_values);
                 existing.u64_values.extend(extractor.extracted.u64_values);
                 existing.i64_values.extend(extractor.extracted.i64_values);
                 existing.bool_values.extend(extractor.extracted.bool_values);
+                existing.user_set_fields.extend(extractor.extracted.user_set_fields);
             } else {
                 extensions.insert(extractor.extracted);
             }
@@ -227,6 +293,50 @@ where
                         level: metadata.level().to_string(),
                     };
                     dcontext::set_context(SPAN_INFO_KEY, info);
+                }
+            }
+
+            // Level 4: Record context values into span fields.
+            // Inside on_enter, Span::current() returns the span being entered.
+            // span.record() silently skips fields not declared on the span.
+            // We skip fields that were explicitly set by user code.
+            if metadata_fields.iter().any(|e| e.span_fmt_fn.is_some()) {
+                // Check which fields are user-set (should not be overwritten)
+                let user_set: std::collections::HashSet<&str> = ctx
+                    .span(id)
+                    .and_then(|span| {
+                        let extensions = span.extensions();
+                        extensions
+                            .get::<ExtractedFields>()
+                            .map(|ef| ef.user_set_fields.iter().copied().collect())
+                    })
+                    .unwrap_or_default();
+
+                let to_record: Vec<(&'static str, String)> = metadata_fields
+                    .iter()
+                    .filter_map(|entry| {
+                        let fmt_fn = entry.span_fmt_fn.as_ref()?;
+                        // Skip fields explicitly set by user code
+                        if user_set.contains(entry.record_field) {
+                            return None;
+                        }
+                        let formatted = dcontext::with_context_value(
+                            entry.context_key,
+                            |any_val| fmt_fn(any_val),
+                        )
+                        .flatten()?;
+                        Some((entry.record_field, formatted))
+                    })
+                    .collect();
+
+                if !to_record.is_empty() {
+                    let current = tracing::Span::current();
+                    // Set flag to prevent on_record from processing our own writes
+                    SELF_RECORDING.with(|f| f.set(true));
+                    for (field_name, value) in &to_record {
+                        current.record(*field_name, value.as_str());
+                    }
+                    SELF_RECORDING.with(|f| f.set(false));
                 }
             }
 
