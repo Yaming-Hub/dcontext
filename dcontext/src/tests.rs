@@ -1446,29 +1446,6 @@ mod async_scope_chain_tests {
 // These tests verify that the Cell<Option<ContextStore>> design handles
 // re-entrant access gracefully: no panics, no corrupted state.
 
-/// A value whose Clone impl reads from context (simulating what tracing
-/// callbacks do: they read context during a write operation).
-#[derive(Default, Debug, Serialize, Deserialize)]
-struct ReentrantCloneVal {
-    data: String,
-    /// Key to read from during clone (only used at runtime, not serialized).
-    #[serde(skip)]
-    read_key: Option<&'static str>,
-}
-
-impl Clone for ReentrantCloneVal {
-    fn clone(&self) -> Self {
-        // Simulate re-entrant read during clone (e.g. tracing callback).
-        if let Some(key) = self.read_key {
-            let _: RequestId = get_context(key);
-        }
-        Self {
-            data: self.data.clone(),
-            read_key: self.read_key,
-        }
-    }
-}
-
 /// A value whose Drop impl reads from context.
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct ReentrantDropVal(String);

@@ -575,16 +575,6 @@ pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
     guard.as_ref().and_then(|map| map.get(key).map(extract))
 }
 
-/// Return all registered key names.
-/// After [`initialize`]: lock-free. Before: acquires Mutex.
-pub(crate) fn all_keys() -> Vec<&'static str> {
-    if let Some(frozen) = FROZEN.get() {
-        return frozen.keys().copied().collect();
-    }
-    let guard = lock_build();
-    guard.as_ref().map_or_else(Vec::new, |m| m.keys().copied().collect())
-}
-
 /// Return registered keys that have per-scope caching enabled.
 /// These keys will have their effective values eagerly copied into each
 /// new scope on entry, giving O(1) reads.

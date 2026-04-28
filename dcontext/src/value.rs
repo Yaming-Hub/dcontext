@@ -4,8 +4,6 @@ use crate::error::ContextError;
 
 /// Type-erased context value. Stored as `Arc<dyn ContextValue>` in the scope chain.
 pub(crate) trait ContextValue: Any + Send + Sync {
-    /// Clone into a new boxed trait object.
-    fn clone_boxed(&self) -> Box<dyn ContextValue>;
     /// Downcast to &dyn Any.
     fn as_any(&self) -> &dyn Any;
     /// Serialize this value to bytes (bincode).
@@ -19,10 +17,6 @@ impl<T> ContextValue for T
 where
     T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    fn clone_boxed(&self) -> Box<dyn ContextValue> {
-        Box::new(self.clone())
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -44,10 +38,6 @@ impl<T> ContextValue for LocalValue<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    fn clone_boxed(&self) -> Box<dyn ContextValue> {
-        Box::new(LocalValue(self.0.clone()))
-    }
-
     fn as_any(&self) -> &dyn Any {
         &self.0
     }
