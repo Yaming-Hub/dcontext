@@ -26,6 +26,7 @@ async integration, and actor framework support.
 16. [Error Handling](#16-error-handling)
 17. [Integration with dactor](#17-integration-with-dactor)
 18. [Cargo Features](#18-cargo-features)
+19. [Log Enrichment](#19-log-enrichment)
 
 ---
 
@@ -929,4 +930,153 @@ dcontext = { version = "0.4", default-features = false }
 
 ```toml
 dcontext = { version = "0.4", features = ["context-future"] }
+```
+
+---
+
+## 19. Log Enrichment
+
+The `dcontext-tracing` crate provides **log enrichment** — automatic injection
+of context values into every log event. This is powered by the extensible
+**per-key metadata** system in the core `dcontext` crate.
+
+### 19.1 Extensible Metadata
+
+Any typed metadata can be attached to a registration. Metadata is keyed by
+`TypeId`, so different extension crates can each register their own metadata
+type on the same key without conflicts:
+
+```rust
+use dcontext::RegistryBuilder;
+use dcontext_tracing::LogField;
+
+let mut builder = RegistryBuilder::new();
+
+// Register with LogField metadata — this key will appear in logs
+builder.register_with::<String>("request_id", |opts| {
+    opts.cached()
+        .with_metadata(LogField::display::<String>("rid"))
+});
+
+// Multiple metadata types on the same key (from different crates)
+builder.register_with::<String>("tenant_id", |opts| {
+    opts.cached()
+        .with_metadata(LogField::display::<String>("tenant"))
+        // hypothetical: another crate's metadata
+        // .with_metadata(PropagationHeader::new("X-Tenant-Id"))
+});
+
+// Keys without LogField metadata are NOT included in logs
+builder.register::<String>("internal_buffer");
+
+dcontext::initialize(builder);
+```
+
+Each `with_metadata::<M>(value)` call stores under `TypeId::of::<M>()`.
+Different metadata types coexist independently — one value per type per key.
+
+### 19.2 LogField Formatters
+
+`LogField` captures a type-safe formatter at registration time:
+
+| Constructor | Formats via | Best for |
+|-------------|-------------|----------|
+| `LogField::display::<T>(name)` | `Display` trait | Strings, IDs, numbers |
+| `LogField::debug::<T>(name)` | `Debug` trait | Structs without Display |
+| `LogField::custom::<T>(name, f)` | Custom closure | Special formatting |
+
+```rust
+use dcontext_tracing::LogField;
+
+// Display formatter — uses ToString
+LogField::display::<String>("rid")
+
+// Debug formatter — uses {:?}
+LogField::debug::<TraceContext>("trace")
+
+// Custom formatter — any Fn(&T) -> String
+LogField::custom::<UserId>("uid", |u| format!("user:{}", u.0))
+```
+
+The `name` parameter is the field name in log output (can differ from the
+context key name).
+
+### 19.3 WithContextFields Formatter
+
+`WithContextFields` wraps any `FormatEvent` implementation to prepend
+context fields to every log line:
+
+```rust
+use tracing_subscriber::prelude::*;
+use dcontext_tracing::{DcontextLayer, WithContextFields};
+
+tracing_subscriber::registry()
+    .with(DcontextLayer::new())
+    .with(tracing_subscriber::fmt::layer()
+        .event_format(WithContextFields::wrap(
+            tracing_subscriber::fmt::format()
+                .without_time()
+                .with_target(false)
+        )))
+    .init();
+```
+
+Log output will look like:
+```
+rid=req-123 tenant=acme  INFO handling request
+rid=req-123 tenant=acme  INFO query complete, rows=42
+```
+
+Only keys that have a `LogField` metadata **and** a value set in the current
+context appear. Unset keys are silently skipped.
+
+### 19.4 collect_log_fields()
+
+For custom formatters or non-tracing logging, use `collect_log_fields()` to
+get the current context fields as `(name, formatted_value)` pairs:
+
+```rust
+use dcontext_tracing::collect_log_fields;
+
+let fields = collect_log_fields();
+for (name, value) in &fields {
+    print!("{}={} ", name, value);
+}
+```
+
+### 19.5 Querying Metadata
+
+The core `dcontext` crate exposes general-purpose metadata queries that any
+extension crate can use:
+
+```rust
+// Query a single key's metadata (callback-based for thread safety)
+if let Some(name) = dcontext::with_metadata::<LogField, _>("request_id", |lf| lf.name()) {
+    println!("Log field name: {}", name);
+}
+
+// Iterate all keys with a specific metadata type
+let field_names: Vec<&str> = dcontext::keys_with_metadata::<LogField, _>(|_key, lf| lf.name());
+```
+
+### 19.6 Writing Your Own Metadata
+
+Extension crates define their own metadata struct and use the same registration API:
+
+```rust
+// In your crate
+pub struct PropagationHeader {
+    pub header_name: &'static str,
+}
+
+// Users register it alongside other metadata
+builder.register_with::<String>("request_id", |opts| {
+    opts.with_metadata(LogField::display::<String>("rid"))
+        .with_metadata(PropagationHeader { header_name: "X-Request-Id" })
+});
+
+// Your crate queries only its own type
+let headers = dcontext::keys_with_metadata::<PropagationHeader, _>(|key, ph| {
+    (key, ph.header_name)
+});
 ```
