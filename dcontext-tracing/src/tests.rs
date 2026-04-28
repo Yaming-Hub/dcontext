@@ -714,3 +714,100 @@ fn record_field_defaults_to_log_name() {
         .build();
     assert_eq!(tf.record_field(), "my_field");
 }
+
+#[test]
+fn span_record_does_not_overwrite_user_set_fields() {
+    // If a span field is explicitly set by user code (non-Empty),
+    // auto-record must NOT overwrite it.
+    // "request_id" is already registered with enrich_display in init_registry.
+    init_registry();
+
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let buf_clone = Arc::clone(&buf);
+    let writer = move || -> Box<dyn std::io::Write + Send> {
+        Box::new(WriterCapture(Arc::clone(&buf_clone)))
+    };
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .without_time()
+        .with_target(false);
+
+    let subscriber = tracing_subscriber::registry()
+        .with(DcontextLayer::new())
+        .with(fmt_layer);
+
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    dcontext::force_thread_local(|| {
+        let _scope = dcontext::enter_scope();
+        dcontext::set_context("request_id", "from-context".to_string());
+
+        // Span declares request_id with a non-Empty value (user-set)
+        let _span =
+            tracing::info_span!("user_op", request_id = "explicit-value").entered();
+        tracing::info!("check");
+    });
+
+    let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    // The span should retain the explicit user value, not be overwritten
+    assert!(
+        output.contains("explicit-value"),
+        "user-set value should be preserved: {}",
+        output
+    );
+    assert!(
+        !output.contains("from-context"),
+        "context value should NOT overwrite user-set field: {}",
+        output
+    );
+}
+
+#[test]
+fn self_recording_does_not_poison_extraction() {
+    // When a field has both extract and span_fmt_fn, auto-recording should
+    // not cause the extracted value to be replaced by the formatted string.
+    // "request_id" is already registered with extract + enrich_display in init_registry.
+    init_registry();
+
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let buf_clone = Arc::clone(&buf);
+    let writer = move || -> Box<dyn std::io::Write + Send> {
+        Box::new(WriterCapture(Arc::clone(&buf_clone)))
+    };
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .without_time()
+        .with_target(false);
+
+    let subscriber = tracing_subscriber::registry()
+        .with(DcontextLayer::new())
+        .with(fmt_layer);
+
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    dcontext::force_thread_local(|| {
+        let _scope = dcontext::enter_scope();
+
+        // Set context value; span has Empty field for recording
+        dcontext::set_context("request_id", "original".to_string());
+        let span = tracing::info_span!("poison_op", request_id = tracing::field::Empty);
+        let _enter = span.enter();
+
+        // After entering, the context should still have "original"
+        let val = dcontext::get_context_option::<String>("request_id");
+        assert_eq!(
+            val,
+            Some("original".to_string()),
+            "context value must not be poisoned by self-recording"
+        );
+
+        tracing::info!("verify");
+    });
+
+    let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("verify"));
+}

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use tracing_core::field::{Field, Visit};
@@ -11,6 +11,9 @@ pub(crate) struct ExtractedFields {
     pub u64_values: HashMap<&'static str, u64>,
     pub i64_values: HashMap<&'static str, i64>,
     pub bool_values: HashMap<&'static str, bool>,
+    /// Fields that were explicitly set by user code (not auto-recorded).
+    /// Auto-record should not overwrite these.
+    pub user_set_fields: HashSet<&'static str>,
 }
 
 impl ExtractedFields {
@@ -20,6 +23,7 @@ impl ExtractedFields {
             u64_values: HashMap::new(),
             i64_values: HashMap::new(),
             bool_values: HashMap::new(),
+            user_set_fields: HashSet::new(),
         }
     }
 
@@ -28,6 +32,11 @@ impl ExtractedFields {
             && self.u64_values.is_empty()
             && self.i64_values.is_empty()
             && self.bool_values.is_empty()
+    }
+
+    /// Mark a field as user-set (not from auto-record).
+    pub fn mark_user_set(&mut self, field: &'static str) {
+        self.user_set_fields.insert(field);
     }
 }
 
