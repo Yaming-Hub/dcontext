@@ -1,8 +1,8 @@
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 use tracing_subscriber::prelude::*;
 
-use crate::{DcontextLayer, FromFieldValue, SpanInfo, SPAN_INFO_KEY};
+use crate::{DcontextLayer, SpanInfo, TracingField, SPAN_INFO_KEY};
 
 static INIT: Once = Once::new();
 
@@ -14,10 +14,46 @@ fn init_registry() {
         builder.register::<String>("level");
         builder.register::<String>("visit");
         builder.register::<String>("tenant");
-        builder.register::<RequestId>("request_id");
-        builder.register::<Counter>("count");
-        builder.register::<Flag>("enabled");
+        // Extract + enrich via TracingField metadata
+        builder.register_with::<String>("request_id", |opts| {
+            opts.with_metadata(
+                TracingField::builder("request_id")
+                    .extract_from_str(|s| Some(s.to_string()))
+                    .enrich_display::<String>()
+                    .build(),
+            )
+        });
+        builder.register_with::<Counter>("count", |opts| {
+            opts.with_metadata(
+                TracingField::builder("count")
+                    .extract_from_u64(|v| Some(Counter(v)))
+                    .enrich_debug::<Counter>()
+                    .build(),
+            )
+        });
+        builder.register_with::<Flag>("enabled", |opts| {
+            opts.with_metadata(
+                TracingField::builder("enabled")
+                    .extract_from_bool(|v| Some(Flag(v)))
+                    .build(),
+            )
+        });
         builder.register::<SpanInfo>(SPAN_INFO_KEY);
+        // Enrich-only fields (no extraction)
+        builder.register_with::<String>("log_rid", |opts| {
+            opts.with_metadata(
+                TracingField::builder("rid")
+                    .enrich_display::<String>()
+                    .build(),
+            )
+        });
+        builder.register_with::<Counter>("log_counter", |opts| {
+            opts.with_metadata(
+                TracingField::builder("cnt")
+                    .enrich_debug::<Counter>()
+                    .build(),
+            )
+        });
         let _ = dcontext::try_initialize(builder);
     });
 }
@@ -39,21 +75,17 @@ fn basic_scope_enter_exit() {
 
         {
             let _span = tracing::info_span!("my_span").entered();
-            // Inside span: new scope inherits parent values
             let val: String = dcontext::get_context("outer");
             assert_eq!(val, "hello");
 
-            // Set a value in the span scope
             dcontext::set_context("inner", "world".to_string());
             let inner: String = dcontext::get_context("inner");
             assert_eq!(inner, "world");
         }
 
-        // After span exit: inner value should be reverted
         let inner: String = dcontext::get_context("inner");
         assert_eq!(inner, "", "inner should be empty after span exit");
 
-        // Outer value still accessible
         let outer: String = dcontext::get_context("outer");
         assert_eq!(outer, "hello");
     });
@@ -90,17 +122,14 @@ fn span_reenter() {
     with_layer(DcontextLayer::new(), || {
         let span = tracing::info_span!("reentrant");
 
-        // First enter
         {
             let _entered = span.enter();
             dcontext::set_context("visit", "first".to_string());
         }
 
-        // After first exit
         let val: String = dcontext::get_context("visit");
         assert_eq!(val, "", "should be reverted after first exit");
 
-        // Second enter — fresh scope
         {
             let _entered = span.enter();
             let val: String = dcontext::get_context("visit");
@@ -109,61 +138,31 @@ fn span_reenter() {
     });
 }
 
-// --- Level 2: Field mapping tests ---
-
-#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
-struct RequestId(String);
-
-impl FromFieldValue for RequestId {
-    fn from_str_value(s: &str) -> Option<Self> {
-        Some(RequestId(s.to_string()))
-    }
-}
+// --- Level 2: Field extraction tests (via TracingField metadata) ---
 
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct Counter(u64);
 
-impl FromFieldValue for Counter {
-    fn from_u64_value(v: u64) -> Option<Self> {
-        Some(Counter(v))
-    }
-}
-
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct Flag(bool);
 
-impl FromFieldValue for Flag {
-    fn from_bool_value(v: bool) -> Option<Self> {
-        Some(Flag(v))
-    }
-}
-
 #[test]
-fn field_mapping_string() {
-    let layer = DcontextLayer::builder()
-        .map_field::<RequestId>("request_id")
-        .build();
-
-    with_layer(layer, || {
+fn field_extraction_string() {
+    with_layer(DcontextLayer::new(), || {
         {
             let _span = tracing::info_span!("handler", request_id = "abc-123").entered();
-            let id: RequestId = dcontext::get_context("request_id");
-            assert_eq!(id, RequestId("abc-123".to_string()));
+            let id: String = dcontext::get_context("request_id");
+            assert_eq!(id, "abc-123");
         }
 
-        // After span exit, the mapped value should be reverted
-        let id: RequestId = dcontext::get_context("request_id");
-        assert_eq!(id, RequestId::default());
+        let id: String = dcontext::get_context("request_id");
+        assert_eq!(id, String::default());
     });
 }
 
 #[test]
-fn field_mapping_u64() {
-    let layer = DcontextLayer::builder()
-        .map_field::<Counter>("count")
-        .build();
-
-    with_layer(layer, || {
+fn field_extraction_u64() {
+    with_layer(DcontextLayer::new(), || {
         {
             let _span = tracing::info_span!("handler", count = 42u64).entered();
             let c: Counter = dcontext::get_context("count");
@@ -176,12 +175,8 @@ fn field_mapping_u64() {
 }
 
 #[test]
-fn field_mapping_bool() {
-    let layer = DcontextLayer::builder()
-        .map_field::<Flag>("enabled")
-        .build();
-
-    with_layer(layer, || {
+fn field_extraction_bool() {
+    with_layer(DcontextLayer::new(), || {
         {
             let _span = tracing::info_span!("handler", enabled = true).entered();
             let f: Flag = dcontext::get_context("enabled");
@@ -194,72 +189,41 @@ fn field_mapping_bool() {
 }
 
 #[test]
-fn field_mapping_with_rename() {
-    let layer = DcontextLayer::builder()
-        .map_field_as::<RequestId>("req_id", "request_id")
-        .build();
-
-    with_layer(layer, || {
-        {
-            let _span = tracing::info_span!("handler", req_id = "xyz-789").entered();
-            // The field "req_id" is mapped to context key "request_id"
-            let id: RequestId = dcontext::get_context("request_id");
-            assert_eq!(id, RequestId("xyz-789".to_string()));
-        }
-    });
-}
-
-#[test]
-fn field_mapping_missing_field() {
-    let layer = DcontextLayer::builder()
-        .map_field::<RequestId>("request_id")
-        .build();
-
-    with_layer(layer, || {
+fn field_extraction_missing_field() {
+    with_layer(DcontextLayer::new(), || {
         {
             // Span without the mapped field — should not set anything
             let _span = tracing::info_span!("handler", other_field = "value").entered();
-            let id: RequestId = dcontext::get_context("request_id");
-            assert_eq!(id, RequestId::default());
+            let id: String = dcontext::get_context("request_id");
+            assert_eq!(id, String::default());
         }
     });
 }
 
 #[test]
-fn field_mapping_late_record() {
-    let layer = DcontextLayer::builder()
-        .map_field::<RequestId>("request_id")
-        .build();
-
-    with_layer(layer, || {
-        // Create span with an empty field placeholder
+fn field_extraction_late_record() {
+    with_layer(DcontextLayer::new(), || {
         let span = tracing::info_span!("handler", request_id = tracing::field::Empty);
 
-        // Record the field value after creation
         span.record("request_id", "late-value");
 
         {
             let _entered = span.enter();
-            let id: RequestId = dcontext::get_context("request_id");
-            assert_eq!(id, RequestId("late-value".to_string()));
+            let id: String = dcontext::get_context("request_id");
+            assert_eq!(id, "late-value");
         }
     });
 }
 
 #[test]
-fn multiple_field_mappings() {
-    let layer = DcontextLayer::builder()
-        .map_field::<RequestId>("request_id")
-        .map_field::<Counter>("count")
-        .build();
-
-    with_layer(layer, || {
+fn multiple_field_extractions() {
+    with_layer(DcontextLayer::new(), || {
         {
             let _span =
                 tracing::info_span!("handler", request_id = "abc", count = 10u64).entered();
-            let id: RequestId = dcontext::get_context("request_id");
+            let id: String = dcontext::get_context("request_id");
             let c: Counter = dcontext::get_context("count");
-            assert_eq!(id, RequestId("abc".to_string()));
+            assert_eq!(id, "abc");
             assert_eq!(c, Counter(10));
         }
     });
@@ -284,7 +248,6 @@ fn span_info_basic() {
             assert_eq!(info.level, "INFO");
         }
 
-        // After exit, reverted
         let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
         assert_eq!(info.name, "");
     });
@@ -324,7 +287,6 @@ fn span_info_nested_shows_innermost() {
                 assert_eq!(info.name, "inner");
             }
 
-            // Back to outer
             let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
             assert_eq!(info.name, "outer");
         }
@@ -336,7 +298,6 @@ fn span_info_nested_shows_innermost() {
 #[test]
 fn all_features_combined() {
     let layer = DcontextLayer::builder()
-        .map_field::<RequestId>("request_id")
         .include_span_info()
         .build();
 
@@ -346,22 +307,18 @@ fn all_features_combined() {
         {
             let _span = tracing::info_span!("process", request_id = "req-001").entered();
 
-            // Field mapping works
-            let id: RequestId = dcontext::get_context("request_id");
-            assert_eq!(id, RequestId("req-001".to_string()));
+            let id: String = dcontext::get_context("request_id");
+            assert_eq!(id, "req-001");
 
-            // Span info works
             let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
             assert_eq!(info.name, "process");
 
-            // Inherited context works
             let tenant: String = dcontext::get_context("tenant");
             assert_eq!(tenant, "acme");
         }
 
-        // All reverted
-        let id: RequestId = dcontext::get_context("request_id");
-        assert_eq!(id, RequestId::default());
+        let id: String = dcontext::get_context("request_id");
+        assert_eq!(id, String::default());
     });
 }
 
@@ -372,16 +329,14 @@ async fn async_with_instrument() {
     use tracing::Instrument;
 
     init_registry();
-    let layer = DcontextLayer::builder()
-        .map_field::<RequestId>("request_id")
-        .build();
+    let layer = DcontextLayer::new();
 
     let subscriber = tracing_subscriber::registry().with(layer);
     let _guard = tracing::subscriber::set_default(subscriber);
 
     async fn inner_task() {
-        let id: RequestId = dcontext::force_thread_local(|| dcontext::get_context("request_id"));
-        assert_eq!(id, RequestId("async-001".to_string()));
+        let id: String = dcontext::force_thread_local(|| dcontext::get_context("request_id"));
+        assert_eq!(id, "async-001");
     }
 
     inner_task()
@@ -414,7 +369,6 @@ async fn async_nested_instrument() {
             .instrument(tracing::info_span!("inner_span"))
             .await;
 
-        // Back to outer after inner completes
         let info: SpanInfo =
             dcontext::force_thread_local(|| dcontext::get_context(SPAN_INFO_KEY));
         assert_eq!(info.name, "outer_span");
@@ -445,22 +399,16 @@ fn scope_chain_from_span_names() {
 }
 
 #[test]
-fn map_field_string_directly() {
-    // Users can map span string fields directly to dcontext String values
-    // without needing a newtype wrapper.
-    let layer = DcontextLayer::builder()
-        .map_field::<String>("tenant")
-        .build();
-
-    with_layer(layer, || {
+fn field_extraction_string_directly() {
+    // String extraction works directly via TracingField metadata
+    with_layer(DcontextLayer::new(), || {
         {
-            let _span = tracing::info_span!("handler", tenant = "acme-corp").entered();
-            let t: String = dcontext::force_thread_local(|| dcontext::get_context("tenant"));
-            assert_eq!(t, "acme-corp");
+            let _span = tracing::info_span!("handler", request_id = "direct-str").entered();
+            let t: String = dcontext::force_thread_local(|| dcontext::get_context("request_id"));
+            assert_eq!(t, "direct-str");
         }
 
-        // After span exit, the mapped value should be reverted
-        let t: String = dcontext::force_thread_local(|| dcontext::get_context("tenant"));
+        let t: String = dcontext::force_thread_local(|| dcontext::get_context("request_id"));
         assert_eq!(t, String::default());
     });
 }
@@ -476,10 +424,152 @@ fn scope_chain_reverts_on_exit() {
                 vec!["root", "child"]
             );
         }
-        // Child exited — chain should only have root
         assert_eq!(
             dcontext::force_thread_local(dcontext::scope_chain),
             vec!["root"]
         );
     });
+}
+
+// --- Log enrichment tests ---
+
+#[test]
+fn collect_log_fields_returns_set_values() {
+    init_registry();
+    dcontext::force_thread_local(|| {
+        let _g = dcontext::enter_scope();
+        dcontext::set_context("log_rid", "req-123".to_string());
+        dcontext::set_context("log_counter", Counter(42));
+
+        let fields = crate::collect_log_fields();
+        let map: std::collections::HashMap<&str, &str> =
+            fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+        assert_eq!(map.get("rid"), Some(&"req-123"));
+        assert_eq!(map.get("cnt"), Some(&"Counter(42)"));
+    });
+}
+
+#[test]
+fn collect_log_fields_skips_unset_values() {
+    init_registry();
+    dcontext::force_thread_local(|| {
+        let _g = dcontext::enter_scope();
+        let fields = crate::collect_log_fields();
+        let names: Vec<&str> = fields.iter().map(|(k, _)| *k).collect();
+        assert!(!names.contains(&"rid"));
+        assert!(!names.contains(&"cnt"));
+    });
+}
+
+#[test]
+fn tracing_field_display_formatting() {
+    let tf = TracingField::builder("test")
+        .enrich_display::<String>()
+        .build();
+    let val = "hello".to_string();
+    let any_val: &dyn std::any::Any = &val;
+    assert_eq!(tf.format(any_val), Some("hello".to_string()));
+}
+
+#[test]
+fn tracing_field_debug_formatting() {
+    let tf = TracingField::builder("test")
+        .enrich_debug::<Counter>()
+        .build();
+    let val = Counter(7);
+    let any_val: &dyn std::any::Any = &val;
+    assert_eq!(tf.format(any_val), Some("Counter(7)".to_string()));
+}
+
+#[test]
+fn tracing_field_custom_formatting() {
+    let tf = TracingField::builder("cnt")
+        .enrich_custom::<Counter>(|c| format!("count={}", c.0))
+        .build();
+    let val = Counter(99);
+    let any_val: &dyn std::any::Any = &val;
+    assert_eq!(tf.format(any_val), Some("count=99".to_string()));
+}
+
+#[test]
+fn tracing_field_wrong_type_returns_none() {
+    let tf = TracingField::builder("test")
+        .enrich_display::<String>()
+        .build();
+    let val: u64 = 42;
+    let any_val: &dyn std::any::Any = &val;
+    assert_eq!(tf.format(any_val), None);
+}
+
+#[test]
+fn tracing_field_no_enrich_returns_none() {
+    // Extract-only field: format returns None
+    let tf = TracingField::builder("test")
+        .extract_from_str(|s| Some(s.to_string()))
+        .build();
+    let val = "hello".to_string();
+    let any_val: &dyn std::any::Any = &val;
+    assert_eq!(tf.format(any_val), None);
+}
+
+#[test]
+fn with_context_fields_enriches_output() {
+    use tracing_subscriber::fmt;
+
+    init_registry();
+
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let buf_clone = Arc::clone(&buf);
+
+    let writer = move || -> Box<dyn std::io::Write + Send> {
+        Box::new(WriterCapture(Arc::clone(&buf_clone)))
+    };
+
+    let fmt_layer = fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_level(false)
+        .with_target(false)
+        .event_format(crate::WithContextFields::wrap(
+            fmt::format().without_time().with_ansi(false).with_level(false).with_target(false),
+        ));
+
+    let subscriber = tracing_subscriber::registry()
+        .with(DcontextLayer::new())
+        .with(fmt_layer);
+
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    dcontext::force_thread_local(|| {
+        let _scope = dcontext::enter_scope();
+        dcontext::set_context("log_rid", "req-abc".to_string());
+
+        tracing::info!("test event");
+    });
+
+    let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        output.contains("rid=req-abc"),
+        "expected rid=req-abc in output: {}",
+        output
+    );
+    assert!(
+        output.contains("test event"),
+        "expected 'test event' in output: {}",
+        output
+    );
+}
+
+/// Helper writer that captures output into a shared buffer.
+struct WriterCapture(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for WriterCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

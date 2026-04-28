@@ -349,6 +349,44 @@ where
 
 Fallible variants: `try_register_local`, `try_set_context_local`.
 
+#### Extensible Per-Key Metadata
+
+Arbitrary typed metadata can be attached to registrations. Each metadata type
+is stored independently (keyed by `TypeId`), enabling multiple extension crates
+to annotate the same key:
+
+```rust
+/// Register with a closure that configures additional options including metadata.
+pub fn register_with<T>(key: &'static str, f: impl FnOnce(RegistrationOptions) -> RegistrationOptions)
+where
+    T: Clone + Default + Send + Sync + Serialize + DeserializeOwned + 'static;
+
+impl RegistrationOptions {
+    /// Attach typed metadata to this registration. One value per type per key.
+    pub fn with_metadata<M: Send + Sync + 'static>(self, value: M) -> Self;
+}
+
+/// Query metadata for a key. Returns None if the key is not registered
+/// or has no metadata of type M. Uses a callback to avoid holding the
+/// registry lock across user code.
+pub fn with_metadata<M: 'static, R>(
+    key: &str,
+    f: impl FnOnce(&M) -> R,
+) -> Option<R>;
+
+/// Iterate all keys that have metadata of type M.
+pub fn keys_with_metadata<M: 'static, R>(
+    f: impl Fn(&str, &M) -> R,
+) -> Vec<R>;
+
+/// Access the current value of a context key as `&dyn Any`.
+/// Useful for extension crates that need type-erased value access.
+pub fn with_context_value<R>(
+    key: &str,
+    f: impl FnOnce(&dyn std::any::Any) -> R,
+) -> Option<R>;
+```
+
 #### Versioned Registration and Migration
 
 For wire format evolution across rolling upgrades:
@@ -932,22 +970,37 @@ dcontext/                     ← workspace root
 │       ├── typed_keys.rs     ← ContextKey<T> usage
 │       ├── macros.rs         ← register_contexts!, with_scope!
 │       ├── async_scopes.rs   ← scope_async
-│       └── size_limits.rs    ← set_max_context_size
-└── dcontext/                 ← core crate
+│       ├── size_limits.rs    ← set_max_context_size
+│       ├── log_enrichment.rs ← TracingField + WithContextFields usage
+│       └── ...
+├── dcontext/                 ← core crate
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs            ← public API re-exports
+│       ├── registry.rs       ← type registration + extensible metadata
+│       ├── scope.rs          ← ScopeNode, ScopeGarbage, ScopeGuard
+│       ├── storage.rs        ← Cell<Option<ContextStore>>, thread/task-local backends
+│       ├── snapshot.rs       ← ContextSnapshot capture/attach
+│       ├── wire.rs           ← WireContext serialization
+│       ├── error.rs          ← ContextError
+│       ├── config.rs         ← set_max_context_size, size limit enforcement
+│       ├── context_key.rs    ← ContextKey<T> (feature: context-key)
+│       ├── macros.rs         ← register_contexts!, with_scope!
+│       ├── helpers.rs        ← spawn_with_context, async helpers
+│       └── value.rs          ← ContextValue trait + blanket impl
+├── dcontext-tracing/         ← tracing integration crate
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs            ← re-exports
+│       ├── layer.rs          ← DcontextLayer + DcontextLayerBuilder
+│       ├── field_mapping.rs  ← ExtractedFields, field visitor
+│       ├── guard_stack.rs    ← per-span ScopeGuard management
+│       ├── span_info.rs      ← SpanInfo metadata
+│       └── tracing_field.rs  ← TracingField, WithContextFields, collect_log_fields
+└── dcontext-dactor/          ← dactor actor integration crate
     ├── Cargo.toml
     └── src/
-        ├── lib.rs            ← public API re-exports
-        ├── registry.rs       ← type registration logic
-        ├── scope.rs          ← Scope, ContextStack, ScopeGuard
-        ├── storage.rs        ← thread-local + task-local backends, scope_async
-        ├── snapshot.rs       ← ContextSnapshot capture/attach
-        ├── wire.rs           ← WireContext serialization
-        ├── error.rs          ← ContextError
-        ├── config.rs         ← set_max_context_size, size limit enforcement
-        ├── context_key.rs    ← ContextKey<T> (feature: context-key)
-        ├── macros.rs         ← register_contexts!, with_scope!
-        ├── helpers.rs        ← spawn_with_context, async helpers
-        └── value.rs          ← ContextValue trait + blanket impl
+        └── lib.rs            ← inbound/outbound interceptors
 ```
 
 ---
@@ -1390,10 +1443,12 @@ async fn main() -> std::io::Result<()> {
 - **Metrics** — track context snapshot/restore frequency, serialization overhead.
 - **Lazy values** — context entries that are computed on first access.
 - ~~**Pluggable top-level codec**~~ ✅ Implemented as `register_with_codec` — per-key custom serialize/deserialize functions. The top-level wire format envelope remains bincode; inner values can use any format (JSON, MessagePack, etc.).
-- **`tracing` / OpenTelemetry interop (S5):** Define how `dcontext` relates
-  to `tracing::Span` and `opentelemetry::Context`. Possible approaches:
-  - A `tracing` subscriber/layer that reads from `dcontext` and attaches
-    values as span fields.
+- **`tracing` / OpenTelemetry interop (S5):** ~~Define how `dcontext` relates
+  to `tracing::Span` and `opentelemetry::Context`.~~ Partially implemented:
+  - ✅ `dcontext-tracing` crate with `DcontextLayer` — span lifecycle creates/reverts scopes
+  - ✅ Field mapping — span fields automatically populate context values
+  - ✅ Log enrichment — `WithContextFields` formatter injects context into log output
+  - ✅ Extensible per-key metadata system for cross-crate annotations
   - A bridge that imports OTel baggage into `dcontext` on inbound requests
     and exports `dcontext` values as OTel baggage on outbound calls.
   - `dcontext` is not a replacement for `tracing` — it handles arbitrary

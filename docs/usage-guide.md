@@ -26,6 +26,7 @@ async integration, and actor framework support.
 16. [Error Handling](#16-error-handling)
 17. [Integration with dactor](#17-integration-with-dactor)
 18. [Cargo Features](#18-cargo-features)
+19. [Log Enrichment](#19-log-enrichment)
 
 ---
 
@@ -929,4 +930,194 @@ dcontext = { version = "0.4", default-features = false }
 
 ```toml
 dcontext = { version = "0.4", features = ["context-future"] }
+```
+
+---
+
+## 19. Log Enrichment
+
+The `dcontext-tracing` crate provides **log enrichment** — automatic injection
+of context values into every log event. This is powered by the extensible
+**per-key metadata** system in the core `dcontext` crate.
+
+### 19.1 Extensible Metadata
+
+Any typed metadata can be attached to a registration. Metadata is keyed by
+`TypeId`, so different extension crates can each register their own metadata
+type on the same key without conflicts:
+
+```rust
+use dcontext::RegistryBuilder;
+use dcontext_tracing::TracingField;
+
+let mut builder = RegistryBuilder::new();
+
+// Register with TracingField metadata — both extract and enrich
+builder.register_with::<String>("request_id", |opts| {
+    opts.cached().with_metadata(
+        TracingField::builder("rid")
+            .extract_from_str(|s| Some(s.to_string()))
+            .enrich_display::<String>()
+            .build(),
+    )
+});
+
+// Multiple metadata types on the same key (from different crates)
+builder.register_with::<String>("tenant_id", |opts| {
+    opts.cached()
+        .with_metadata(
+            TracingField::builder("tenant")
+                .enrich_display::<String>()
+                .build(),
+        )
+        // hypothetical: another crate's metadata
+        // .with_metadata(PropagationHeader::new("X-Tenant-Id"))
+});
+
+// Keys without TracingField metadata are NOT included in logs
+builder.register::<String>("internal_buffer");
+
+dcontext::initialize(builder);
+```
+
+Each `with_metadata::<M>(value)` call stores under `TypeId::of::<M>()`.
+Different metadata types coexist independently — one value per type per key.
+
+### 19.2 TracingField Builder
+
+`TracingField` is built with a fluent builder that controls two directions:
+
+**Enrich** (context → log output):
+
+| Method | Formats via | Best for |
+|--------|-------------|----------|
+| `.enrich_display::<T>()` | `Display` trait | Strings, IDs, numbers |
+| `.enrich_debug::<T>()` | `Debug` trait | Structs without Display |
+| `.enrich_custom::<T>(f)` | Custom closure | Special formatting |
+
+**Extract** (span field → context):
+
+| Method | Converts from | Best for |
+|--------|--------------|----------|
+| `.extract_from_str(f)` | `&str` | String fields |
+| `.extract_from_u64(f)` | `u64` | Unsigned integers |
+| `.extract_from_i64(f)` | `i64` | Signed integers |
+| `.extract_from_bool(f)` | `bool` | Boolean fields |
+
+```rust
+use dcontext_tracing::TracingField;
+
+// Both directions — extract from spans AND enrich logs
+TracingField::builder("rid")
+    .extract_from_str(|s| Some(s.to_string()))
+    .enrich_display::<String>()
+    .build()
+
+// Enrich only — no extraction
+TracingField::builder("retry")
+    .enrich_debug::<RetryCount>()
+    .build()
+
+// Extract only — no log enrichment
+TracingField::builder("request_id")
+    .extract_from_str(|s| Some(RequestId(s.to_string())))
+    .build()
+
+// Custom formatter
+TracingField::builder("uid")
+    .enrich_custom::<UserId>(|u| format!("user:{}", u.0))
+    .build()
+```
+
+The first argument to `builder()` is the `log_name` — the field name in log
+output. Use `.span_field("other_name")` if the span field name differs from
+the context key.
+
+### 19.3 WithContextFields Formatter
+
+`WithContextFields` wraps any `FormatEvent` implementation to prepend
+context fields to every log line:
+
+```rust
+use tracing_subscriber::prelude::*;
+use dcontext_tracing::{DcontextLayer, WithContextFields};
+
+tracing_subscriber::registry()
+    .with(DcontextLayer::new())
+    .with(tracing_subscriber::fmt::layer()
+        .event_format(WithContextFields::wrap(
+            tracing_subscriber::fmt::format()
+                .without_time()
+                .with_target(false)
+        )))
+    .init();
+```
+
+Log output will look like:
+```
+rid=req-123 tenant=acme  INFO handling request
+rid=req-123 tenant=acme  INFO query complete, rows=42
+```
+
+Only keys that have a `TracingField` with an enrich function **and** a value
+set in the current context appear. Unset keys are silently skipped.
+
+### 19.4 collect_log_fields()
+
+For custom formatters or non-tracing logging, use `collect_log_fields()` to
+get the current context fields as `(name, formatted_value)` pairs:
+
+```rust
+use dcontext_tracing::collect_log_fields;
+
+let fields = collect_log_fields();
+for (name, value) in &fields {
+    print!("{}={} ", name, value);
+}
+```
+
+### 19.5 Querying Metadata
+
+The core `dcontext` crate exposes general-purpose metadata queries that any
+extension crate can use:
+
+```rust
+use dcontext_tracing::TracingField;
+
+// Query a single key's metadata (callback-based for thread safety)
+if let Some(name) = dcontext::with_metadata::<TracingField, _>("request_id", |tf| tf.log_name()) {
+    println!("Log field name: {}", name);
+}
+
+// Iterate all keys with a specific metadata type
+let field_names: Vec<&str> = dcontext::keys_with_metadata::<TracingField, _>(|_key, tf| tf.log_name());
+```
+
+### 19.6 Writing Your Own Metadata
+
+Extension crates define their own metadata struct and use the same registration API:
+
+```rust
+use dcontext_tracing::TracingField;
+
+// In your crate
+pub struct PropagationHeader {
+    pub header_name: &'static str,
+}
+
+// Users register it alongside other metadata
+builder.register_with::<String>("request_id", |opts| {
+    opts.with_metadata(
+            TracingField::builder("rid")
+                .extract_from_str(|s| Some(s.to_string()))
+                .enrich_display::<String>()
+                .build(),
+        )
+        .with_metadata(PropagationHeader { header_name: "X-Request-Id" })
+});
+
+// Your crate queries only its own type
+let headers = dcontext::keys_with_metadata::<PropagationHeader, _>(|key, ph| {
+    (key, ph.header_name)
+});
 ```

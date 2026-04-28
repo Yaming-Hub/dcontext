@@ -1,4 +1,4 @@
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -31,6 +31,9 @@ pub(crate) struct Registration {
     /// per scope entry. Suitable for lightweight values (request IDs, trace IDs).
     /// Default: false (reads walk the parent scope chain, O(depth)).
     pub cached: bool,
+    /// Extensible metadata: any crate can attach typed metadata to a registration.
+    /// Keyed by TypeId of the metadata type.
+    pub metadata: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
 // ── Two-phase storage ──────────────────────────────────────────
@@ -77,6 +80,7 @@ pub struct RegistrationOptions<T: 'static> {
     cached: bool,
     encode: Option<Box<dyn Fn(&T) -> Result<Vec<u8>, String> + Send + Sync>>,
     decode: Option<Box<dyn Fn(&[u8]) -> Result<T, String> + Send + Sync>>,
+    metadata: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
 impl<T: 'static> RegistrationOptions<T> {
@@ -87,6 +91,7 @@ impl<T: 'static> RegistrationOptions<T> {
             cached: false,
             encode: None,
             decode: None,
+            metadata: HashMap::new(),
         }
     }
 
@@ -121,6 +126,24 @@ impl<T: 'static> RegistrationOptions<T> {
     ) -> Self {
         self.encode = Some(Box::new(encode));
         self.decode = Some(Box::new(decode));
+        self
+    }
+
+    /// Attach typed metadata to this registration. Any crate can define its
+    /// own metadata type and attach it here. Only one value per metadata type
+    /// is stored; a second call with the same `M` overwrites the previous value.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use dcontext_tracing::LogField;
+    ///
+    /// builder.register_with::<RequestId>("request_id", |opts| {
+    ///     opts.cached().with_metadata(LogField::display::<RequestId>("rid"))
+    /// });
+    /// ```
+    pub fn with_metadata<M: Any + Send + Sync + 'static>(mut self, value: M) -> Self {
+        self.metadata.insert(TypeId::of::<M>(), Box::new(value));
         self
     }
 }
@@ -211,6 +234,7 @@ where
             local_only: opts.local_only,
             serialize_fn,
             cached: opts.cached,
+            metadata: opts.metadata,
         },
     );
     Ok(())
@@ -243,6 +267,7 @@ where
             local_only: true,
             serialize_fn: None,
             cached: false,
+            metadata: HashMap::new(),
         },
     );
     Ok(())
@@ -590,6 +615,49 @@ pub(crate) fn cached_keys() -> Vec<&'static str> {
     }
     let guard = lock_build();
     guard.as_ref().map_or_else(Vec::new, filter)
+}
+
+// ── Metadata query API ─────────────────────────────────────────
+
+/// Access typed metadata for a registered key via callback.
+///
+/// Returns `None` if the key is not registered or has no metadata of type `M`.
+/// After [`initialize`]: lock-free. Before: acquires Mutex.
+pub fn with_metadata<M: 'static, R>(
+    key: &str,
+    f: impl FnOnce(&M) -> R,
+) -> Option<R> {
+    with_registration(key, |r| {
+        r.metadata
+            .get(&TypeId::of::<M>())
+            .and_then(|boxed| boxed.downcast_ref::<M>())
+            .map(f)
+    })
+    .flatten()
+}
+
+/// Iterate over all registered keys that have metadata of type `M`.
+///
+/// Calls `f(key, metadata)` for each matching key and collects the results.
+/// After [`initialize`]: lock-free. Before: acquires Mutex.
+pub fn keys_with_metadata<M: 'static, R>(
+    f: impl Fn(&'static str, &M) -> R,
+) -> Vec<R> {
+    let collect = |map: &RegistryMap| -> Vec<R> {
+        map.iter()
+            .filter_map(|(&key, reg)| {
+                reg.metadata
+                    .get(&TypeId::of::<M>())
+                    .and_then(|boxed| boxed.downcast_ref::<M>())
+                    .map(|meta| f(key, meta))
+            })
+            .collect()
+    };
+    if let Some(frozen) = FROZEN.get() {
+        return collect(frozen);
+    }
+    let guard = lock_build();
+    guard.as_ref().map_or_else(Vec::new, collect)
 }
 
 #[cfg(test)]

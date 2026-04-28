@@ -43,26 +43,28 @@
 //! // Scope reverted — "request_id" gone, "user" remains
 //! ```
 //!
-//! ### Level 2: Field-to-Context Mapping
+//! ### Level 2: Field-to-Context Extraction
 //!
-//! Map tracing span fields directly to dcontext values:
+//! Extract tracing span fields directly into dcontext values using
+//! [`TracingField`] metadata:
 //!
 //! ```rust,no_run
-//! use dcontext_tracing::{DcontextLayer, FromFieldValue};
-//! use tracing_subscriber::Registry;
+//! use dcontext_tracing::{DcontextLayer, TracingField};
 //!
 //! #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 //! struct RequestId(String);
 //!
-//! impl FromFieldValue for RequestId {
-//!     fn from_str_value(s: &str) -> Option<Self> {
-//!         Some(RequestId(s.to_string()))
-//!     }
-//! }
+//! let mut builder = dcontext::RegistryBuilder::new();
+//! builder.register_with::<RequestId>("request_id", |opts| {
+//!     opts.with_metadata(
+//!         TracingField::builder("request_id")
+//!             .extract_from_str(|s| Some(RequestId(s.to_string())))
+//!             .build(),
+//!     )
+//! });
 //!
-//! let layer: DcontextLayer<Registry> = DcontextLayer::builder()
-//!     .map_field::<RequestId>("request_id")
-//!     .build();
+//! // Then use DcontextLayer — it discovers TracingField metadata automatically
+//! // let layer = DcontextLayer::new();
 //! ```
 //!
 //! ### Level 3: Span Info
@@ -107,10 +109,11 @@ mod field_mapping;
 mod guard_stack;
 mod layer;
 mod span_info;
+mod tracing_field;
 
 #[cfg(test)]
 mod tests;
 
-pub use field_mapping::FromFieldValue;
 pub use layer::{DcontextLayer, DcontextLayerBuilder};
+pub use tracing_field::{TracingField, TracingFieldBuilder, WithContextFields, collect_log_fields};
 pub use span_info::{SpanInfo, SPAN_INFO_KEY};
