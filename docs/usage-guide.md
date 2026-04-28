@@ -948,25 +948,33 @@ type on the same key without conflicts:
 
 ```rust
 use dcontext::RegistryBuilder;
-use dcontext_tracing::LogField;
+use dcontext_tracing::TracingField;
 
 let mut builder = RegistryBuilder::new();
 
-// Register with LogField metadata — this key will appear in logs
+// Register with TracingField metadata — both extract and enrich
 builder.register_with::<String>("request_id", |opts| {
-    opts.cached()
-        .with_metadata(LogField::display::<String>("rid"))
+    opts.cached().with_metadata(
+        TracingField::builder("rid")
+            .extract_from_str(|s| Some(s.to_string()))
+            .enrich_display::<String>()
+            .build(),
+    )
 });
 
 // Multiple metadata types on the same key (from different crates)
 builder.register_with::<String>("tenant_id", |opts| {
     opts.cached()
-        .with_metadata(LogField::display::<String>("tenant"))
+        .with_metadata(
+            TracingField::builder("tenant")
+                .enrich_display::<String>()
+                .build(),
+        )
         // hypothetical: another crate's metadata
         // .with_metadata(PropagationHeader::new("X-Tenant-Id"))
 });
 
-// Keys without LogField metadata are NOT included in logs
+// Keys without TracingField metadata are NOT included in logs
 builder.register::<String>("internal_buffer");
 
 dcontext::initialize(builder);
@@ -975,31 +983,55 @@ dcontext::initialize(builder);
 Each `with_metadata::<M>(value)` call stores under `TypeId::of::<M>()`.
 Different metadata types coexist independently — one value per type per key.
 
-### 19.2 LogField Formatters
+### 19.2 TracingField Builder
 
-`LogField` captures a type-safe formatter at registration time:
+`TracingField` is built with a fluent builder that controls two directions:
 
-| Constructor | Formats via | Best for |
-|-------------|-------------|----------|
-| `LogField::display::<T>(name)` | `Display` trait | Strings, IDs, numbers |
-| `LogField::debug::<T>(name)` | `Debug` trait | Structs without Display |
-| `LogField::custom::<T>(name, f)` | Custom closure | Special formatting |
+**Enrich** (context → log output):
+
+| Method | Formats via | Best for |
+|--------|-------------|----------|
+| `.enrich_display::<T>()` | `Display` trait | Strings, IDs, numbers |
+| `.enrich_debug::<T>()` | `Debug` trait | Structs without Display |
+| `.enrich_custom::<T>(f)` | Custom closure | Special formatting |
+
+**Extract** (span field → context):
+
+| Method | Converts from | Best for |
+|--------|--------------|----------|
+| `.extract_from_str(f)` | `&str` | String fields |
+| `.extract_from_u64(f)` | `u64` | Unsigned integers |
+| `.extract_from_i64(f)` | `i64` | Signed integers |
+| `.extract_from_bool(f)` | `bool` | Boolean fields |
 
 ```rust
-use dcontext_tracing::LogField;
+use dcontext_tracing::TracingField;
 
-// Display formatter — uses ToString
-LogField::display::<String>("rid")
+// Both directions — extract from spans AND enrich logs
+TracingField::builder("rid")
+    .extract_from_str(|s| Some(s.to_string()))
+    .enrich_display::<String>()
+    .build()
 
-// Debug formatter — uses {:?}
-LogField::debug::<TraceContext>("trace")
+// Enrich only — no extraction
+TracingField::builder("retry")
+    .enrich_debug::<RetryCount>()
+    .build()
 
-// Custom formatter — any Fn(&T) -> String
-LogField::custom::<UserId>("uid", |u| format!("user:{}", u.0))
+// Extract only — no log enrichment
+TracingField::builder("request_id")
+    .extract_from_str(|s| Some(RequestId(s.to_string())))
+    .build()
+
+// Custom formatter
+TracingField::builder("uid")
+    .enrich_custom::<UserId>(|u| format!("user:{}", u.0))
+    .build()
 ```
 
-The `name` parameter is the field name in log output (can differ from the
-context key name).
+The first argument to `builder()` is the `log_name` — the field name in log
+output. Use `.span_field("other_name")` if the span field name differs from
+the context key.
 
 ### 19.3 WithContextFields Formatter
 
@@ -1027,8 +1059,8 @@ rid=req-123 tenant=acme  INFO handling request
 rid=req-123 tenant=acme  INFO query complete, rows=42
 ```
 
-Only keys that have a `LogField` metadata **and** a value set in the current
-context appear. Unset keys are silently skipped.
+Only keys that have a `TracingField` with an enrich function **and** a value
+set in the current context appear. Unset keys are silently skipped.
 
 ### 19.4 collect_log_fields()
 
@@ -1050,13 +1082,15 @@ The core `dcontext` crate exposes general-purpose metadata queries that any
 extension crate can use:
 
 ```rust
+use dcontext_tracing::TracingField;
+
 // Query a single key's metadata (callback-based for thread safety)
-if let Some(name) = dcontext::with_metadata::<LogField, _>("request_id", |lf| lf.name()) {
+if let Some(name) = dcontext::with_metadata::<TracingField, _>("request_id", |tf| tf.log_name()) {
     println!("Log field name: {}", name);
 }
 
 // Iterate all keys with a specific metadata type
-let field_names: Vec<&str> = dcontext::keys_with_metadata::<LogField, _>(|_key, lf| lf.name());
+let field_names: Vec<&str> = dcontext::keys_with_metadata::<TracingField, _>(|_key, tf| tf.log_name());
 ```
 
 ### 19.6 Writing Your Own Metadata
@@ -1064,6 +1098,8 @@ let field_names: Vec<&str> = dcontext::keys_with_metadata::<LogField, _>(|_key, 
 Extension crates define their own metadata struct and use the same registration API:
 
 ```rust
+use dcontext_tracing::TracingField;
+
 // In your crate
 pub struct PropagationHeader {
     pub header_name: &'static str,
@@ -1071,7 +1107,12 @@ pub struct PropagationHeader {
 
 // Users register it alongside other metadata
 builder.register_with::<String>("request_id", |opts| {
-    opts.with_metadata(LogField::display::<String>("rid"))
+    opts.with_metadata(
+            TracingField::builder("rid")
+                .extract_from_str(|s| Some(s.to_string()))
+                .enrich_display::<String>()
+                .build(),
+        )
         .with_metadata(PropagationHeader { header_name: "X-Request-Id" })
 });
 

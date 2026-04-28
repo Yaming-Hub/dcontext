@@ -2,12 +2,12 @@
 //!
 //! This sample demonstrates all three levels of dcontext-tracing integration:
 //! 1. Auto-scoping — every span creates a dcontext scope
-//! 2. Field mapping — span fields automatically become context values
+//! 2. Field extraction — span fields automatically become context values (via TracingField metadata)
 //! 3. Span info — span metadata available as context
 //!
 //! Run with: `cargo run --bin tracing_scopes`
 
-use dcontext_tracing::{DcontextLayer, FromFieldValue, SpanInfo, SPAN_INFO_KEY};
+use dcontext_tracing::{DcontextLayer, SpanInfo, TracingField, SPAN_INFO_KEY};
 use tracing::Instrument;
 use tracing_subscriber::prelude::*;
 
@@ -16,36 +16,34 @@ use tracing_subscriber::prelude::*;
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 struct RequestId(String);
 
-impl FromFieldValue for RequestId {
-    fn from_str_value(s: &str) -> Option<Self> {
-        Some(RequestId(s.to_string()))
-    }
-}
-
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 struct UserId(String);
-
-impl FromFieldValue for UserId {
-    fn from_str_value(s: &str) -> Option<Self> {
-        Some(UserId(s.to_string()))
-    }
-}
 
 // ── Setup ──────────────────────────────────────────────────────
 
 fn init() -> tracing::subscriber::DefaultGuard {
-    // 1. Register context types with dcontext
+    // 1. Register context types with TracingField metadata for extraction
     let mut builder = dcontext::RegistryBuilder::new();
     builder.register::<String>("status");
-    builder.register::<RequestId>("request_id");
-    builder.register::<UserId>("user_id");
+    builder.register_with::<RequestId>("request_id", |opts| {
+        opts.with_metadata(
+            TracingField::builder("request_id")
+                .extract_from_str(|s| Some(RequestId(s.to_string())))
+                .build(),
+        )
+    });
+    builder.register_with::<UserId>("user_id", |opts| {
+        opts.with_metadata(
+            TracingField::builder("user_id")
+                .extract_from_str(|s| Some(UserId(s.to_string())))
+                .build(),
+        )
+    });
     builder.register::<SpanInfo>(SPAN_INFO_KEY);
     dcontext::initialize(builder);
 
-    // 2. Configure the tracing layer with field mappings and span info
+    // 2. Configure the tracing layer with span info
     let layer = DcontextLayer::builder()
-        .map_field::<RequestId>("request_id")
-        .map_field::<UserId>("user_id")
         .include_span_info()
         .build();
 

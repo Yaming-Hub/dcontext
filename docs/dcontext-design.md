@@ -971,7 +971,7 @@ dcontext/                     ← workspace root
 │       ├── macros.rs         ← register_contexts!, with_scope!
 │       ├── async_scopes.rs   ← scope_async
 │       ├── size_limits.rs    ← set_max_context_size
-│       ├── log_enrichment.rs ← LogField + WithContextFields usage
+│       ├── log_enrichment.rs ← TracingField + WithContextFields usage
 │       └── ...
 ├── dcontext/                 ← core crate
 │   ├── Cargo.toml
@@ -993,10 +993,10 @@ dcontext/                     ← workspace root
 │   └── src/
 │       ├── lib.rs            ← re-exports
 │       ├── layer.rs          ← DcontextLayer + DcontextLayerBuilder
-│       ├── field_mapping.rs  ← FromFieldValue trait, field visitor
+│       ├── field_mapping.rs  ← ExtractedFields, field visitor
 │       ├── guard_stack.rs    ← per-span ScopeGuard management
 │       ├── span_info.rs      ← SpanInfo metadata
-│       └── log_enrichment.rs ← LogField, WithContextFields, collect_log_fields
+│       └── tracing_field.rs  ← TracingField, WithContextFields, collect_log_fields
 └── dcontext-dactor/          ← dactor actor integration crate
     ├── Cargo.toml
     └── src/
