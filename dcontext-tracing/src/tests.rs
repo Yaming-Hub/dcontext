@@ -1,8 +1,8 @@
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 use tracing_subscriber::prelude::*;
 
-use crate::{DcontextLayer, FromFieldValue, SpanInfo, SPAN_INFO_KEY};
+use crate::{DcontextLayer, FromFieldValue, LogField, SpanInfo, SPAN_INFO_KEY};
 
 static INIT: Once = Once::new();
 
@@ -18,6 +18,13 @@ fn init_registry() {
         builder.register::<Counter>("count");
         builder.register::<Flag>("enabled");
         builder.register::<SpanInfo>(SPAN_INFO_KEY);
+        // Log enrichment: register keys with LogField metadata
+        builder.register_with::<String>("log_rid", |opts| {
+            opts.with_metadata(LogField::display::<String>("rid"))
+        });
+        builder.register_with::<Counter>("log_counter", |opts| {
+            opts.with_metadata(LogField::debug::<Counter>("cnt"))
+        });
         let _ = dcontext::try_initialize(builder);
     });
 }
@@ -482,4 +489,131 @@ fn scope_chain_reverts_on_exit() {
             vec!["root"]
         );
     });
+}
+
+// --- Log enrichment tests ---
+
+#[test]
+fn collect_log_fields_returns_set_values() {
+    init_registry();
+    dcontext::force_thread_local(|| {
+        let _g = dcontext::enter_scope();
+        dcontext::set_context("log_rid", "req-123".to_string());
+        dcontext::set_context("log_counter", Counter(42));
+
+        let fields = crate::collect_log_fields();
+        let map: std::collections::HashMap<&str, &str> =
+            fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+        assert_eq!(map.get("rid"), Some(&"req-123"));
+        assert_eq!(map.get("cnt"), Some(&"Counter(42)"));
+    });
+}
+
+#[test]
+fn collect_log_fields_skips_unset_values() {
+    init_registry();
+    dcontext::force_thread_local(|| {
+        let _g = dcontext::enter_scope();
+        // Don't set log_rid or log_counter
+        let fields = crate::collect_log_fields();
+        // No fields should be present (values not set)
+        let names: Vec<&str> = fields.iter().map(|(k, _)| *k).collect();
+        assert!(!names.contains(&"rid"));
+        assert!(!names.contains(&"cnt"));
+    });
+}
+
+#[test]
+fn log_field_display_formatting() {
+    let field = LogField::display::<String>("test");
+    let val = "hello".to_string();
+    let any_val: &dyn std::any::Any = &val;
+    assert_eq!(field.format(any_val), Some("hello".to_string()));
+}
+
+#[test]
+fn log_field_debug_formatting() {
+    let field = LogField::debug::<Counter>("test");
+    let val = Counter(7);
+    let any_val: &dyn std::any::Any = &val;
+    assert_eq!(field.format(any_val), Some("Counter(7)".to_string()));
+}
+
+#[test]
+fn log_field_custom_formatting() {
+    let field = LogField::custom::<Counter>("cnt", |c| format!("count={}", c.0));
+    let val = Counter(99);
+    let any_val: &dyn std::any::Any = &val;
+    assert_eq!(field.format(any_val), Some("count=99".to_string()));
+}
+
+#[test]
+fn log_field_wrong_type_returns_none() {
+    let field = LogField::display::<String>("test");
+    let val: u64 = 42;
+    let any_val: &dyn std::any::Any = &val;
+    assert_eq!(field.format(any_val), None);
+}
+
+#[test]
+fn with_context_fields_enriches_output() {
+    use tracing_subscriber::fmt;
+
+    init_registry();
+
+    // Capture output
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let buf_clone = Arc::clone(&buf);
+
+    let writer = move || -> Box<dyn std::io::Write + Send> {
+        Box::new(WriterCapture(Arc::clone(&buf_clone)))
+    };
+
+    let fmt_layer = fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_level(false)
+        .with_target(false)
+        .event_format(crate::WithContextFields::wrap(
+            fmt::format().without_time().with_ansi(false).with_level(false).with_target(false),
+        ));
+
+    let subscriber = tracing_subscriber::registry()
+        .with(DcontextLayer::new())
+        .with(fmt_layer);
+
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    dcontext::force_thread_local(|| {
+        let _scope = dcontext::enter_scope();
+        dcontext::set_context("log_rid", "req-abc".to_string());
+
+        tracing::info!("test event");
+    });
+
+    let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        output.contains("rid=req-abc"),
+        "expected rid=req-abc in output: {}",
+        output
+    );
+    assert!(
+        output.contains("test event"),
+        "expected 'test event' in output: {}",
+        output
+    );
+}
+
+/// Helper writer that captures output into a shared buffer.
+struct WriterCapture(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for WriterCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

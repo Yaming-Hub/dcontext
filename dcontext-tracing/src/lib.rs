@@ -106,6 +106,7 @@
 mod field_mapping;
 mod guard_stack;
 mod layer;
+mod log_enrichment;
 mod span_info;
 
 #[cfg(test)]
@@ -113,4 +114,5 @@ mod tests;
 
 pub use field_mapping::FromFieldValue;
 pub use layer::{DcontextLayer, DcontextLayerBuilder};
+pub use log_enrichment::{LogField, WithContextFields, collect_log_fields};
 pub use span_info::{SpanInfo, SPAN_INFO_KEY};

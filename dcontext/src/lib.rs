@@ -62,7 +62,8 @@ pub use context_key::ContextKey;
 // ── Registration ───────────────────────────────────────────────
 
 pub use registry::{RegistryBuilder, RegistrationOptions,
-                   initialize, try_initialize};
+                   initialize, try_initialize,
+                   with_metadata, keys_with_metadata};
 
 // Re-export free-standing registration functions for internal tests only.
 #[cfg(test)]
@@ -235,6 +236,23 @@ where
 
     storage::set_value(key, std::sync::Arc::new(crate::value::LocalValue(value)));
     Ok(())
+}
+
+// ── Type-erased value access (for extension crates) ────────────
+
+/// Access the current context value for a key as `&dyn Any` via callback.
+///
+/// This is the low-level hook for extension crates (like dcontext-tracing)
+/// that need type-erased access to context values — e.g., for formatting
+/// values into log output without knowing the concrete type at the call site.
+///
+/// Returns `None` if the key has no value set or the store is busy.
+/// Never panics.
+pub fn with_context_value<R>(
+    key: &str,
+    f: impl FnOnce(&dyn std::any::Any) -> R,
+) -> Option<R> {
+    storage::get_value(key).map(|arc_val| f(arc_val.as_any()))
 }
 
 // ── Update API (read-modify-write) ─────────────────────────────
