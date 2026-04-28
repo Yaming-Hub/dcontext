@@ -188,6 +188,35 @@ fn demo_metadata_queries() {
     }
 }
 
+fn demo_span_recording() {
+    println!("\n=== Auto-Record into Span Fields ===\n");
+
+    let _scope = dcontext::enter_scope();
+    dcontext::set_context("request_id", RequestId("req-auto-record".into()));
+    dcontext::set_context("tenant_id", TenantId("acme-auto".into()));
+
+    // Span declares fields as Empty — DcontextLayer auto-fills them on enter.
+    // This makes the values visible to ALL subscribers (OTel, fmt, custom layers).
+    {
+        let _span = tracing::info_span!(
+            "process_order",
+            rid = tracing::field::Empty,
+            tenant = tracing::field::Empty,
+        )
+        .entered();
+
+        // The span now has rid=req-auto-record and tenant=acme-auto recorded.
+        // These appear in the span's fields in log output:
+        tracing::info!("order processed with auto-recorded fields");
+    }
+
+    // Spans without the field are silently skipped — no error:
+    {
+        let _span = tracing::info_span!("simple_op").entered();
+        tracing::info!("no fields to record, no problem");
+    }
+}
+
 // ── Main ───────────────────────────────────────────────────────
 
 fn main() {
@@ -199,6 +228,7 @@ fn main() {
     demo_basic_enrichment();
     demo_nested_scopes();
     demo_span_extraction();
+    demo_span_recording();
     demo_collect_log_fields();
     demo_metadata_queries();
 

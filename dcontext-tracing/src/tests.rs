@@ -573,3 +573,144 @@ impl std::io::Write for WriterCapture {
         Ok(())
     }
 }
+
+// --- Span recording tests ---
+
+#[test]
+fn span_record_auto_fills_empty_fields() {
+    // enrich_display (shorthand) enables span recording.
+    // When a span has a pre-declared Empty field matching the record_field name,
+    // on_enter should auto-record the context value.
+    init_registry();
+
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let buf_clone = Arc::clone(&buf);
+    let writer = move || -> Box<dyn std::io::Write + Send> {
+        Box::new(WriterCapture(Arc::clone(&buf_clone)))
+    };
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .without_time()
+        .with_target(false);
+
+    let subscriber = tracing_subscriber::registry()
+        .with(DcontextLayer::new())
+        .with(fmt_layer);
+
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    dcontext::force_thread_local(|| {
+        let _scope = dcontext::enter_scope();
+        dcontext::set_context("request_id", "req-auto-recorded".to_string());
+
+        // Span declares request_id as Empty — DcontextLayer should record it
+        let _span = tracing::info_span!("handler", request_id = tracing::field::Empty).entered();
+        tracing::info!("inside span");
+    });
+
+    let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    // The span's request_id field should be recorded and visible in output
+    assert!(
+        output.contains("request_id") && output.contains("req-auto-recorded"),
+        "expected request_id=req-auto-recorded in output: {}",
+        output
+    );
+}
+
+#[test]
+fn span_record_skips_undeclared_fields() {
+    // If the span doesn't declare the field, recording is silently skipped (no panic).
+    init_registry();
+
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let buf_clone = Arc::clone(&buf);
+    let writer = move || -> Box<dyn std::io::Write + Send> {
+        Box::new(WriterCapture(Arc::clone(&buf_clone)))
+    };
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .without_time()
+        .with_target(false);
+
+    let subscriber = tracing_subscriber::registry()
+        .with(DcontextLayer::new())
+        .with(fmt_layer);
+
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    dcontext::force_thread_local(|| {
+        let _scope = dcontext::enter_scope();
+        dcontext::set_context("request_id", "req-skip".to_string());
+
+        // Span does NOT declare request_id — should not panic
+        let _span = tracing::info_span!("simple_op").entered();
+        tracing::info!("no crash");
+    });
+
+    let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("no crash"));
+    // The span field should NOT appear since it wasn't declared
+    assert!(
+        !output.contains("req-skip"),
+        "should not contain req-skip when field is undeclared: {}",
+        output
+    );
+}
+
+#[test]
+fn enrich_display_shorthand_enables_both_log_and_span() {
+    // enrich_display enables both log enrichment and span recording
+    let tf = TracingField::builder("test")
+        .enrich_display::<String>()
+        .build();
+    assert!(tf.has_log_enrich());
+    assert!(tf.has_span_record());
+    assert!(tf.has_enrich());
+}
+
+#[test]
+fn enrich_log_only_does_not_enable_span() {
+    let tf = TracingField::builder("test")
+        .enrich_log_display::<String>()
+        .build();
+    assert!(tf.has_log_enrich());
+    assert!(!tf.has_span_record());
+    assert!(tf.has_enrich()); // "either" semantics
+}
+
+#[test]
+fn enrich_span_only_does_not_enable_log() {
+    let tf = TracingField::builder("test")
+        .enrich_span_display::<String>()
+        .build();
+    assert!(!tf.has_log_enrich());
+    assert!(tf.has_span_record());
+    assert!(tf.has_enrich()); // "either" semantics
+    // format() (log-only) returns None
+    let val = "hello".to_string();
+    assert_eq!(tf.format(&val as &dyn std::any::Any), None);
+    // format_for_span() returns the value
+    assert_eq!(tf.format_for_span(&val as &dyn std::any::Any), Some("hello".to_string()));
+}
+
+#[test]
+fn record_as_overrides_field_name() {
+    let tf = TracingField::builder("log_name")
+        .record_as("span_field_name")
+        .enrich_span_display::<String>()
+        .build();
+    assert_eq!(tf.log_name(), "log_name");
+    assert_eq!(tf.record_field(), "span_field_name");
+}
+
+#[test]
+fn record_field_defaults_to_log_name() {
+    let tf = TracingField::builder("my_field")
+        .enrich_span_display::<String>()
+        .build();
+    assert_eq!(tf.record_field(), "my_field");
+}

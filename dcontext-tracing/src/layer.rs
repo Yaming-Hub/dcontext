@@ -230,6 +230,32 @@ where
                 }
             }
 
+            // Level 4: Record context values into span fields.
+            // Collect values first, then record into the current span.
+            // Inside on_enter, Span::current() returns the span being entered.
+            // span.record() silently skips fields not declared on the span.
+            if metadata_fields.iter().any(|e| e.span_fmt_fn.is_some()) {
+                let to_record: Vec<(&'static str, String)> = metadata_fields
+                    .iter()
+                    .filter_map(|entry| {
+                        let fmt_fn = entry.span_fmt_fn.as_ref()?;
+                        let formatted = dcontext::with_context_value(
+                            entry.context_key,
+                            |any_val| fmt_fn(any_val),
+                        )
+                        .flatten()?;
+                        Some((entry.record_field, formatted))
+                    })
+                    .collect();
+
+                if !to_record.is_empty() {
+                    let current = tracing::Span::current();
+                    for (field_name, value) in &to_record {
+                        current.record(*field_name, value.as_str());
+                    }
+                }
+            }
+
             guard_stack::push_guard(id, guard);
         });
     }

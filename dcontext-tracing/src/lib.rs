@@ -54,16 +54,26 @@
 //! #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 //! struct RequestId(String);
 //!
+//! impl std::fmt::Display for RequestId {
+//!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//!         write!(f, "{}", self.0)
+//!     }
+//! }
+//!
 //! let mut builder = dcontext::RegistryBuilder::new();
 //! builder.register_with::<RequestId>("request_id", |opts| {
 //!     opts.with_metadata(
 //!         TracingField::builder("request_id")
 //!             .extract_from_str(|s| Some(RequestId(s.to_string())))
+//!             .enrich_display::<RequestId>()  // enables both log + span enrichment
 //!             .build(),
 //!     )
 //! });
 //!
-//! // Then use DcontextLayer — it discovers TracingField metadata automatically
+//! // DcontextLayer discovers TracingField metadata automatically.
+//! // On span enter:
+//! //   - Extracts span fields into context (extract direction)
+//! //   - Records context values into pre-declared Empty span fields (span record direction)
 //! // let layer = DcontextLayer::new();
 //! ```
 //!
