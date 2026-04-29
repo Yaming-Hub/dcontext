@@ -240,7 +240,7 @@ the `DcontextLayer`.
 
 - [dcontext](https://crates.io/crates/dcontext) — Core context propagation library
 - [dcontext-dactor](https://crates.io/crates/dcontext-dactor) — dactor actor framework integration
-- [Usage Guide](https://github.com/Yaming-Hub/dcontext/blob/main/docs/usage-guide.md)
+- [Usage Guide](https://github.com/ditas-team/dcontext/blob/main/docs/usage-guide.md)
 
 ## License
 
