@@ -25,3 +25,8 @@ context-future = []
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 serde_json = "1"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "context_propagation"
+harness = false
