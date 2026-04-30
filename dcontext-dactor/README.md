@@ -159,7 +159,7 @@ chain accumulates as requests traverse multiple services and actors.
 
 - [dcontext](https://crates.io/crates/dcontext) — Core context propagation library
 - [dcontext-tracing](https://crates.io/crates/dcontext-tracing) — Tracing span integration
-- [Usage Guide](https://github.com/ditas-team/dcontext/blob/main/docs/usage-guide.md)
+- [Usage Guide](https://github.com/microsoft/dcontext/blob/main/docs/usage-guide.md)
 
 ## License
 

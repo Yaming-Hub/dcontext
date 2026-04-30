@@ -843,7 +843,7 @@ All errors are represented by `dcontext::ContextError`:
 ## 17. Integration with dactor
 
 The `dcontext-dactor` crate provides automatic context propagation through
-[dactor](https://github.com/ditas-team/dactor) actor messages.
+[dactor](https://github.com/microsoft/dactor) actor messages.
 
 ### Setup
 
