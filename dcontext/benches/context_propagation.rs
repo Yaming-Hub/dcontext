@@ -310,6 +310,161 @@ fn bench_deep_scope(c: &mut Criterion) {
     group.finish();
 }
 
+// ── High-contention stress tests ───────────────────────────────
+
+fn bench_high_contention(c: &mut Criterion) {
+    ensure_registered();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(8)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let mut group = c.benchmark_group("high_contention");
+    group.sample_size(10); // heavy benchmarks
+
+    for num_tasks in [200, 500, 1000] {
+        group.bench_with_input(
+            BenchmarkId::new("snapshot", num_tasks),
+            &num_tasks,
+            |b, &n| {
+                b.to_async(&rt).iter(|| async {
+                    let snap = force_thread_local(|| {
+                        let _scope = enter_scope();
+                        populate_context(10);
+                        snapshot()
+                    });
+
+                    let mut handles = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let s = snap.clone();
+                        handles.push(tokio::spawn(with_context(s, async {
+                            // Simulate realistic work: read + write + scope
+                            let _v: BenchValue = get_context(KEYS[0]);
+                            let _v: BenchValue = get_context(KEYS[4]);
+                            let _v: BenchValue = get_context(KEYS[9]);
+                            // Small CPU work to keep task alive
+                            tokio::task::yield_now().await;
+                            let _v: BenchValue = get_context(KEYS[2]);
+                        })));
+                    }
+                    for h in handles {
+                        let _ = h.await;
+                    }
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("fork", num_tasks),
+            &num_tasks,
+            |b, &n| {
+                b.to_async(&rt).iter(|| async {
+                    let handle = force_thread_local(|| {
+                        let _scope = enter_scope();
+                        populate_context(10);
+                        fork()
+                    });
+
+                    let mut handles = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let h = handle.clone();
+                        handles.push(tokio::spawn(with_fork(h, async {
+                            let _v: BenchValue = get_context(KEYS[0]);
+                            let _v: BenchValue = get_context(KEYS[4]);
+                            let _v: BenchValue = get_context(KEYS[9]);
+                            tokio::task::yield_now().await;
+                            let _v: BenchValue = get_context(KEYS[2]);
+                        })));
+                    }
+                    for h in handles {
+                        let _ = h.await;
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ── Multi-threaded concurrent fork + write (COW pressure) ──────
+
+fn bench_cow_write_pressure(c: &mut Criterion) {
+    ensure_registered();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(8)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let mut group = c.benchmark_group("cow_write_pressure");
+    group.sample_size(10);
+
+    // Test where child tasks also WRITE (triggers COW in fork, extra alloc in snapshot)
+    for num_tasks in [100, 500] {
+        group.bench_with_input(
+            BenchmarkId::new("snapshot_read_write", num_tasks),
+            &num_tasks,
+            |b, &n| {
+                b.to_async(&rt).iter(|| async {
+                    let snap = force_thread_local(|| {
+                        let _scope = enter_scope();
+                        populate_context(10);
+                        snapshot()
+                    });
+
+                    let mut handles = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let s = snap.clone();
+                        handles.push(tokio::spawn(with_context(s, async move {
+                            let _v: BenchValue = get_context(KEYS[0]);
+                            // Write in child — simulates updating a counter/state
+                            set_context(KEYS[5], BenchValue(format!("child-{}", i)));
+                            let _v: BenchValue = get_context(KEYS[5]);
+                        })));
+                    }
+                    for h in handles {
+                        let _ = h.await;
+                    }
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("fork_read_write", num_tasks),
+            &num_tasks,
+            |b, &n| {
+                b.to_async(&rt).iter(|| async {
+                    let handle = force_thread_local(|| {
+                        let _scope = enter_scope();
+                        populate_context(10);
+                        fork()
+                    });
+
+                    let mut handles = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let h = handle.clone();
+                        handles.push(tokio::spawn(with_fork(h, async move {
+                            let _v: BenchValue = get_context(KEYS[0]);
+                            // COW write in forked child
+                            set_context(KEYS[5], BenchValue(format!("child-{}", i)));
+                            let _v: BenchValue = get_context(KEYS[5]);
+                        })));
+                    }
+                    for h in handles {
+                        let _ = h.await;
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // ── Entry point ────────────────────────────────────────────────
 
 criterion_group!(
@@ -319,5 +474,7 @@ criterion_group!(
     bench_concurrent_spawn,
     bench_read_throughput,
     bench_deep_scope,
+    bench_high_contention,
+    bench_cow_write_pressure,
 );
 criterion_main!(benches);
