@@ -1,6 +1,6 @@
 //! # dcontext-dactor
 //!
-//! Automatic dcontext propagation through [dactor](https://github.com/ditas-team/dactor)
+//! Automatic dcontext propagation through [dactor](https://github.com/microsoft/dactor)
 //! actor messages.
 //!
 //! This crate bridges [`dcontext`] (distributed context propagation) with

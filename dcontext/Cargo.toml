@@ -5,7 +5,7 @@ edition = "2021"
 description = "Distributed context propagation for Rust — scoped, type-safe, serializable"
 license = "MIT"
 readme = "../README.md"
-repository = "https://github.com/ditas-team/dcontext"
+repository = "https://github.com/microsoft/dcontext"
 keywords = ["context", "distributed", "propagation", "tracing", "scope"]
 categories = ["concurrency", "network-programming"]
 
