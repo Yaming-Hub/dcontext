@@ -341,6 +341,14 @@ pub fn scope<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+// ── Fork support ───────────────────────────────────────────────
+
+/// Create a ForkHandle from the current context state.
+/// Returns None if the store is busy.
+pub(crate) fn do_fork() -> Option<crate::fork::ForkHandle> {
+    with_store(|store| crate::fork::create_fork_handle(store))
+}
+
 /// RAII guard that pops a scope during unwind if the async future panics.
 /// On the normal path the caller calls `std::mem::forget(cleanup)` to disarm it.
 struct ScopeCleanup(usize);
