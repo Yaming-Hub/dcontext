@@ -46,6 +46,7 @@ mod helpers;
 #[cfg(feature = "context-key")]
 mod context_key;
 mod config;
+mod fork;
 #[cfg(feature = "context-future")]
 mod context_future;
 #[macro_use]
@@ -80,6 +81,10 @@ pub use storage::{scope_async, named_scope_async};
 // ── Snapshot / Clone ───────────────────────────────────────────
 
 pub use snapshot::{snapshot, attach, wrap_with_context, wrap_with_context_fn};
+
+// ── Fork (lightweight local spawn) ────────────────────────────
+
+pub use fork::{ForkHandle, fork, with_fork, spawn_with_fork_async};
 
 // ── Thread helpers ─────────────────────────────────────────────
 

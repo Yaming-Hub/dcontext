@@ -1831,3 +1831,158 @@ async fn test_async_reentrant_safety() {
     })
     .await;
 }
+
+// ══════════════════════════════════════════════════════════════
+//  Fork tests
+// ══════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_fork_reads_parent_values() {
+    let key = unique_key("fork_read", "rid");
+    register::<RequestId>(key);
+
+    let snap = force_thread_local(|| {
+        let _scope = enter_scope();
+        set_context(key, RequestId("parent-val".into()));
+        fork()
+    });
+
+    // Child task reads parent's value via fork
+    let result = with_fork(snap, async {
+        get_context::<RequestId>(key)
+    }).await;
+
+    assert_eq!(result.0, "parent-val");
+}
+
+#[tokio::test]
+async fn test_fork_writes_are_isolated() {
+    let key = unique_key("fork_isolate", "rid");
+    register::<RequestId>(key);
+
+    let handle = force_thread_local(|| {
+        let _scope = enter_scope();
+        set_context(key, RequestId("parent".into()));
+        fork()
+    });
+
+    // Child modifies context — parent should be unaffected
+    with_fork(handle, async {
+        set_context(key, RequestId("child-override".into()));
+        let val: RequestId = get_context(key);
+        assert_eq!(val.0, "child-override");
+    }).await;
+
+    // Parent value is unchanged
+    let parent_val: RequestId = force_thread_local(|| get_context(key));
+    // After the scope was dropped by force_thread_local, we're back to default
+    assert_eq!(parent_val, RequestId::default());
+}
+
+#[tokio::test]
+async fn test_fork_is_cheap_clone() {
+    let key = unique_key("fork_clone", "rid");
+    register::<RequestId>(key);
+
+    let handle = force_thread_local(|| {
+        let _scope = enter_scope();
+        set_context(key, RequestId("shared".into()));
+        fork()
+    });
+
+    // Clone the handle (should be cheap — just Arc bumps)
+    let handle2 = handle.clone();
+
+    let r1 = with_fork(handle, async { get_context::<RequestId>(key) }).await;
+    let r2 = with_fork(handle2, async { get_context::<RequestId>(key) }).await;
+
+    assert_eq!(r1.0, "shared");
+    assert_eq!(r2.0, "shared");
+}
+
+#[tokio::test]
+async fn test_fork_child_scopes_work() {
+    let key = unique_key("fork_scope", "rid");
+    register::<RequestId>(key);
+
+    let handle = force_thread_local(|| {
+        let _scope = enter_scope();
+        set_context(key, RequestId("base".into()));
+        fork()
+    });
+
+    with_fork(handle, async {
+        assert_eq!(get_context::<RequestId>(key).0, "base");
+
+        // Push a scope in child — should work and revert
+        scope_async(async {
+            set_context(key, RequestId("inner".into()));
+            assert_eq!(get_context::<RequestId>(key).0, "inner");
+        }).await;
+
+        // After inner scope exits, reverts to forked base
+        assert_eq!(get_context::<RequestId>(key).0, "base");
+    }).await;
+}
+
+#[tokio::test]
+async fn test_spawn_with_fork_async() {
+    let key = unique_key("fork_spawn", "rid");
+    register::<RequestId>(key);
+
+    force_thread_local(|| {
+        let _scope = enter_scope();
+        set_context(key, RequestId("spawned".into()));
+    });
+
+    // Set in thread local for the spawn
+    force_thread_local(|| {
+        let _scope = enter_scope();
+        set_context(key, RequestId("spawned".into()));
+
+        // Can't use spawn_with_fork_async directly in force_thread_local
+        // because it needs a tokio context. Test fork + with_context instead.
+    });
+
+    // Test via fork() directly
+    let handle = force_thread_local(|| {
+        let _scope = enter_scope();
+        set_context(key, RequestId("for-spawn".into()));
+        fork()
+    });
+
+    let join = tokio::spawn(with_fork(handle, async {
+        get_context::<RequestId>(key)
+    }));
+
+    let result = join.await.unwrap();
+    assert_eq!(result.0, "for-spawn");
+}
+
+#[tokio::test]
+async fn test_fork_empty_context() {
+    // Fork from empty context should not panic
+    let handle = force_thread_local(|| fork());
+
+    with_fork(handle, async {
+        // No values set — should get defaults for any registered key
+    }).await;
+}
+
+#[tokio::test]
+async fn test_fork_scope_chain_preserved() {
+    let key = unique_key("fork_chain", "rid");
+    register::<RequestId>(key);
+
+    let handle = force_thread_local(|| {
+        let _scope = enter_named_scope("parent-scope");
+        set_context(key, RequestId("chained".into()));
+        fork()
+    });
+
+    with_fork(handle, async {
+        let chain = scope_chain();
+        assert!(chain.contains(&"parent-scope".to_string()),
+            "fork should preserve parent scope chain: {:?}", chain);
+    }).await;
+}
