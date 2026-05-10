@@ -116,14 +116,18 @@
 //! or `dcontext::ContextFuture` directly.
 
 mod field_mapping;
-mod guard_stack;
+pub(crate) mod guard_stack;
 mod layer;
 mod span_info;
 mod tracing_field;
+mod async_layer;
+mod sync_layer;
 
 #[cfg(test)]
 mod tests;
 
 pub use layer::{DcontextLayer, DcontextLayerBuilder};
+pub use async_layer::AsyncDcontextLayer;
+pub use sync_layer::SyncDcontextLayer;
 pub use tracing_field::{TracingField, TracingFieldBuilder, WithContextFields, collect_log_fields};
 pub use span_info::{SpanInfo, SPAN_INFO_KEY};

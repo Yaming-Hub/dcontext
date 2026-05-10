@@ -39,7 +39,7 @@ pub mod error;
 mod value;
 mod registry;
 mod scope;
-mod storage;
+pub(crate) mod storage;
 mod snapshot;
 mod wire;
 mod helpers;
@@ -51,6 +51,8 @@ mod fork;
 mod context_future;
 #[macro_use]
 mod macros;
+pub mod async_ctx;
+pub mod sync_ctx;
 
 // Re-export public types
 pub use error::ContextError;

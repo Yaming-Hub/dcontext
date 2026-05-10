@@ -55,6 +55,12 @@ impl ScopeGuard {
             _not_send: std::marker::PhantomData,
         }
     }
+
+    /// Return the expected depth for this guard.
+    /// Used by layers that need to manually manage scope lifetimes.
+    pub fn expected_depth(&self) -> usize {
+        self.expected_depth
+    }
 }
 
 impl Drop for ScopeGuard {

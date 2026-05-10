@@ -23,7 +23,7 @@ and even process boundaries via serialization.
 
 ```toml
 [dependencies]
-dcontext = "0.3"
+dcontext = "0.8"
 ```
 
 ```rust
@@ -53,15 +53,21 @@ fn main() {
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│           Application Code              │
-├─────────────────────────────────────────┤
-│  register / get_context / set_context   │
-├─────────────────────────────────────────┤
-│  Scope Tree  │  Registry  │  Snapshot   │
-├──────────────┼────────────┼─────────────┤
-│  Thread-local storage / Task-local      │
-└─────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│           Application Code                  │
+├─────────────────────────────────────────────┤
+│  register / get_context / set_context       │
+├───────────────────────┬─────────────────────┤
+│  dcontext::async_ctx  │  dcontext::sync_ctx │
+│  (Task-Local Store)   │  (Thread-Local)     │
+├───────────────────────┼─────────────────────┤
+│  AsyncDcontextLayer   │  SyncDcontextLayer  │
+│  (tracing spans)      │  (tracing spans)    │
+├───────────────────────┴─────────────────────┤
+│  Scope Tree  │  Registry  │  Snapshot       │
+├──────────────┼────────────┼─────────────────┤
+│  tokio task_local!  /  std thread_local!    │
+└─────────────────────────────────────────────┘
 ```
 
 ### Key Concepts

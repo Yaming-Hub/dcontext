@@ -27,6 +27,7 @@ async integration, and actor framework support.
 17. [Integration with dactor](#17-integration-with-dactor)
 18. [Cargo Features](#18-cargo-features)
 19. [Log Enrichment](#19-log-enrichment)
+20. [Dual-Context Model (v0.8)](#20-dual-context-model-v08)
 
 ---
 
@@ -1147,3 +1148,141 @@ let headers = dcontext::keys_with_metadata::<PropagationHeader, _>(|key, ph| {
     (key, ph.header_name)
 });
 ```
+
+---
+
+## 20. Dual-Context Model (v0.8)
+
+Starting with v0.8, dcontext introduces a **dual-context model** that separates
+async and sync context into independent stores. This eliminates a class of bugs
+where `DcontextLayer` and application code (e.g., `scope_async`) sharing the
+same thread-local store caused monotonic scope chain growth in production.
+
+### The Problem (Pre-v0.8)
+
+When `DcontextLayer` uses `force_thread_local` to push/pop scopes on span
+enter/exit, and application code uses `scope_async` (which falls back to the
+same thread-local when no task-local exists), depth mismatches cause scope
+leaks on every yield in an instrumented async span.
+
+### The Solution: Two Independent Modules
+
+```rust
+// Async code — operates on task-local store
+use dcontext::async_ctx;
+
+// Sync code — operates on thread-local store
+use dcontext::sync_ctx;
+```
+
+### `async_ctx` — Task-Local Context
+
+All functions in `async_ctx` access the **tokio task-local** store.
+They no-op (or return empty results) if called outside an async task.
+
+```rust
+use dcontext::async_ctx;
+
+// Establish a task-local context (typically done at request entry)
+let snap = dcontext::ContextSnapshot::empty();
+async_ctx::with_context(snap, async {
+    // Push/pop scopes
+    async_ctx::scope("handle_request", async {
+        // Set/get values
+        async_ctx::set_context("request_id", "req-123".to_string());
+        let rid: Option<String> = async_ctx::get_context("request_id");
+
+        // Nested scopes
+        async_ctx::scope("process_item", async {
+            tokio::task::yield_now().await; // safe — no leak
+        }).await;
+    }).await;
+
+    // Scope reverted — scope chain is empty
+    assert!(async_ctx::scope_chain().is_empty());
+}).await;
+```
+
+### `sync_ctx` — Thread-Local Context
+
+All functions in `sync_ctx` access the **thread-local** store.
+They always succeed (thread-local is always available).
+
+```rust
+use dcontext::sync_ctx;
+
+// Push/pop scopes
+let _guard = sync_ctx::push_scope("worker");
+sync_ctx::set_context("task_id", "task-42".to_string());
+let chain = sync_ctx::scope_chain(); // vec!["worker"]
+
+// Clear the thread-local context
+sync_ctx::clear();
+```
+
+### Bridging: Async → Sync
+
+Use snapshots to transfer context from async tasks to blocking threads:
+
+```rust
+use dcontext::{async_ctx, sync_ctx};
+
+// In an async handler:
+let snap = async_ctx::snapshot();
+tokio::task::spawn_blocking(move || {
+    sync_ctx::restore(snap); // one-way copy to thread-local
+    // SyncDcontextLayer tracks spans here
+    do_blocking_work();
+}).await;
+```
+
+### Propagating to Child Tasks
+
+```rust
+use dcontext::async_ctx;
+
+// In parent task:
+let snap = async_ctx::snapshot();
+tokio::spawn(async move {
+    async_ctx::with_context(snap, async {
+        // child task has parent's context
+        do_child_work().await;
+    }).await;
+});
+```
+
+### New Tracing Layers
+
+| Layer | Store | Behavior |
+|-------|-------|----------|
+| `AsyncDcontextLayer` | Task-local | Push on first enter, pop on close. Persists across yields. |
+| `SyncDcontextLayer` | Thread-local | Push on enter, pop on exit. Standard sync lifecycle. |
+| `DcontextLayer` (legacy) | Thread-local via `force_thread_local` | Preserved for backward compatibility. |
+
+```rust
+use tracing_subscriber::prelude::*;
+use dcontext_tracing::{AsyncDcontextLayer, SyncDcontextLayer};
+
+// For async services (recommended):
+tracing_subscriber::registry()
+    .with(AsyncDcontextLayer::new())
+    .init();
+
+// For sync-only code:
+tracing_subscriber::registry()
+    .with(SyncDcontextLayer::new())
+    .init();
+```
+
+### Migration from Pre-v0.8
+
+| Old API | New API |
+|---------|---------|
+| `scope_async(fut)` | `async_ctx::scope(name, fut)` |
+| `scope_chain()` (ambiguous) | `async_ctx::scope_chain()` / `sync_ctx::scope_chain()` |
+| `with_fork(handle, fut)` | `async_ctx::with_context(snapshot, fut)` |
+| `fork()` | `async_ctx::snapshot()` |
+| `DcontextLayer` | `AsyncDcontextLayer` + `SyncDcontextLayer` |
+| `force_thread_local(f)` | Not needed — each module owns its store |
+
+All old APIs remain available for backward compatibility.

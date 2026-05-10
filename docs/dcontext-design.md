@@ -1,5 +1,37 @@
 # dcontext — Detailed Design
 
+> **v0.8.0 Architecture Change — Dual-Context Model (AsyncContext + SyncContext)**
+>
+> Starting with v0.8.0, dcontext introduces a **dual-context model** that
+> separates async (task-local) and sync (thread-local) storage into independent
+> modules. This eliminates the scope chain leak bug caused by depth mismatches
+> between `DcontextLayer` and application code sharing the same store.
+>
+> Key changes:
+>
+> - **`dcontext::async_ctx`** module — all operations target the tokio task-local
+>   store exclusively. No-ops gracefully outside async tasks.
+>
+> - **`dcontext::sync_ctx`** module — all operations target the thread-local
+>   store exclusively. Always succeeds.
+>
+> - **`AsyncDcontextLayer`** — tracing layer that pushes/pops scopes on the
+>   task-local store. Scopes persist across yields (push on first enter, pop
+>   on close). Structurally prevents the monotonic scope chain growth bug.
+>
+> - **`SyncDcontextLayer`** — tracing layer that pushes/pops scopes on the
+>   thread-local store via standard enter/exit lifecycle.
+>
+> - **One-way bridging** — `async_ctx::snapshot()` + `sync_ctx::restore()` for
+>   explicit async→sync context transfer.
+>
+> - **No shared mutable state** — the two stores never interfere with each other.
+>   `force_thread_local` and `with_current_cell` dispatch logic are preserved
+>   for backward compatibility but are no longer needed by the new modules.
+>
+> The original `DcontextLayer` and all existing APIs remain available for
+> backward compatibility but may be deprecated in future versions.
+
 > **v0.4.0 Architecture Change — Cell-based Contention-free Storage**
 >
 > Starting with v0.4.0, the internal storage was redesigned to eliminate
