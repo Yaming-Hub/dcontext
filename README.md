@@ -120,6 +120,11 @@ Run any sample with `cargo run --bin <name>`:
 | `tracing_scopes` | dcontext-tracing integration |
 | `scope_chain` | Named scopes and scope chain query |
 | `dactor_propagation` | dcontext-dactor propagation flow |
+| `dual_async_ctx` | `async_ctx` module — task-local context |
+| `dual_sync_ctx` | `sync_ctx` module — thread-local context |
+| `dual_bridging` | Async→sync snapshot bridging patterns |
+| `dual_cross_process` | Serialize context and restore remotely |
+| `dual_tracing_layers` | `AsyncDcontextLayer` + `SyncDcontextLayer` |
 
 ## License
 
