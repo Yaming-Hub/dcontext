@@ -12,11 +12,8 @@
 //!
 //! Usage: `cargo run --bin dual_cross_process`
 
-use dcontext::{
-    async_ctx, deserialize_context, deserialize_context_string, force_thread_local, get_context,
-    initialize, scope_chain, serialize_context, serialize_context_string, set_context, sync_ctx,
-    RegistryBuilder,
-};
+use base64::Engine as _;
+use dcontext::{async_ctx, initialize, sync_ctx, RegistryBuilder};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -47,20 +44,18 @@ async fn main() {
 
     // Set context using the traditional registered-key API
     // (required for serialization — async_ctx values are untyped)
-    force_thread_local(|| {
-        set_context("trace_id", TraceId("trace-xyz-789".into()));
-        set_context("service_name", ServiceName("api-gateway".into()));
-        set_context("request_path", RequestPath("/api/v1/orders".into()));
-    });
+    sync_ctx::set_context("trace_id", TraceId("trace-xyz-789".into()));
+    sync_ctx::set_context("service_name", ServiceName("api-gateway".into()));
+    sync_ctx::set_context("request_path", RequestPath("/api/v1/orders".into()));
 
-    let tid: TraceId = force_thread_local(|| get_context("trace_id"));
-    let svc: ServiceName = force_thread_local(|| get_context("service_name"));
+    let tid: TraceId = sync_ctx::get_context("trace_id").unwrap();
+    let svc: ServiceName = sync_ctx::get_context("service_name").unwrap();
     println!("  trace_id     = {:?}", tid.0);
     println!("  service_name = {:?}", svc.0);
 
     // Serialize using the registered-key system
-    let wire_bytes = force_thread_local(|| serialize_context().unwrap());
-    let wire_string = force_thread_local(|| serialize_context_string().unwrap());
+    let wire_bytes = sync_ctx::serialize_context().unwrap();
+    let wire_string = base64::engine::general_purpose::STANDARD.encode(&wire_bytes);
 
     println!("  Serialized: {} bytes", wire_bytes.len());
     println!("  Base64: {}...", &wire_string[..40.min(wire_string.len())]);
@@ -77,18 +72,18 @@ async fn main() {
 
     // Deserialize into the traditional context system, then snapshot
     // for use in async_ctx
-    let receiver_snap = force_thread_local(|| {
-        let _scope = dcontext::enter_named_scope("order_service");
-        let _guard = deserialize_context(&wire_bytes).unwrap();
+    let receiver_snap = {
+        let _scope = sync_ctx::enter_named_scope("order_service");
+        let _guard = sync_ctx::deserialize_context(&wire_bytes).unwrap();
 
         // Now the registered keys are populated
-        let tid: TraceId = get_context("trace_id");
+        let tid: TraceId = sync_ctx::get_context("trace_id").unwrap();
         println!("  [registered] trace_id = {:?}", tid.0);
-        println!("  [registered] scope_chain = {:?}", scope_chain());
+        println!("  [registered] scope_chain = {:?}", sync_ctx::scope_chain());
 
         // Take a snapshot for use in async_ctx
-        dcontext::snapshot()
-    });
+        sync_ctx::snapshot()
+    };
 
     // Use the snapshot in async context
     async_ctx::with_context(receiver_snap, async {
@@ -122,14 +117,14 @@ async fn main() {
 
     // For sync receivers, deserialize and use sync_ctx
     std::thread::spawn(move || {
-        // Deserialize from base64 (as if received via HTTP header)
-        force_thread_local(|| {
-            let _guard = deserialize_context_string(&wire_string).unwrap();
-            let tid: TraceId = get_context("trace_id");
-            let path: RequestPath = get_context("request_path");
-            println!("  [sync] trace_id     = {:?}", tid.0);
-            println!("  [sync] request_path = {:?}", path.0);
-        });
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&wire_string)
+            .unwrap();
+        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
+        let tid: TraceId = sync_ctx::get_context("trace_id").unwrap();
+        let path: RequestPath = sync_ctx::get_context("request_path").unwrap();
+        println!("  [sync] trace_id     = {:?}", tid.0);
+        println!("  [sync] request_path = {:?}", path.0);
 
         // Or use sync_ctx directly for scope management
         let _guard = sync_ctx::push_scope("legacy_handler");

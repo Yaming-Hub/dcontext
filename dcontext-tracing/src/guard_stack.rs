@@ -7,7 +7,7 @@ use tracing_core::span;
 // and popped on `on_exit`. Using a thread-local avoids the !Send problem
 // with ScopeGuard (span extensions require Send + Sync).
 thread_local! {
-    static SCOPE_GUARDS: RefCell<Vec<(u64, dcontext::ScopeGuard)>> = RefCell::new(Vec::new());
+    static SCOPE_GUARDS: RefCell<Vec<(u64, dcontext::ScopeGuard)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Push a new scope guard for the given span.

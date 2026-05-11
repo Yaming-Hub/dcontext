@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+base64 = "0.22"
 dcontext = { path = "../dcontext" }
 dcontext-tracing = { path = "../dcontext-tracing" }
 bincode = "1"

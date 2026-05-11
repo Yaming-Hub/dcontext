@@ -6,9 +6,8 @@
 //! Use this module for synchronous code, `spawn_blocking` contexts, or
 //! any code that needs thread-scoped context independent of async tasks.
 //!
-//! This module also contains the legacy public API functions (`enter_scope`,
-//! `enter_named_scope`, `scope_chain`, etc.) and deprecated compatibility
-//! shims (`force_thread_local`, `scope_async`, `named_scope_async`).
+//! This module also contains scope management functions (`enter_scope`,
+//! `enter_named_scope`, `scope_chain`, etc.).
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -62,6 +61,24 @@ pub fn pop_scope(expected_depth: usize) {
 /// push_scope/pop_scope, so dropping the scope guard clears it.
 pub(crate) fn set_scope_barrier() {
     try_apply(|store| store.set_scope_barrier());
+}
+
+/// Peek at the current scope depth on the thread-local store.
+///
+/// The depth uniquely identifies the active scope within the store.
+/// Returns `None` if the store is busy (re-entrant access) or during
+/// thread-local destruction.
+pub fn current_depth() -> Option<usize> {
+    try_apply(|store| store.depth)
+}
+
+/// Try to push a named scope onto the thread-local store.
+///
+/// Returns `Some(ScopeGuard)` if the store is accessible,
+/// or `None` if the store is busy (re-entrant access).
+pub fn try_push_scope(name: &str) -> Option<ScopeGuard> {
+    let name = name.to_string();
+    try_apply(|store| ScopeGuard::new(store.push_scope(Some(name))))
 }
 
 /// Get the current scope chain from the thread-local store.
@@ -253,7 +270,6 @@ pub(crate) fn fork() -> Option<crate::store::ContextStore> {
 }
 
 // ── Value access (internal, used by lib.rs dispatch) ───────────
-
 
 /// Set a value in the current scope.
 /// Silently skips if the store is busy (re-entrant access).

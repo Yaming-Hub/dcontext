@@ -6,10 +6,7 @@
 //!
 //! Usage: `cargo run --bin custom_codec`
 
-use dcontext::{
-    deserialize_context, get_context, initialize, scope, serialize_context, set_context,
-    RegistryBuilder,
-};
+use dcontext::{initialize, sync_ctx, RegistryBuilder};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -37,42 +34,42 @@ fn main() {
     // Register RequestId with default bincode (fast, compact).
     builder.register::<RequestId>("request_id");
     initialize(builder);
-    set_context(
+    sync_ctx::set_context(
         "app_config",
         AppConfig {
             feature_flags: vec!["dark-mode".into(), "beta-api".into()],
             max_retries: 3,
         },
     );
-    set_context("request_id", RequestId("req-001".into()));
+    sync_ctx::set_context("request_id", RequestId("req-001".into()));
 
     println!("1. Mixed codecs in same context:");
     println!(
         "   app_config (JSON):    {:?}",
-        get_context::<AppConfig>("app_config")
+        sync_ctx::get_context::<AppConfig>("app_config").unwrap()
     );
     println!(
         "   request_id (bincode): {:?}",
-        get_context::<RequestId>("request_id")
+        sync_ctx::get_context::<RequestId>("request_id").unwrap()
     );
 
     // Serialize — each key uses its own codec.
-    let bytes = serialize_context().unwrap();
+    let bytes = sync_ctx::serialize_context().unwrap();
     println!("\n2. Serialized to {} bytes", bytes.len());
 
     // Deserialize — each key decoded with its registered codec.
     println!("\n3. Roundtrip:");
-    scope(|| {
-        let _guard = deserialize_context(&bytes).unwrap();
+    {
+        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
         println!(
             "   app_config: {:?}",
-            get_context::<AppConfig>("app_config")
+            sync_ctx::get_context::<AppConfig>("app_config").unwrap()
         );
         println!(
             "   request_id: {:?}",
-            get_context::<RequestId>("request_id")
+            sync_ctx::get_context::<RequestId>("request_id").unwrap()
         );
-    });
+    }
 
     println!("\nDone! Different keys can use different serialization formats.");
 }

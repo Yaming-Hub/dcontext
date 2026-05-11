@@ -362,6 +362,11 @@ impl RegistryBuilder {
     }
 
     /// Register a context type with default options (version 1, bincode codec).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the key is already registered. Use [`try_register`](Self::try_register)
+    /// for a non-panicking alternative.
     pub fn register<T>(&mut self, key: &'static str)
     where
         T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
@@ -379,6 +384,11 @@ impl RegistryBuilder {
     }
 
     /// Register with custom options via builder callback.
+    ///
+    /// # Panics
+    ///
+    /// Panics on conflict. Use [`try_register_with`](Self::try_register_with)
+    /// for a non-panicking alternative.
     pub fn register_with<T>(
         &mut self,
         key: &'static str,
@@ -403,6 +413,11 @@ impl RegistryBuilder {
     }
 
     /// Register a local-only context type (no Serialize/DeserializeOwned needed).
+    ///
+    /// # Panics
+    ///
+    /// Panics on conflict. Use [`try_register_local`](Self::try_register_local)
+    /// for a non-panicking alternative.
     pub fn register_local<T>(&mut self, key: &'static str)
     where
         T: Clone + Default + Send + Sync + 'static,
@@ -420,6 +435,12 @@ impl RegistryBuilder {
     }
 
     /// Register a migration deserializer for an older wire version.
+    ///
+    /// # Panics
+    ///
+    /// Panics on conflict or if the key is not registered.
+    /// Use [`try_register_migration`](Self::try_register_migration)
+    /// for a non-panicking alternative.
     pub fn register_migration<TOld, TCurrent>(
         &mut self,
         key: &'static str,
@@ -459,6 +480,11 @@ impl Default for RegistryBuilder {
 /// Freeze the registry. Consumes the builder and makes all reads lock-free.
 ///
 /// Call this once after all registrations, before any context operations.
+///
+/// # Panics
+///
+/// Panics if called more than once. Use [`try_initialize`] for a
+/// non-panicking alternative.
 ///
 /// ```rust,ignore
 /// let mut builder = dcontext::RegistryBuilder::new();

@@ -5,7 +5,7 @@
 //!
 //! Usage: `cargo run --bin worker_pool`
 
-use dcontext::{attach, get_context, initialize, scope, set_context, snapshot, RegistryBuilder};
+use dcontext::{initialize, sync_ctx, RegistryBuilder};
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 
@@ -34,9 +34,9 @@ fn main() {
         let (worker_tx, worker_rx) = mpsc::channel::<(dcontext::ContextSnapshot, String)>();
         std::thread::spawn(move || {
             while let Ok((snap, task_name)) = worker_rx.recv() {
-                let _guard = attach(snap);
-                let rid = get_context::<RequestId>("request_id");
-                let tid = get_context::<TenantId>("tenant_id");
+                let _guard = sync_ctx::attach(snap);
+                let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
+                let tid = sync_ctx::get_context::<TenantId>("tenant_id").unwrap();
                 println!(
                     "[worker-{}] {} — request_id={:?}, tenant_id={:?}",
                     i, task_name, rid.0, tid.0
@@ -48,16 +48,17 @@ fn main() {
 
     // Dispatch requests to workers (round-robin).
     for (idx, (req_id, tenant)) in requests.iter().enumerate() {
-        scope(|| {
-            set_context("request_id", RequestId(req_id.to_string()));
-            set_context("tenant_id", TenantId(tenant.to_string()));
+        {
+            let _guard = sync_ctx::enter_scope();
+            sync_ctx::set_context("request_id", RequestId(req_id.to_string()));
+            sync_ctx::set_context("tenant_id", TenantId(tenant.to_string()));
 
-            let snap = snapshot();
+            let snap = sync_ctx::snapshot();
             let worker_idx = idx % workers.len();
             workers[worker_idx]
                 .send((snap, format!("task-{}", idx)))
                 .unwrap();
-        });
+        }
     }
 
     // Drop all senders to signal workers to stop.

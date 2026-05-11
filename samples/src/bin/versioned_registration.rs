@@ -7,10 +7,7 @@
 //!
 //! Usage: `cargo run --bin versioned_registration`
 
-use dcontext::{
-    deserialize_context, get_context, initialize, scope, serialize_context, set_context,
-    RegistryBuilder,
-};
+use dcontext::{initialize, sync_ctx, RegistryBuilder};
 use serde::{Deserialize, Serialize};
 
 /// Version 1 of the trace context — original schema.
@@ -41,21 +38,21 @@ fn main() {
     println!("1. Same version (v2 → v2): success");
     {
         // Sender registers v2 and serializes.
-        set_context(
+        sync_ctx::set_context(
             "trace_ctx_v2_same",
             TraceContextV2 {
                 trace_id: "tid-001".into(),
                 span_id: "span-42".into(),
             },
         );
-        let bytes = serialize_context().unwrap();
+        let bytes = sync_ctx::serialize_context().unwrap();
 
         // Receiver also has v2 registered — deserialize succeeds.
-        scope(|| {
-            let _guard = deserialize_context(&bytes).unwrap();
-            let ctx: TraceContextV2 = get_context("trace_ctx_v2_same");
+        {
+            let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
+            let ctx: TraceContextV2 = sync_ctx::get_context("trace_ctx_v2_same").unwrap();
             println!("   trace_id = {}, span_id = {}", ctx.trace_id, ctx.span_id);
-        });
+        }
     }
 
     // --- Scenario 2: Version mismatch detection ---
@@ -67,14 +64,14 @@ fn main() {
 
     // Show the version is embedded in the wire format.
     {
-        set_context(
+        sync_ctx::set_context(
             "trace_ctx_v1_demo",
             TraceContextV1 {
                 trace_id: "tid-v1".into(),
             },
         );
 
-        set_context(
+        sync_ctx::set_context(
             "trace_ctx_v2_demo",
             TraceContextV2 {
                 trace_id: "tid-v2".into(),
@@ -82,7 +79,7 @@ fn main() {
             },
         );
 
-        let bytes = serialize_context().unwrap();
+        let bytes = sync_ctx::serialize_context().unwrap();
         println!(
             "   Serialized both v1 and v2 keys into {} bytes",
             bytes.len()
@@ -93,18 +90,18 @@ fn main() {
     // --- Scenario 3: Unknown key on receiver ---
     println!("\n3. Unknown key on receiver: silently skipped");
     {
-        set_context(
+        sync_ctx::set_context(
             "trace_ctx_unknown",
             TraceContextV1 {
                 trace_id: "tid-003".into(),
             },
         );
-        let bytes = serialize_context().unwrap();
+        let bytes = sync_ctx::serialize_context().unwrap();
 
         // Receiver doesn't have "trace_ctx_unknown" registered at all.
         let handle = std::thread::spawn(move || {
             // Don't register the key — deserialization should skip it.
-            let result = deserialize_context(&bytes);
+            let result = sync_ctx::deserialize_context(&bytes);
             match result {
                 Ok(_guard) => println!("   Deserialized OK (unknown keys skipped)"),
                 Err(e) => println!("   Error: {}", e),

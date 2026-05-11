@@ -6,8 +6,7 @@
 //! Usage: `cargo run --bin size_limits`
 
 use dcontext::{
-    initialize, max_context_size, serialize_context, set_context, set_max_context_size,
-    ContextError, RegistryBuilder,
+    initialize, max_context_size, set_max_context_size, sync_ctx, ContextError, RegistryBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,8 +19,8 @@ fn main() {
     initialize(builder);
 
     // Set a small payload — serialization works.
-    set_context("payload", Payload("small".into()));
-    let bytes = serialize_context().unwrap();
+    sync_ctx::set_context("payload", Payload("small".into()));
+    let bytes = sync_ctx::serialize_context().unwrap();
     println!("Small payload serialized: {} bytes", bytes.len());
     println!("Current limit: {} (0 = no limit)", max_context_size());
 
@@ -31,16 +30,16 @@ fn main() {
     println!("Current limit: {}", max_context_size());
 
     // Small payload still fits.
-    match serialize_context() {
+    match sync_ctx::serialize_context() {
         Ok(bytes) => println!("Small payload OK: {} bytes", bytes.len()),
         Err(e) => println!("Error: {}", e),
     }
 
     // Set a large payload that exceeds the limit.
     let large = "x".repeat(200);
-    set_context("payload", Payload(large));
+    sync_ctx::set_context("payload", Payload(large));
 
-    match serialize_context() {
+    match sync_ctx::serialize_context() {
         Ok(bytes) => println!("Large payload OK: {} bytes (unexpected!)", bytes.len()),
         Err(ContextError::ContextTooLarge { size, limit }) => {
             println!("\nContextTooLarge: {} bytes > {} byte limit", size, limit);
@@ -51,7 +50,7 @@ fn main() {
     // Disable the limit.
     println!("\nDisabling size limit...");
     set_max_context_size(0);
-    match serialize_context() {
+    match sync_ctx::serialize_context() {
         Ok(bytes) => println!(
             "Large payload OK after disabling limit: {} bytes",
             bytes.len()

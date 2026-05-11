@@ -76,7 +76,7 @@ pub(crate) use registry::{
 
 // ── Scope management ───────────────────────────────────────────
 
-pub use sync_ctx::enter_named_scope;
+pub use sync_ctx::{enter_named_scope, enter_scope};
 
 // ── Context inheritance (spawn helpers) ───────────────────────
 

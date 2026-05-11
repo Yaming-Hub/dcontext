@@ -5,10 +5,8 @@
 //!
 //! Usage: `cargo run --bin cross_process`
 
-use dcontext::{
-    deserialize_context, deserialize_context_string, get_context, initialize, scope,
-    serialize_context, serialize_context_string, set_context, RegistryBuilder,
-};
+use base64::Engine as _;
+use dcontext::{initialize, sync_ctx, RegistryBuilder};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -30,14 +28,14 @@ fn main() {
     initialize(builder);
 
     // --- Sender side: serialize context ---
-    set_context(
+    sync_ctx::set_context(
         "trace_context",
         TraceContext {
             trace_id: "tid-abc-123".into(),
             span_id: "span-001".into(),
         },
     );
-    set_context(
+    sync_ctx::set_context(
         "auth_info",
         AuthInfo {
             user_id: "alice".into(),
@@ -46,31 +44,52 @@ fn main() {
     );
 
     println!("=== Sender ===");
-    println!("trace = {:?}", get_context::<TraceContext>("trace_context"));
-    println!("auth  = {:?}", get_context::<AuthInfo>("auth_info"));
+    println!(
+        "trace = {:?}",
+        sync_ctx::get_context::<TraceContext>("trace_context").unwrap()
+    );
+    println!(
+        "auth  = {:?}",
+        sync_ctx::get_context::<AuthInfo>("auth_info").unwrap()
+    );
 
     // Serialize to bytes (for binary protocols).
-    let bytes = serialize_context().unwrap();
+    let bytes = sync_ctx::serialize_context().unwrap();
     println!("\nSerialized to {} bytes", bytes.len());
 
     // Serialize to base64 string (for HTTP headers).
-    let encoded = serialize_context_string().unwrap();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
     println!("Base64: {}...", &encoded[..40.min(encoded.len())]);
 
     // --- Receiver side: deserialize context ---
     println!("\n=== Receiver (bytes) ===");
-    scope(|| {
-        let _guard = deserialize_context(&bytes).unwrap();
-        println!("trace = {:?}", get_context::<TraceContext>("trace_context"));
-        println!("auth  = {:?}", get_context::<AuthInfo>("auth_info"));
-    });
+    {
+        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
+        println!(
+            "trace = {:?}",
+            sync_ctx::get_context::<TraceContext>("trace_context").unwrap()
+        );
+        println!(
+            "auth  = {:?}",
+            sync_ctx::get_context::<AuthInfo>("auth_info").unwrap()
+        );
+    }
 
     println!("\n=== Receiver (base64 string) ===");
-    scope(|| {
-        let _guard = deserialize_context_string(&encoded).unwrap();
-        println!("trace = {:?}", get_context::<TraceContext>("trace_context"));
-        println!("auth  = {:?}", get_context::<AuthInfo>("auth_info"));
-    });
+    {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .unwrap();
+        let _guard = sync_ctx::deserialize_context(&decoded).unwrap();
+        println!(
+            "trace = {:?}",
+            sync_ctx::get_context::<TraceContext>("trace_context").unwrap()
+        );
+        println!(
+            "auth  = {:?}",
+            sync_ctx::get_context::<AuthInfo>("auth_info").unwrap()
+        );
+    }
 
     // Unknown keys on the receiver side are silently skipped.
     println!("\n=== Partial receiver (only trace_context registered) ===");

@@ -1,11 +1,11 @@
-//! # Sample 8: Macros — register_contexts! and with_scope!
+//! # Sample 8: Macros — register_contexts! and manual scoped guards
 //!
-//! Demonstrates the convenience macros for bulk registration
-//! and scoped context setting.
+//! Demonstrates bulk registration with `register_contexts!` and the
+//! replacement for the removed `with_scope!` macro.
 //!
 //! Usage: `cargo run --bin macros`
 
-use dcontext::{get_context, set_context, with_scope, RegistryBuilder};
+use dcontext::{sync_ctx, RegistryBuilder};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -27,38 +27,61 @@ fn main() {
     });
     dcontext::initialize(builder);
 
-    set_context("trace_id", TraceId("trace-root".into()));
-    set_context("tenant_id", TenantId("acme-corp".into()));
+    sync_ctx::set_context("trace_id", TraceId("trace-root".into()));
+    sync_ctx::set_context("tenant_id", TenantId("acme-corp".into()));
 
-    println!("=== Before with_scope! ===");
-    println!("trace_id  = {:?}", get_context::<TraceId>("trace_id"));
-    println!("span_id   = {:?}", get_context::<SpanId>("span_id"));
-    println!("tenant_id = {:?}", get_context::<TenantId>("tenant_id"));
+    println!("=== Before scoped block ===");
+    println!(
+        "trace_id  = {:?}",
+        sync_ctx::get_context::<TraceId>("trace_id").unwrap()
+    );
+    println!(
+        "span_id   = {:?}",
+        sync_ctx::get_context::<SpanId>("span_id").unwrap_or_default()
+    );
+    println!(
+        "tenant_id = {:?}",
+        sync_ctx::get_context::<TenantId>("tenant_id").unwrap()
+    );
 
-    // with_scope! sets multiple values and runs a block in a new scope.
-    with_scope! {
-        "span_id"  => SpanId("span-handler".into()),
-        "trace_id" => TraceId("trace-root".into()),
-        => {
-            println!("\n=== Inside with_scope! ===");
-            println!("trace_id  = {:?}", get_context::<TraceId>("trace_id"));
-            println!("span_id   = {:?}", get_context::<SpanId>("span_id"));
-            println!("tenant_id = {:?}", get_context::<TenantId>("tenant_id")); // inherited
+    {
+        let _guard = sync_ctx::enter_scope();
+        sync_ctx::set_context("span_id", SpanId("span-handler".into()));
+        sync_ctx::set_context("trace_id", TraceId("trace-root".into()));
+        println!("\n=== Inside scoped block ===");
+        println!(
+            "trace_id  = {:?}",
+            sync_ctx::get_context::<TraceId>("trace_id").unwrap()
+        );
+        println!(
+            "span_id   = {:?}",
+            sync_ctx::get_context::<SpanId>("span_id").unwrap()
+        );
+        println!(
+            "tenant_id = {:?}",
+            sync_ctx::get_context::<TenantId>("tenant_id").unwrap()
+        ); // inherited
 
-            // Nested with_scope!
-            with_scope! {
-                "span_id" => SpanId("span-db-query".into()),
-                => {
-                    println!("\n=== Nested with_scope! ===");
-                    println!("span_id = {:?}", get_context::<SpanId>("span_id"));
-                }
-            }
-
-            println!("\n=== After nested scope ===");
-            println!("span_id = {:?}", get_context::<SpanId>("span_id")); // reverted
+        {
+            let _guard = sync_ctx::enter_scope();
+            sync_ctx::set_context("span_id", SpanId("span-db-query".into()));
+            println!("\n=== Nested scoped block ===");
+            println!(
+                "span_id = {:?}",
+                sync_ctx::get_context::<SpanId>("span_id").unwrap()
+            );
         }
+
+        println!("\n=== After nested scope ===");
+        println!(
+            "span_id = {:?}",
+            sync_ctx::get_context::<SpanId>("span_id").unwrap()
+        ); // reverted
     }
 
     println!("\n=== After outer scope ===");
-    println!("span_id = {:?}", get_context::<SpanId>("span_id")); // reverted to default
+    println!(
+        "span_id = {:?}",
+        sync_ctx::get_context::<SpanId>("span_id").unwrap_or_default()
+    ); // reverted to default
 }

@@ -191,8 +191,7 @@ pub fn make_wire_bytes_v(
         }],
         scope_chain: Vec::new(),
     };
-    bincode::serialize(&wire)
-        .expect("dcontext::make_wire_bytes_v: bincode serialization should not fail")
+    bincode::serialize(&wire).unwrap_or_default()
 }
 
 /// Test helpers (re-exports make_wire_bytes for internal tests).

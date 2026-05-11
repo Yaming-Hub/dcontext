@@ -5,11 +5,7 @@
 //!
 //! Usage: `cargo run --bin scope_chain`
 
-use dcontext::{
-    deserialize_context, enter_named_scope, enter_scope, force_thread_local, get_context,
-    initialize, named_scope_async, scope_chain, serialize_context, set_context,
-    set_max_scope_chain_len, snapshot, with_context, RegistryBuilder,
-};
+use dcontext::{async_ctx, initialize, set_max_scope_chain_len, sync_ctx, RegistryBuilder};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -23,48 +19,50 @@ async fn main() {
     builder.register::<RequestId>("request_id");
     initialize(builder);
 
-    // Inside tokio we need force_thread_local + with_context for sync APIs.
     // Sections 1-6 use sync scope APIs, so we set up once.
-    let snap = force_thread_local(|| {
-        set_context("request_id", RequestId("req-42".into()));
-        println!("Registered RequestId; scope_chain = {:?}", scope_chain());
+    let snap = {
+        sync_ctx::set_context("request_id", RequestId("req-42".into()));
+        println!(
+            "Registered RequestId; scope_chain = {:?}",
+            sync_ctx::scope_chain()
+        );
 
         // ── 2. Named scopes appear in the chain ────────────────────────
         println!("\n=== 2. Named scopes with enter_named_scope() ===");
         {
-            let _g1 = enter_named_scope("gateway");
-            println!("After entering 'gateway':  {:?}", scope_chain());
+            let _g1 = sync_ctx::enter_named_scope("gateway");
+            println!("After entering 'gateway':  {:?}", sync_ctx::scope_chain());
             {
-                let _g2 = enter_named_scope("auth");
-                println!("After entering 'auth':     {:?}", scope_chain());
+                let _g2 = sync_ctx::enter_named_scope("auth");
+                println!("After entering 'auth':     {:?}", sync_ctx::scope_chain());
                 {
-                    let _g3 = enter_named_scope("handler");
-                    println!("After entering 'handler':  {:?}", scope_chain());
+                    let _g3 = sync_ctx::enter_named_scope("handler");
+                    println!("After entering 'handler':  {:?}", sync_ctx::scope_chain());
                 }
-                println!("After leaving 'handler':   {:?}", scope_chain());
+                println!("After leaving 'handler':   {:?}", sync_ctx::scope_chain());
             }
-            println!("After leaving 'auth':      {:?}", scope_chain());
+            println!("After leaving 'auth':      {:?}", sync_ctx::scope_chain());
         }
-        println!("After leaving 'gateway':   {:?}", scope_chain());
+        println!("After leaving 'gateway':   {:?}", sync_ctx::scope_chain());
 
         // ── 3. Unnamed scopes are invisible in the chain ───────────────
         println!("\n=== 3. Unnamed scopes are invisible ===");
         {
-            let _named = enter_named_scope("visible");
-            println!("Named scope 'visible': {:?}", scope_chain());
+            let _named = sync_ctx::enter_named_scope("visible");
+            println!("Named scope 'visible': {:?}", sync_ctx::scope_chain());
             {
-                let _unnamed = enter_scope();
-                set_context("request_id", RequestId("req-99".into()));
+                let _unnamed = sync_ctx::enter_scope();
+                sync_ctx::set_context("request_id", RequestId("req-99".into()));
                 println!(
                     "Inside unnamed scope:  {:?}  (chain unchanged)",
-                    scope_chain()
+                    sync_ctx::scope_chain()
                 );
                 println!(
                     "  request_id = {:?}",
-                    get_context::<RequestId>("request_id")
+                    sync_ctx::get_context::<RequestId>("request_id").unwrap()
                 );
             }
-            println!("After unnamed exits:   {:?}", scope_chain());
+            println!("After unnamed exits:   {:?}", sync_ctx::scope_chain());
         }
 
         // ── 4. Cross-process propagation ───────────────────────────────
@@ -72,11 +70,11 @@ async fn main() {
 
         // Sender side: build a chain and serialize.
         let wire_bytes = {
-            let _g1 = enter_named_scope("service-a");
-            let _g2 = enter_named_scope("endpoint-x");
-            set_context("request_id", RequestId("req-cross".into()));
-            println!("Sender chain: {:?}", scope_chain());
-            let bytes = serialize_context().expect("serialize failed");
+            let _g1 = sync_ctx::enter_named_scope("service-a");
+            let _g2 = sync_ctx::enter_named_scope("endpoint-x");
+            sync_ctx::set_context("request_id", RequestId("req-cross".into()));
+            println!("Sender chain: {:?}", sync_ctx::scope_chain());
+            let bytes = sync_ctx::serialize_context().expect("serialize failed");
             println!("Serialized to {} bytes", bytes.len());
             bytes
         };
@@ -84,27 +82,25 @@ async fn main() {
         // Receiver side: deserialize restores the chain as a remote prefix.
         println!("\n--- Receiver side ---");
         {
-            let _scope = enter_scope();
-            let _guard = deserialize_context(&wire_bytes).expect("deserialize failed");
-            println!("After deserialize, chain: {:?}", scope_chain());
+            let _guard = sync_ctx::deserialize_context(&wire_bytes).expect("deserialize failed");
+            println!("After deserialize, chain: {:?}", sync_ctx::scope_chain());
             println!(
                 "  request_id = {:?}",
-                get_context::<RequestId>("request_id")
+                sync_ctx::get_context::<RequestId>("request_id").unwrap()
             );
         }
 
         // ── 5. Remote prefix + local named scopes ──────────────────────
         println!("\n=== 5. Remote prefix + local named scopes ===");
         {
-            let _scope = enter_scope();
-            let _guard = deserialize_context(&wire_bytes).expect("deserialize failed");
-            println!("Remote chain:          {:?}", scope_chain());
+            let _guard = sync_ctx::deserialize_context(&wire_bytes).expect("deserialize failed");
+            println!("Remote chain:          {:?}", sync_ctx::scope_chain());
 
-            let _g1 = enter_named_scope("service-b");
-            println!("+ local 'service-b':   {:?}", scope_chain());
+            let _g1 = sync_ctx::enter_named_scope("service-b");
+            println!("+ local 'service-b':   {:?}", sync_ctx::scope_chain());
 
-            let _g2 = enter_named_scope("handler-y");
-            println!("+ local 'handler-y':   {:?}", scope_chain());
+            let _g2 = sync_ctx::enter_named_scope("handler-y");
+            println!("+ local 'handler-y':   {:?}", sync_ctx::scope_chain());
         }
 
         // ── 6. set_max_scope_chain_len configuration ───────────────────
@@ -112,45 +108,57 @@ async fn main() {
         set_max_scope_chain_len(3);
         println!("Max chain length set to 3");
         {
-            let _g1 = enter_named_scope("a");
-            let _g2 = enter_named_scope("b");
-            let _g3 = enter_named_scope("c");
-            println!("After a/b/c:    {:?}", scope_chain());
+            let _g1 = sync_ctx::enter_named_scope("a");
+            let _g2 = sync_ctx::enter_named_scope("b");
+            let _g3 = sync_ctx::enter_named_scope("c");
+            println!("After a/b/c:    {:?}", sync_ctx::scope_chain());
             {
-                let _g4 = enter_named_scope("d");
+                let _g4 = sync_ctx::enter_named_scope("d");
                 println!(
                     "After a/b/c/d:  {:?}  (oldest trimmed to stay within limit)",
-                    scope_chain()
+                    sync_ctx::scope_chain()
                 );
             }
         }
         // Restore default.
         set_max_scope_chain_len(64);
 
-        snapshot()
-    });
+        sync_ctx::snapshot()
+    };
 
-    // ── 7. named_scope_async with tokio ────────────────────────────────
-    println!("\n=== 7. named_scope_async() with tokio ===");
-    with_context(snap, async {
-        named_scope_async("async-gateway", async {
-            println!("Inside 'async-gateway':      {:?}", scope_chain());
+    // ── 7. async_ctx::scope with tokio ──────────────────────────────────
+    println!("\n=== 7. async_ctx::scope() with tokio ===");
+    async_ctx::with_context(snap, async {
+        async_ctx::scope("async-gateway", async {
+            println!(
+                "Inside 'async-gateway':      {:?}",
+                async_ctx::scope_chain()
+            );
 
-            named_scope_async("async-handler", async {
-                println!("Inside 'async-handler':      {:?}", scope_chain());
+            async_ctx::scope("async-handler", async {
+                println!(
+                    "Inside 'async-handler':      {:?}",
+                    async_ctx::scope_chain()
+                );
 
                 // Simulate an async I/O operation.
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-                println!("After .await in handler:     {:?}", scope_chain());
+                println!(
+                    "After .await in handler:     {:?}",
+                    async_ctx::scope_chain()
+                );
             })
             .await;
 
-            println!("After 'async-handler' exits: {:?}", scope_chain());
+            println!(
+                "After 'async-handler' exits: {:?}",
+                async_ctx::scope_chain()
+            );
         })
         .await;
 
-        println!("\nDone. Final chain: {:?}", scope_chain());
+        println!("\nDone. Final chain: {:?}", async_ctx::scope_chain());
     })
     .await;
 }

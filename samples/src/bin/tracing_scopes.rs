@@ -57,40 +57,40 @@ fn init() -> tracing::subscriber::DefaultGuard {
 fn demo_auto_scoping() {
     println!("\n=== Level 1: Automatic Scoping ===\n");
 
-    dcontext::set_context("status", "root".to_string());
+    dcontext::sync_ctx::set_context("status", "root".to_string());
     println!(
         "  Before span: status = {:?}",
-        dcontext::get_context::<String>("status")
+        dcontext::sync_ctx::get_context::<String>("status").unwrap()
     );
 
     {
         let _span = tracing::info_span!("outer_operation").entered();
-        dcontext::set_context("status", "in-outer-span".to_string());
+        dcontext::sync_ctx::set_context("status", "in-outer-span".to_string());
         println!(
             "  In outer span: status = {:?}",
-            dcontext::get_context::<String>("status")
+            dcontext::sync_ctx::get_context::<String>("status").unwrap()
         );
 
         {
             let _span = tracing::info_span!("inner_operation").entered();
-            dcontext::set_context("status", "in-inner-span".to_string());
+            dcontext::sync_ctx::set_context("status", "in-inner-span".to_string());
             println!(
                 "  In inner span: status = {:?}",
-                dcontext::get_context::<String>("status")
+                dcontext::sync_ctx::get_context::<String>("status").unwrap()
             );
         }
 
         // Inner span exited — context reverted
         println!(
             "  After inner exits: status = {:?}",
-            dcontext::get_context::<String>("status")
+            dcontext::sync_ctx::get_context::<String>("status").unwrap()
         );
     }
 
     // Outer span exited — context reverted to root
     println!(
         "  After outer exits: status = {:?}",
-        dcontext::get_context::<String>("status")
+        dcontext::sync_ctx::get_context::<String>("status").unwrap()
     );
 }
 
@@ -106,14 +106,14 @@ fn demo_field_mapping() {
         )
         .entered();
 
-        let rid: RequestId = dcontext::get_context("request_id");
-        let uid: UserId = dcontext::get_context("user_id");
+        let rid: RequestId = dcontext::sync_ctx::get_context("request_id").unwrap();
+        let uid: UserId = dcontext::sync_ctx::get_context("user_id").unwrap();
         println!("  request_id = {:?}", rid.0);
         println!("  user_id = {:?}", uid.0);
     }
 
     // After span — values are reverted to defaults
-    let rid: RequestId = dcontext::get_context("request_id");
+    let rid = dcontext::sync_ctx::get_context::<RequestId>("request_id").unwrap_or_default();
     println!("  After span: request_id = {:?} (empty = reverted)", rid.0);
 }
 
@@ -123,7 +123,7 @@ fn demo_span_info() {
 
     {
         let _span = tracing::warn_span!("validate_order").entered();
-        let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
+        let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap();
         println!("  name   = {:?}", info.name);
         println!("  target = {:?}", info.target);
         println!("  level  = {:?}", info.level);
@@ -135,8 +135,8 @@ async fn demo_async() {
     println!("\n=== Async with Instrument ===\n");
 
     async fn process_order(order_id: &str) {
-        let rid: RequestId = dcontext::force_thread_local(|| dcontext::get_context("request_id"));
-        let info: SpanInfo = dcontext::force_thread_local(|| dcontext::get_context(SPAN_INFO_KEY));
+        let rid: RequestId = dcontext::sync_ctx::get_context("request_id").unwrap();
+        let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap();
         println!(
             "  Processing order {} — request={}, span={}",
             order_id, rid.0, info.name

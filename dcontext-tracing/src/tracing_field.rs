@@ -38,6 +38,7 @@ use std::sync::{Arc, OnceLock};
 ///     )
 /// });
 /// ```
+#[allow(clippy::type_complexity)]
 pub struct TracingField {
     /// Field name for log output and span recording.
     log_name: &'static str,
@@ -58,6 +59,7 @@ pub struct TracingField {
 /// Each closure takes a field value and returns `Some(Arc<dyn ContextValue>)`
 /// if conversion succeeds. The layer is responsible for storing the result
 /// in the appropriate context store (sync or async).
+#[allow(clippy::type_complexity)]
 pub(crate) struct ExtractFns {
     pub from_str:
         Option<Arc<dyn Fn(&str) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
@@ -140,6 +142,7 @@ impl TracingField {
 // ── TracingFieldBuilder ────────────────────────────────────────
 
 /// Builder for [`TracingField`] metadata.
+#[allow(clippy::type_complexity)]
 pub struct TracingFieldBuilder {
     log_name: &'static str,
     span_field: Option<&'static str>,
@@ -156,6 +159,7 @@ pub struct TracingFieldBuilder {
     span_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
 }
 
+#[allow(clippy::type_complexity)]
 impl TracingFieldBuilder {
     /// Set the span field name to extract from.
     ///
@@ -379,6 +383,7 @@ impl TracingFieldBuilder {
 // ── Discovery cache ────────────────────────────────────────────
 
 /// Cached info about a single TracingField entry, resolved from registry.
+#[allow(clippy::type_complexity)]
 pub(crate) struct TracingFieldEntry {
     pub context_key: &'static str,
     /// Span field name for extraction (may differ from context_key).

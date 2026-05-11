@@ -26,13 +26,11 @@
 >   explicit async→sync context transfer.
 >
 > - **No shared mutable state** — the two stores never interfere with each other.
->   `force_thread_local` and `with_current_cell` compatibility shims are
->   preserved for backward compatibility. `force_thread_local` is now a
->   deprecated no-op, and the old dispatch logic is no longer needed by the
->   new modules.
+>   The old root-level dispatching APIs were removed; callers now choose
+>   `sync_ctx` or `async_ctx` explicitly.
 >
-> The original `DcontextLayer` and all existing APIs remain available for
-> backward compatibility but may be deprecated in future versions.
+> - **Compatibility surface** — registration types, snapshots, spawn helpers,
+>   and tracing-layer aliases remain at the crate root where documented.
 
 > **v0.4.0 Architecture Change — Cell-based Contention-free Storage**
 >
@@ -80,7 +78,8 @@ In distributed applications, contextual information (request IDs, auth tokens, f
 | **Cross-process** | No built-in mechanism to serialize and restore context across RPC / message boundaries. |
 | **Scoped rollback** | Neither `thread_local!` nor `task_local!` support a scope tree where leaving a scope reverts changes. |
 
-`dcontext` fills all four gaps with a single unified API.
+`dcontext` fills all four gaps with a single propagation toolkit built around
+explicit sync and async context modules.
 
 ### Design Principles
 
@@ -147,8 +146,10 @@ Before a context key can be used, its type must be **registered**. Registration 
 Registration is typically done once at startup:
 
 ```rust
-dcontext::register::<TraceContext>("trace_context");
-dcontext::register::<FeatureFlags>("feature_flags");
+let mut builder = dcontext::RegistryBuilder::new();
+builder.register::<TraceContext>("trace_context");
+builder.register::<FeatureFlags>("feature_flags");
+dcontext::initialize(builder);
 ```
 
 The registry is a global `RwLock<HashMap<&'static str, Registration>>`.
@@ -273,524 +274,153 @@ fn leave_scope_checked(scope_id: u64, expected_depth: usize) {
 > **Drop-order safety (C2):** Out-of-order drops panic with a clear message,
 > preventing silent stack corruption.
 
-### 3.4 Closure-Based Scope API
+### 3.4 Explicit Scope Pattern
 
-To enforce correct nesting at compile time (avoiding the `let _ = enter_scope()`
-footgun), the library provides a closure-based API as the **recommended primary**:
+The old root-level `dcontext::scope(|| ...)` helper is gone. The recommended
+pattern is now an explicit guard from `sync_ctx` or `async_ctx`:
 
 ```rust
-/// Execute `f` in a new scope. All context changes in `f` are
-/// reverted when it returns. This is the recommended scope API.
-pub fn scope<R>(f: impl FnOnce() -> R) -> R {
-    let _guard = enter_scope();
-    f()
-}
-
-/// Async version: execute a future in a new scope.
-pub async fn scope_async<F, R>(f: F) -> R
-where
-    F: Future<Output = R>,
 {
-    let _guard = enter_scope();
-    f.await
+    let _guard = dcontext::sync_ctx::enter_scope();
+    dcontext::sync_ctx::set_context("trace_id", TraceId::new());
+    do_work();
 }
+
+// Guard-based APIs remain available when a named scope or a longer-lived scope
+// is needed:
+let _guard = dcontext::sync_ctx::enter_scope();
 ```
-
-Usage:
-
-```rust
-dcontext::scope(|| {
-    dcontext::set_context("trace_id", TraceId::new());
-    do_work(); // sees the new trace_id
-}); // scope automatically reverts
-
-// Guard-based API remains available for cases where closure is awkward:
-let _guard = dcontext::enter_scope();
-```
-
----
 
 ## 4. Public API
 
-### 4.1 Core Functions
+The dual-context redesign splits runtime operations into two explicit modules:
 
-#### Fallible (primary) API
+- `dcontext::sync_ctx` for thread-local state
+- `dcontext::async_ctx` for Tokio task-local state
+
+Registration, snapshots, configuration, and inheritance helpers remain at the
+crate root.
+
+### 4.1 Registration and Initialization
 
 ```rust
-/// Register a context type. Returns Err if the key is already registered
-/// with a different type. Idempotent if called with the same key+type.
-pub fn try_register<T>(key: &'static str) -> Result<(), ContextError>
-where
-    T: Clone + Default + Send + Sync + Serialize + DeserializeOwned + 'static;
+use dcontext::{initialize, RegistryBuilder};
 
-/// Get a context value. Returns Ok(Some(T)) if set, Ok(None) if
-/// registered but not set, Err if not registered.
-pub fn try_get_context<T>(key: &'static str) -> Result<Option<T>, ContextError>
-where
-    T: Clone + Default + Send + Sync + 'static;
-
-/// Set a context value in the current scope.
-/// Returns Err on type mismatch or if key is not registered.
-pub fn try_set_context<T>(key: &'static str, value: T) -> Result<(), ContextError>
-where
-    T: Clone + Send + Sync + 'static;
+let mut builder = RegistryBuilder::new();
+builder.register::<RequestId>("request_id");
+builder.register::<UserId>("user_id");
+initialize(builder);
 ```
 
-#### Panicking (convenience) API
-
-These are thin wrappers around the `try_` variants. They are intended for
-application startup and cases where a missing registration is a programming
-error, not a recoverable condition.
+### 4.2 Sync Context API
 
 ```rust
-/// Register a context type. Panics if already registered with a different type.
-pub fn register<T>(key: &'static str)
-where
-    T: Clone + Default + Send + Sync + Serialize + DeserializeOwned + 'static;
+// Scope management
+pub fn dcontext::sync_ctx::enter_scope() -> ScopeGuard;
+pub fn dcontext::sync_ctx::enter_named_scope(name: impl Into<String>) -> ScopeGuard;
+pub fn dcontext::sync_ctx::scope_chain() -> Vec<String>;
 
-/// Enter a new scope. Returns a guard that reverts the scope on drop.
-pub fn enter_scope() -> ScopeGuard;
+// Value access
+pub fn dcontext::sync_ctx::set_context<T>(key: &'static str, value: T);
+pub fn dcontext::sync_ctx::get_context<T>(key: &str) -> Option<T>;
+pub fn dcontext::sync_ctx::update_context<T>(key: &'static str, f: impl FnOnce(T) -> T);
 
-/// Get a context value. Returns T::default() if not set.
-/// Panics if the key is not registered.
-pub fn get_context<T>(key: &'static str) -> T
-where
-    T: Clone + Default + Send + Sync + 'static;
+// Propagation
+pub fn dcontext::sync_ctx::snapshot() -> ContextSnapshot;
+pub fn dcontext::sync_ctx::attach(snapshot: ContextSnapshot) -> ScopeGuard;
+pub fn dcontext::sync_ctx::restore(snapshot: ContextSnapshot);
 
-/// Set a context value in the current scope.
-/// Panics if the key is not registered or if T doesn't match.
-pub fn set_context<T>(key: &'static str, value: T)
-where
-    T: Clone + Send + Sync + 'static;
+// Cross-process
+pub fn dcontext::sync_ctx::serialize_context() -> Result<Vec<u8>, ContextError>;
+pub fn dcontext::sync_ctx::deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError>;
 ```
 
-#### Local-Only Registration
-
-For context entries that should propagate within the process (via `snapshot`/`attach`)
-but must **not** be serialized for cross-process propagation:
+### 4.3 Async Context API
 
 ```rust
-/// Register a local-only context type. No Serialize/DeserializeOwned required.
-pub fn register_local<T>(key: &'static str)
-where
-    T: Clone + Default + Send + Sync + 'static;
-
-/// Set a local-only context value. No Serialize required.
-pub fn set_context_local<T>(key: &'static str, value: T)
-where
-    T: Clone + Send + Sync + 'static;
+pub fn dcontext::async_ctx::set_context<T>(key: &'static str, value: T);
+pub fn dcontext::async_ctx::get_context<T>(key: &str) -> Option<T>;
+pub fn dcontext::async_ctx::update_context<T>(key: &'static str, f: impl FnOnce(T) -> T);
+pub fn dcontext::async_ctx::scope_chain() -> Vec<String>;
+pub fn dcontext::async_ctx::snapshot() -> ContextSnapshot;
+pub fn dcontext::async_ctx::attach(snapshot: ContextSnapshot) -> ScopeGuard;
+pub fn dcontext::async_ctx::serialize_context() -> Result<Vec<u8>, ContextError>;
+pub fn dcontext::async_ctx::deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError>;
+pub async fn dcontext::async_ctx::with_context<F>(snapshot: ContextSnapshot, fut: F) -> F::Output;
+pub async fn dcontext::async_ctx::scope<F>(name: &str, fut: F) -> F::Output;
 ```
 
-Fallible variants: `try_register_local`, `try_set_context_local`.
-
-#### Extensible Per-Key Metadata
-
-Arbitrary typed metadata can be attached to registrations. Each metadata type
-is stored independently (keyed by `TypeId`), enabling multiple extension crates
-to annotate the same key:
+### 4.4 Root-Level Helpers That Remain
 
 ```rust
-/// Register with a closure that configures additional options including metadata.
-pub fn register_with<T>(key: &'static str, f: impl FnOnce(RegistrationOptions) -> RegistrationOptions)
-where
-    T: Clone + Default + Send + Sync + Serialize + DeserializeOwned + 'static;
-
-impl RegistrationOptions {
-    /// Attach typed metadata to this registration. One value per type per key.
-    pub fn with_metadata<M: Send + Sync + 'static>(self, value: M) -> Self;
-}
-
-/// Query metadata for a key. Returns None if the key is not registered
-/// or has no metadata of type M. Uses a callback to avoid holding the
-/// registry lock across user code.
-pub fn with_metadata<M: 'static, R>(
-    key: &str,
-    f: impl FnOnce(&M) -> R,
-) -> Option<R>;
-
-/// Iterate all keys that have metadata of type M.
-pub fn keys_with_metadata<M: 'static, R>(
-    f: impl Fn(&str, &M) -> R,
-) -> Vec<R>;
-
-/// Access the current value of a context key as `&dyn Any`.
-/// Useful for extension crates that need type-erased value access.
-pub fn with_context_value<R>(
-    key: &str,
-    f: impl FnOnce(&dyn std::any::Any) -> R,
-) -> Option<R>;
+pub struct ContextSnapshot;
+pub struct RegistryBuilder;
+pub fn initialize(builder: RegistryBuilder);
+pub fn spawn_with_context(name: &str, f: impl FnOnce() + Send + 'static) -> ...;
+pub fn spawn_with_context_async<F>(future: F) -> ...;
+pub fn wrap_with_context<F, T>(f: F) -> ...;
+pub fn wrap_with_context_fn<F, T>(f: F) -> ...;
+pub fn register_contexts!(...);
 ```
 
-#### Versioned Registration and Migration
-
-For wire format evolution across rolling upgrades:
+### 4.5 Snapshot / Callback Pattern
 
 ```rust
-/// Register with an explicit key version for wire format.
-pub fn register_versioned<T>(key: &'static str, version: u32)
-where
-    T: Clone + Default + Send + Sync + Serialize + DeserializeOwned + 'static;
+let _guard = dcontext::sync_ctx::enter_scope();
+dcontext::sync_ctx::set_context("request_id", RequestId("req-999".into()));
 
-/// Register a migration from an old wire version to the current type.
-/// When bytes arrive with wire_version == old_version, they are deserialized
-/// as TOld and converted to TCurrent via the migrate function.
-pub fn register_migration<TOld, TCurrent>(
-    key: &'static str,
-    old_version: u32,
-    migrate: fn(TOld) -> TCurrent,
-)
-where
-    TOld: Clone + Send + Sync + Serialize + DeserializeOwned + 'static,
-    TCurrent: Clone + Send + Sync + Serialize + DeserializeOwned + 'static;
-```
-
-Fallible variants: `try_register_versioned`, `try_register_migration`.
-
-### 4.2 Serialization / Deserialization
-
-For cross-process propagation, the library serializes **all** serializable context values in the current effective context (merged view of all scopes). Local-only entries are silently excluded:
-
-```rust
-/// Serialize the current context (all scopes merged) into bytes.
-/// Only includes keys that have been explicitly set (not defaults).
-pub fn serialize_context() -> Result<Vec<u8>, ContextError>;
-
-/// Serialize the current context into a base64-encoded string
-/// (convenient for HTTP headers, gRPC metadata).
-pub fn serialize_context_string() -> Result<String, ContextError>;
-
-/// Restore context from bytes. Pushes a new scope containing
-/// the deserialized values.
-pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError>;
-
-/// Restore context from a base64-encoded string.
-pub fn deserialize_context_string(encoded: &str) -> Result<ScopeGuard, ContextError>;
-```
-
-### 4.3 Snapshot / Clone
-
-For crossing sync ↔ async boundaries, spawning threads, or passing context
-into third-party callbacks:
-
-```rust
-/// Capture a snapshot of the current effective context.
-/// The snapshot is a self-contained, cheaply cloneable value.
-pub fn snapshot() -> ContextSnapshot;
-
-/// Attach a snapshot, entering a new scope with its values.
-/// Returns a ScopeGuard.
-pub fn attach(snapshot: ContextSnapshot) -> ScopeGuard;
-```
-
-`ContextSnapshot` is `Clone + Send + Sync`, making it safe to move across threads and tasks.
-
-#### 4.3.1 Third-Party Callback Pattern
-
-When the application passes a callback to a third-party library and that
-library spawns a thread (or otherwise invokes the callback on an unknown
-context), the application has **no control over thread creation** and cannot
-use `spawn_with_context`. In this case, the application must explicitly
-capture and restore context:
-
-```rust
-// Application registers context as usual.
-register::<RequestId>("request_id");
-
-let _guard = enter_scope();
-set_context("request_id", RequestId("req-999".into()));
-
-// Capture before handing off to third-party code.
-let ctx = dcontext::snapshot();
+let ctx = dcontext::sync_ctx::snapshot();
 
 third_party::do_work_async(move || {
-    // We are now on an unknown thread spawned by the library.
-    // Explicitly restore context.
-    let _guard = dcontext::attach(ctx);
-
-    // Context is available for the duration of this callback.
-    let rid: RequestId = get_context("request_id");
-    println!("Callback sees: {}", rid.0); // "req-999"
-});
-```
-
-To reduce boilerplate, the library provides a **callback wrapper** that
-captures the current context and restores it automatically when invoked:
-
-```rust
-/// Wrap a closure so that the current context is automatically
-/// captured now and restored when the closure is later called
-/// (potentially on a different thread).
-pub fn wrap_with_context<F, T>(f: F) -> impl FnOnce() -> T + Send
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static;
-
-/// Same as above but returns an `Fn` (for callbacks that may be
-/// invoked multiple times).
-pub fn wrap_with_context_fn<F, T>(f: F) -> impl Fn() -> T + Send + Sync
-where
-    F: Fn() -> T + Send + Sync + 'static,
-    T: Send + 'static;
-```
-
-Usage with a third-party library:
-
-```rust
-let ctx_callback = dcontext::wrap_with_context(move || {
-    // Context is automatically restored here.
-    let rid: RequestId = get_context("request_id");
+    let _guard = dcontext::sync_ctx::attach(ctx);
+    let rid = dcontext::sync_ctx::get_context::<RequestId>("request_id").unwrap();
     println!("Callback sees: {}", rid.0);
 });
-
-// Hand the wrapped callback to the library — context travels with it.
-third_party::do_work_async(ctx_callback);
 ```
-
-### 4.4 Thread Helpers
-
-```rust
-/// Spawn a std::thread that inherits the current context.
-pub fn spawn_with_context<F, T>(name: &str, f: F) -> std::thread::JoinHandle<T>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static;
-```
-
-### 4.5 Async Helpers (feature-gated)
-
-With the `tokio` feature:
-
-```rust
-/// Spawn a Tokio task that inherits the current context.
-///
-/// Captures a snapshot of the current context (from task-local or
-/// thread-local) and establishes it as a task-local in the spawned task.
-///
-/// # Preconditions
-/// - A Tokio runtime must be active (`tokio::runtime::Handle::current()`).
-/// - If no context is currently set (neither task-local nor thread-local),
-///   the spawned task starts with an empty context (not an error).
-///
-/// # Panics
-/// Panics if called outside a Tokio runtime.
-pub fn spawn_with_context_async<F>(future: F) -> tokio::task::JoinHandle<F::Output>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static;
-
-/// Run an async block with the given snapshot attached as a task-local.
-/// Useful for bridging sync → async.
-///
-/// This establishes the task-local context for the duration of `f`.
-/// All `get_context` / `set_context` calls within `f` (and any `.await`-ed
-/// sub-futures) will use this task-local context.
-pub async fn with_context<F, T>(snapshot: ContextSnapshot, f: F) -> T
-where
-    F: Future<Output = T>;
-```
-
----
 
 ## 5. Storage Strategy
 
-### 5.1 Thread-Local Storage
+### 5.1 Thread-Local Storage (`sync_ctx`)
 
-The `ContextStack` is stored in a `thread_local!`:
+The sync store lives in a `thread_local!` cell. All `sync_ctx::*` operations are
+resolved directly against that thread-local state.
 
-```rust
-thread_local! {
-    static CONTEXT: RefCell<ContextStack> = RefCell::new(ContextStack::new());
-}
-```
+### 5.2 Task-Local Storage (`async_ctx`)
 
-All `get_context` / `set_context` / `enter_scope` calls operate on this thread-local stack. This means:
-
-- **No global locks** on read/write (fast path).
-- Each thread has its own independent context stack.
-- Async tasks on the same thread share the thread-local (see §5.2).
-
-### 5.2 Async Runtime Integration
-
-Thread-local storage is **not sufficient** for async code. In a multi-threaded
-runtime (e.g., Tokio's work-stealing scheduler), a task may be suspended at any
-`.await` point and resumed on a **different** OS thread. A thread-local value
-set before an `.await` may belong to a completely unrelated task after resumption.
-
-Therefore, async context propagation **must** use the runtime's built-in
-task-local mechanism, which moves with the task across thread migrations:
-
-| Runtime | Mechanism | Guarantee |
-|---------|-----------|-----------|
-| **Tokio** | `tokio::task_local!` | Value follows the task across `.await` points and thread migrations |
-
-> **[Removed in v0.8.0] Runtime-agnostic async (I4):** ~~For runtimes without
-> native task-local support (async-std, smol, etc.), the library provides
-> `ContextFuture` — a poll-wrapper that saves/restores thread-local context on
-> each `poll()`.~~ The library is now Tokio-only. Async context propagation uses
-> Tokio task-local storage via `async_ctx`.
-
-#### `ContextFuture` poll-wrapper ~~(feature: `context-future`)~~ [Removed in v0.8.0]
-
-`ContextFuture`, `with_context_future`, and the `context-future` cargo feature
-were removed in v0.8.0 when `dcontext` standardized on Tokio task-local
-storage.
-
-Historically, this section described a poll-wrapper design that used
-`force_thread_local` and `FORCE_THREAD_LOCAL_DEPTH` to emulate task-local
-behavior on non-Tokio executors. That design is no longer part of the library.
-
-Current async propagation uses `async_ctx` helpers such as `with_context` and
-`spawn_with_context_async`, backed by `tokio::task_local!`.
-
-#### Primary storage for async: `tokio::task_local!`
-
-When the `tokio` feature is enabled, the library declares a task-local as the
-**primary** storage backend for async code:
+The async store lives in Tokio `task_local!` storage. `async_ctx::with_context`
+establishes the task-local store for a future, and `async_ctx::scope` pushes a
+scope for the duration of an async operation.
 
 ```rust
 tokio::task_local! {
-    static TASK_CONTEXT: RefCell<ContextStack>;
+    static TASK_CONTEXT: Cell<Option<ContextStore>>;
 }
 ```
 
-All `get_context` / `set_context` / `enter_scope` calls inside an async task
-operate on this task-local stack. Because Tokio guarantees the task-local
-travels with the task, context is preserved across `.await` points regardless
-of which OS thread the task resumes on.
+### 5.3 Explicit Separation Instead of Dispatch
 
-#### Establishing the task-local scope
+Pre-v0.8 designs routed `get_context`/`set_context` through runtime detection.
+That dispatch layer is gone. Callers now choose the storage backend directly:
 
-A task-local must be explicitly established before it can be read. The library
-provides `with_context` to set up the task-local for a given future:
+- `sync_ctx::*` for synchronous code and blocking threads
+- `async_ctx::*` for Tokio tasks
 
-```rust
-pub async fn with_context<F, T>(snapshot: ContextSnapshot, f: F) -> T
-where
-    F: Future<Output = T>,
-{
-    let stack = ContextStack::from_snapshot(snapshot);
-    TASK_CONTEXT.scope(RefCell::new(stack), f).await
-}
-```
-
-`spawn_with_context_async` combines snapshot capture + task-local setup:
-
-```rust
-pub fn spawn_with_context_async<F>(future: F) -> tokio::task::JoinHandle<F::Output>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let snapshot = snapshot(); // capture current context
-    tokio::spawn(with_context(snapshot, future))
-}
-```
-
-#### Sync code called from async (mirroring)
-
-When async code calls into synchronous functions that use `get_context`, the
-task-local is not directly accessible (sync code cannot `.await`). The library
-handles this with a **lazy mirror** protocol:
-
-1. **`with_context` establishes both storages:** When `with_context` sets up
-   the task-local, it also installs a **mirror flag** in the thread-local
-   indicating "a task-local is active — delegate reads there."
-2. **Sync `get_context` checks the flag:** If the mirror flag is set, it
-   reads from the task-local via `TASK_CONTEXT.try_with()` (which works in
-   sync code — it doesn't require `.await`, only that the task-local was
-   previously established on this thread's current task).
-3. **No bulk copy:** The mirror is **not** a copy of the data. It's a
-   single boolean flag. This makes it O(1) regardless of context size.
-4. **Cleanup:** When `with_context`'s scope ends (the future completes or
-   is dropped), the mirror flag is cleared.
-
-Since `TASK_CONTEXT.try_with()` works from sync code (it accesses the
-task-local that was established by the enclosing `TASK_CONTEXT.scope()` call),
-no actual data mirroring is needed — the sync code reads directly from the
-task-local.
-
-> **Re-entrancy safety:** Multiple sync calls nested within the same async
-> task all read the same task-local. No aliasing occurs because each thread
-> runs only one task at a time (Tokio guarantees sequential polling).
-
-### 5.3 Dual-Storage Dispatch
-
-At runtime, `get_context` / `set_context` check which storage backend is
-active and dispatch accordingly:
-
-1. If a task-local `TASK_CONTEXT` is set (i.e., we are inside a
-   `with_context` scope), use the task-local.
-2. If no task-local is set **and** an async runtime is detected
-   (`tokio::runtime::Handle::try_current().is_ok()`), **panic** with:
-   `"dcontext: get_context/set_context called inside a Tokio runtime without
-   with_context/spawn_with_context_async. Context will not survive .await
-   points. Wrap your task with dcontext::with_context()."`
-3. Otherwise (pure sync, no runtime), fall back to the thread-local `CONTEXT`.
-
-> **Async fallback safety (C1):** The silent fallback to thread-local inside
-> an async runtime is eliminated. The panic makes the misuse immediately
-> visible during development. The old `force_thread_local(|| ...)` escape hatch
-> is retained only as a deprecated no-op compatibility shim; it no longer
-> changes dispatch behavior.
-
-```rust
-fn with_current_stack<R>(f: impl FnOnce(&RefCell<ContextStack>) -> R) -> R {
-    // Try task-local first (async path).
-    match TASK_CONTEXT.try_with(|stack| f(stack)) {
-        Ok(r) => return r,
-        Err(_) => {}
-    }
-
-    // No task-local. Are we inside an async runtime?
-    #[cfg(feature = "tokio")]
-    if tokio::runtime::Handle::try_current().is_ok() {
-        panic!(
-            "dcontext: context accessed inside Tokio runtime without \
-             with_context(). Wrap your task with \
-             dcontext::spawn_with_context_async() or dcontext::with_context()."
-        );
-    }
-
-    // Pure sync path — use thread-local.
-    CONTEXT.with(|stack| f(stack))
-}
-
-/// Deprecated compatibility shim. With the dual-context redesign there is no
-/// dispatch logic to override.
-#[deprecated(note = "No longer needed: sync_ctx always uses thread-local. Will be removed in a future release.")]
-pub fn force_thread_local<R>(f: impl FnOnce() -> R) -> R {
-    f()
-}
-```
+This removes ambiguity, avoids sync/async depth mismatches, and makes scope
+ownership explicit at every boundary.
 
 ### 5.4 RefCell Borrow Safety
 
-To prevent re-entrancy panics when a value's `Clone` impl calls back into
-the context API (see C3), all read operations follow this protocol:
+To prevent re-entrancy panics when a value's `Clone` impl calls back into the
+context API, reads clone the type-erased value while the store is borrowed,
+release the borrow, and only then downcast/clone the concrete `T`.
 
 ```rust
-fn get_context_internal<T: Clone + 'static>(type_id: TypeId) -> Option<T> {
-    with_current_stack(|cell| {
-        // Step 1: Borrow, clone the trait object (cheap pointer copy),
-        //         and release the borrow.
-        let boxed_clone: Box<dyn ContextValue> = {
-            let stack = cell.borrow();
-            match stack.lookup(type_id) {
-                Some(val) => val.clone_boxed(), // clone_boxed is a shallow clone
-                None => return None,
-            }
-            // RefCell borrow dropped here
-        };
-
-        // Step 2: Downcast and clone the inner T (user code runs here,
-        //         RefCell is NOT borrowed, so re-entrant calls are safe).
-        let any_ref = boxed_clone.as_any();
-        Some(any_ref.downcast_ref::<T>().expect("type mismatch").clone())
-    })
+fn get_context_internal<T: Clone + 'static>(...) -> Option<T> {
+    // 1. Borrow store and clone Arc/boxed value.
+    // 2. Release borrow.
+    // 3. Downcast and clone T outside the borrow window.
 }
 ```
-
----
 
 ## 6. Serialization Wire Format
 
@@ -887,27 +517,23 @@ pub enum ContextError {
 ### 8.1 Registration Macro
 
 ```rust
-/// Register multiple context types at once.
-dcontext::register_contexts! {
-    "trace_context" => TraceContext,
-    "feature_flags" => FeatureFlags,
-    "auth_info"     => AuthInfo,
-}
+register_contexts!(builder, {
+    "trace_id" => TraceId,
+    "flags" => Flags,
+});
 ```
 
-Expands to individual `dcontext::register::<T>(key)` calls.
+Expands to individual registration calls on the supplied `RegistryBuilder`.
 
-### 8.2 Scoped Context Macro
+### 8.2 Scoped Context Pattern
+
+`with_scope!` was removed. The replacement is an explicit guard:
 
 ```rust
-/// Enter a scope, set values, execute a block, and auto-revert.
-dcontext::with_scope! {
-    "trace_id" => TraceId::new(),
-    "flags" => Flags { debug: true },
-    => {
-        do_work();
-    }
-}
+let _guard = dcontext::sync_ctx::enter_scope();
+dcontext::sync_ctx::set_context("trace_id", TraceId::new());
+dcontext::sync_ctx::set_context("flags", Flags { debug: true });
+do_work();
 ```
 
 ---
@@ -916,14 +542,12 @@ dcontext::with_scope! {
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `tokio` | **yes** | Enables Tokio task-local storage, `scope_async`, and async spawn helpers. |
-| `base64` | **yes** | Enables `serialize_context_string` / `deserialize_context_string`. |
+| `tokio` | **yes** | Enables `async_ctx` and Tokio task-local propagation. |
+| `base64` | **yes** | Enables base64-oriented serialization helpers for text transports. |
 | `context-key` | **yes** | Enables `ContextKey<T>` typed key wrapper for compile-time safe access. |
 
 > **[Removed in v0.8.0] `context-future`:** ~~A non-default feature for
-> `ContextFuture` on non-Tokio executors.~~ This feature was removed when the
-> library became Tokio-only. Async propagation now goes through `async_ctx`
-> and Tokio task-local storage.
+> runtime-agnostic async propagation.~~ The library is now Tokio-only.
 
 ---
 
@@ -944,456 +568,151 @@ dcontext/                     ← workspace root
 │       ├── feature_flags.rs
 │       ├── cross_process.rs
 │       ├── worker_pool.rs
-│       ├── typed_keys.rs     ← ContextKey<T> usage
-│       ├── macros.rs         ← register_contexts!, with_scope!
-│       ├── async_scopes.rs   ← scope_async
-│       ├── size_limits.rs    ← set_max_context_size
-│       ├── log_enrichment.rs ← TracingField + WithContextFields usage
+│       ├── typed_keys.rs
+│       ├── macros.rs         ← register_contexts!
+│       ├── async_scopes.rs   ← async_ctx::scope
+│       ├── dual_sync_ctx.rs
+│       ├── dual_async_ctx.rs
+│       ├── dual_bridging.rs
 │       └── ...
 ├── dcontext/                 ← core crate
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs            ← public API re-exports
+│       ├── sync_ctx.rs       ← explicit thread-local context API
+│       ├── async_ctx.rs      ← explicit task-local context API
 │       ├── registry.rs       ← type registration + extensible metadata
-│       ├── scope.rs          ← ScopeNode, ScopeGarbage, ScopeGuard
-│       ├── storage.rs        ← Cell<Option<ContextStore>>, thread/task-local backends
+│       ├── scope.rs          ← ScopeGuard and scope cleanup
 │       ├── snapshot.rs       ← ContextSnapshot capture/attach
+│       ├── store.rs          ← ContextStore implementation
 │       ├── wire.rs           ← WireContext serialization
 │       ├── error.rs          ← ContextError
-│       ├── config.rs         ← set_max_context_size, size limit enforcement
+│       ├── config.rs         ← size / scope-chain limits
 │       ├── context_key.rs    ← ContextKey<T> (feature: context-key)
-│       ├── macros.rs         ← register_contexts!, with_scope!
-│       ├── helpers.rs        ← spawn_with_context, async helpers
+│       ├── macros.rs         ← register_contexts!
+│       ├── inheritance.rs    ← spawn / inheritance helpers
 │       └── value.rs          ← ContextValue trait + blanket impl
 ├── dcontext-tracing/         ← tracing integration crate
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs            ← re-exports
-│       ├── layer.rs          ← DcontextLayer + DcontextLayerBuilder
-│       ├── field_mapping.rs  ← ExtractedFields, field visitor
-│       ├── guard_stack.rs    ← per-span ScopeGuard management
-│       ├── span_info.rs      ← SpanInfo metadata
-│       └── tracing_field.rs  ← TracingField, WithContextFields, collect_log_fields
 └── dcontext-dactor/          ← dactor actor integration crate
-    ├── Cargo.toml
-    └── src/
-        └── lib.rs            ← inbound/outbound interceptors
 ```
-
----
 
 ## 11. Usage Examples
 
 ### 11.1 Basic Sync Usage
 
 ```rust
-use dcontext::{register, enter_scope, get_context, set_context};
-use serde::{Serialize, Deserialize};
+use dcontext::{initialize, sync_ctx, RegistryBuilder};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct RequestId(String);
 
 fn main() {
-    register::<RequestId>("request_id");
+    let mut builder = RegistryBuilder::new();
+    builder.register::<RequestId>("request_id");
+    initialize(builder);
 
     {
-        let _guard = enter_scope();
-        set_context("request_id", RequestId("req-123".into()));
-
-        handle_request(); // sees "req-123"
+        let _guard = sync_ctx::enter_scope();
+        sync_ctx::set_context("request_id", RequestId("req-123".into()));
+        handle_request();
     }
-    // scope reverted — request_id is back to default
 }
 
 fn handle_request() {
-    let rid: RequestId = get_context("request_id");
+    let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
     println!("Handling {}", rid.0);
-
-    {
-        let _guard = enter_scope();
-        set_context("request_id", RequestId("sub-456".into()));
-        do_sub_work(); // sees "sub-456"
-    }
-    // back to "req-123"
 }
 ```
 
 ### 11.2 Cross-Thread Propagation
 
 ```rust
-use dcontext::{register, enter_scope, set_context, get_context, spawn_with_context};
+use dcontext::{spawn_with_context, sync_ctx};
 
-fn main() {
-    register::<RequestId>("request_id");
+let _guard = sync_ctx::enter_scope();
+sync_ctx::set_context("request_id", RequestId("req-789".into()));
 
-    let _guard = enter_scope();
-    set_context("request_id", RequestId("req-789".into()));
+let handle = spawn_with_context("worker", || {
+    let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
+    println!("Worker sees: {}", rid.0);
+})
+.unwrap();
 
-    let handle = spawn_with_context("worker", || {
-        let rid: RequestId = get_context("request_id");
-        println!("Worker sees: {}", rid.0); // "req-789"
-    });
-
-    handle.join().unwrap();
-}
+handle.join().unwrap();
 ```
 
 ### 11.3 Async Task Propagation
 
 ```rust
-use dcontext::{register, enter_scope, set_context, snapshot, spawn_with_context_async};
+use dcontext::{async_ctx, spawn_with_context_async, sync_ctx};
 
-#[tokio::main]
-async fn main() {
-    register::<RequestId>("request_id");
+let snap = {
+    let _guard = sync_ctx::enter_scope();
+    sync_ctx::set_context("request_id", RequestId("req-async".into()));
+    sync_ctx::snapshot()
+};
 
-    let _guard = enter_scope();
-    set_context("request_id", RequestId("req-async".into()));
-
+async_ctx::with_context(snap, async {
     let handle = spawn_with_context_async(async {
-        let rid: RequestId = dcontext::get_context("request_id");
+        let rid = async_ctx::get_context::<RequestId>("request_id").unwrap();
         println!("Async task sees: {}", rid.0);
     });
 
     handle.await.unwrap();
-}
+})
+.await;
 ```
 
 ### 11.4 Cross-Process Propagation
 
 ```rust
-// Sender side (e.g., HTTP client middleware)
-let bytes = dcontext::serialize_context().unwrap();
-request.headers_mut().insert(
-    "x-context",
-    dcontext::serialize_context_string().unwrap().parse().unwrap(),
-);
+let bytes = dcontext::sync_ctx::serialize_context().unwrap();
+request.headers_mut().insert("x-context-bin", bytes.clone().into());
 
-// Receiver side (e.g., HTTP server middleware)
-let encoded = request.headers().get("x-context").unwrap().to_str().unwrap();
-let _guard = dcontext::deserialize_context_string(encoded).unwrap();
-// All registered context values are now available via get_context
+let inbound = request.headers().get("x-context-bin").unwrap();
+let _guard = dcontext::sync_ctx::deserialize_context(inbound.as_bytes()).unwrap();
+// Registered values are now available via dcontext::sync_ctx::get_context(...)
 ```
 
-### 11.5 Integrating with `tracing` — Span-Scoped Context
+### 11.5 Integrating with `tracing`
 
-A common pattern is tying `dcontext` scopes to `tracing` spans so that
-entering a span automatically creates a new context scope, and exiting the
-span reverts it. This is achieved with a custom `tracing` `Layer` that hooks
-into span lifecycle events.
+For synchronous code, install `SyncDcontextLayer` and read values from
+`dcontext::sync_ctx`. For asynchronous services, install `AsyncDcontextLayer`
+and read values from `dcontext::async_ctx` inside the request task.
 
 ```rust
-use dcontext::{register, enter_scope, set_context, get_context, ScopeGuard};
-use serde::{Serialize, Deserialize};
-use tracing::{span, Subscriber, Level};
-use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
-use std::sync::Mutex;
-
-// ── Context types ──────────────────────────────────────────────
-
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
-struct TraceContext {
-    trace_id: String,
-    span_id: String,
-    parent_span_id: Option<String>,
-}
-
-// ── Custom Layer ───────────────────────────────────────────────
-
-/// A tracing Layer that creates a dcontext scope for each span.
-struct DcontextLayer;
-
-/// Per-span storage: holds the ScopeGuard so the scope lives
-/// exactly as long as the span is entered.
-struct SpanContextGuard(Mutex<Option<ScopeGuard>>);
-
-impl<S> Layer<S> for DcontextLayer
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn on_new_span(
-        &self,
-        attrs: &span::Attributes<'_>,
-        id: &span::Id,
-        ctx: Context<'_, S>,
-    ) {
-        // Optionally extract fields from the span to populate context.
-        // Here we just store a placeholder; real code would read
-        // attrs.values() or use a visitor.
-        if let Some(span) = ctx.span(id) {
-            span.extensions_mut()
-                .insert(SpanContextGuard(Mutex::new(None)));
-        }
-    }
-
-    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(id) {
-            let exts = span.extensions();
-            if let Some(guard_holder) = exts.get::<SpanContextGuard>() {
-                // Enter a new dcontext scope tied to this span.
-                let scope_guard = enter_scope();
-
-                // Populate span-specific context values.
-                let parent_trace: TraceContext = get_context("trace_context");
-                set_context("trace_context", TraceContext {
-                    trace_id: if parent_trace.trace_id.is_empty() {
-                        uuid::Uuid::new_v4().to_string()  // root span
-                    } else {
-                        parent_trace.trace_id              // inherit
-                    },
-                    span_id: id.into_u64().to_string(),
-                    parent_span_id: Some(parent_trace.span_id)
-                        .filter(|s| !s.is_empty()),
-                });
-
-                *guard_holder.0.lock().unwrap() = Some(scope_guard);
-            }
-        }
-    }
-
-    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(id) {
-            let exts = span.extensions();
-            if let Some(guard_holder) = exts.get::<SpanContextGuard>() {
-                // Drop the ScopeGuard → reverts context to parent scope.
-                let _ = guard_holder.0.lock().unwrap().take();
-            }
-        }
-    }
-}
-
-// ── Usage ──────────────────────────────────────────────────────
-
-fn main() {
-    // Register context types.
-    register::<TraceContext>("trace_context");
-
-    // Install the subscriber with our layer.
-    tracing_subscriber::registry()
-        .with(DcontextLayer)
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    // Each span now automatically scopes context.
-    let _root = span!(Level::INFO, "handle_request").entered();
-    let tc: TraceContext = get_context("trace_context");
-    println!("root trace_id={}, span_id={}", tc.trace_id, tc.span_id);
-
-    {
-        let _child = span!(Level::INFO, "db_query").entered();
-        let tc: TraceContext = get_context("trace_context");
-        println!(
-            "child trace_id={}, span_id={}, parent={}",
-            tc.trace_id,
-            tc.span_id,
-            tc.parent_span_id.as_deref().unwrap_or("none")
-        );
-        // trace_id is inherited, span_id is new, parent points to root
-    }
-    // Back to root span context — child's changes are reverted.
-    let tc: TraceContext = get_context("trace_context");
-    println!("back to root span_id={}", tc.span_id);
-}
+tracing_subscriber::registry()
+    .with(dcontext_tracing::AsyncDcontextLayer::new())
+    .init();
 ```
 
-**How it works:**
+### 11.6 HTTP Middleware Pattern
 
-1. `DcontextLayer` implements `tracing_subscriber::Layer`.
-2. `on_enter` — called when a span is entered — pushes a new `dcontext` scope
-   and populates it with trace context (inheriting `trace_id`, generating a
-   new `span_id`).
-3. `on_exit` — called when the span is exited — drops the `ScopeGuard`,
-   reverting context to the parent span's values.
-4. The `ScopeGuard` is stored in the span's extensions so its lifetime is
-   tied to the span's enter/exit cycle.
+A typical async server flow is:
 
-This pattern gives you the **best of both worlds**: `tracing`'s structured
-span lifecycle with `dcontext`'s arbitrary scoped context propagation — and
-the context automatically serializes for cross-process propagation via
-`dcontext::serialize_context()`.
-
-### 11.6 Actix-Web Middleware — Request-Scoped Context
-
-This example shows how to use `dcontext` with [actix-web](https://actix.rs/)
-to generate a request ID in middleware and make it available to all handlers
-and downstream service calls via context, without passing it through function
-parameters.
+1. Deserialize incoming wire bytes into a sync snapshot at the edge.
+2. Hand that snapshot to `async_ctx::with_context` for the request future.
+3. Use `async_ctx::scope` or `async_ctx::set_context` inside handlers.
+4. Serialize with `sync_ctx::serialize_context` or another outbound helper when forwarding.
 
 ```rust
-use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse, middleware};
-use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
-use dcontext::{register, get_context, set_context, snapshot, with_context};
-use futures::future::{ok, Ready, LocalBoxFuture};
-use serde::{Serialize, Deserialize};
-use std::task::{Context, Poll};
-use uuid::Uuid;
+let snap = if let Some(bytes) = inbound_header_bytes {
+    let _guard = dcontext::sync_ctx::deserialize_context(bytes).unwrap();
+    dcontext::sync_ctx::snapshot()
+} else {
+    dcontext::ContextSnapshot::default()
+};
 
-// ── Context types ──────────────────────────────────────────────
-
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
-struct RequestContext {
-    request_id: String,
-    user_agent: String,
-    path: String,
-}
-
-// ── Middleware definition ──────────────────────────────────────
-
-/// Middleware that creates a dcontext scope per request and populates
-/// it with a unique request ID and request metadata.
-struct DcontextMiddleware;
-
-impl<S, B> Transform<S, ServiceRequest> for DcontextMiddleware
-where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
-    B: 'static,
-{
-    type Response = ServiceResponse<B>;
-    type Error = actix_web::Error;
-    type Transform = DcontextMiddlewareService<S>;
-    type InitError = ();
-    type Future = Ready<Result<Self::Transform, Self::InitError>>;
-
-    fn new_transform(&self, service: S) -> Self::Future {
-        ok(DcontextMiddlewareService { service })
-    }
-}
-
-struct DcontextMiddlewareService<S> {
-    service: S,
-}
-
-impl<S, B> Service<ServiceRequest> for DcontextMiddlewareService<S>
-where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = actix_web::Error> + 'static,
-    B: 'static,
-{
-    type Response = ServiceResponse<B>;
-    type Error = actix_web::Error;
-    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.service.poll_ready(cx)
-    }
-
-    fn call(&self, req: ServiceRequest) -> Self::Future {
-        // Extract request metadata before passing ownership.
-        let request_id = req
-            .headers()
-            .get("x-request-id")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from)
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-
-        let user_agent = req
-            .headers()
-            .get("user-agent")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("unknown")
-            .to_string();
-
-        let path = req.path().to_string();
-
-        // If the caller sent a serialized context (e.g., from an upstream
-        // service), restore it. Otherwise start fresh.
-        let snap = if let Some(encoded) = req
-            .headers()
-            .get("x-context")
-            .and_then(|v| v.to_str().ok())
-        {
-            // Restore upstream context, then overlay request-specific values.
-            dcontext::snapshot_from_string(encoded).unwrap_or_default()
-        } else {
-            dcontext::snapshot()
-        };
-
-        let fut = self.service.call(req);
-
-        Box::pin(with_context(snap, async move {
-            // Push a request scope on top of any restored upstream context.
-            let _guard = dcontext::enter_scope();
-            set_context("request_context", RequestContext {
-                request_id: request_id.clone(),
-                user_agent,
-                path,
-            });
-
-            let mut res = fut.await?;
-
-            // Echo request ID back in response header.
-            res.headers_mut().insert(
-                actix_web::http::header::HeaderName::from_static("x-request-id"),
-                request_id.parse().unwrap(),
-            );
-
-            Ok(res)
-        }))
-    }
-}
-
-// ── Handlers ───────────────────────────────────────────────────
-
-async fn index() -> HttpResponse {
-    let ctx: RequestContext = get_context("request_context");
-    HttpResponse::Ok().json(serde_json::json!({
-        "message": "hello",
-        "request_id": ctx.request_id,
-    }))
-}
-
-async fn users_list() -> HttpResponse {
-    let ctx: RequestContext = get_context("request_context");
-    tracing::info!(request_id = %ctx.request_id, "listing users");
-
-    // Context is available in any function called from here,
-    // no need to pass request_id as a parameter.
-    let users = fetch_users_from_db().await;
-    HttpResponse::Ok().json(users)
-}
-
-async fn fetch_users_from_db() -> Vec<String> {
-    // Deep in the call stack — request context is still available.
-    let ctx: RequestContext = get_context("request_context");
-    tracing::debug!(request_id = %ctx.request_id, "querying database");
-    vec!["alice".into(), "bob".into()]
-}
-
-// ── Main ───────────────────────────────────────────────────────
-
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    // Register context types at startup.
-    register::<RequestContext>("request_context");
-
-    HttpServer::new(|| {
-        App::new()
-            .wrap(DcontextMiddleware)       // ← context middleware
-            .wrap(middleware::Logger::default())
-            .route("/", web::get().to(index))
-            .route("/users", web::get().to(users_list))
+dcontext::async_ctx::with_context(snap, async move {
+    dcontext::async_ctx::scope("http_request", async {
+        dcontext::async_ctx::set_context("request_id", request_id.clone());
+        handle_request().await;
     })
-    .bind("127.0.0.1:8080")?
-    .run()
-    .await
-}
+    .await;
+})
+.await;
 ```
-
-**How it works:**
-
-1. **`DcontextMiddleware`** wraps each request in a `with_context` future,
-   establishing the task-local context for the request's entire lifetime.
-2. Inside that scope, it pushes a new `dcontext` scope and populates a
-   `RequestContext` with a generated (or forwarded) request ID, the path, and
-   user-agent.
-3. **Handlers** and any functions they call can access the request context
-   via `get_context("request_context")` — no parameter threading needed.
-4. For **service-to-service calls**, the upstream context can be forwarded via
-   the `x-context` header. The middleware restores it and overlays the
-   current request's values on top.
-5. The request ID is echoed back in the `x-request-id` response header for
-   correlation.
-
----
 
 ## 12. Thread Safety Summary
 
