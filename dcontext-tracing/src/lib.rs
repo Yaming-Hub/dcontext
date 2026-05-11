@@ -117,7 +117,6 @@
 
 mod field_mapping;
 pub(crate) mod guard_stack;
-mod layer;
 mod span_info;
 mod tracing_field;
 mod async_layer;
@@ -126,8 +125,11 @@ mod sync_layer;
 #[cfg(test)]
 mod tests;
 
-pub use layer::{DcontextLayer, DcontextLayerBuilder};
-pub use async_layer::AsyncDcontextLayer;
-pub use sync_layer::SyncDcontextLayer;
+pub use async_layer::{AsyncDcontextLayer, AsyncDcontextLayerBuilder};
+pub use sync_layer::{SyncDcontextLayer, SyncDcontextLayerBuilder};
+/// Type alias for backward compatibility — `DcontextLayer` is now `SyncDcontextLayer`.
+pub type DcontextLayer<S> = SyncDcontextLayer<S>;
+/// Type alias for backward compatibility — `DcontextLayerBuilder` is now `SyncDcontextLayerBuilder`.
+pub type DcontextLayerBuilder<S> = SyncDcontextLayerBuilder<S>;
 pub use tracing_field::{TracingField, TracingFieldBuilder, WithContextFields, collect_log_fields};
 pub use span_info::{SpanInfo, SPAN_INFO_KEY};
