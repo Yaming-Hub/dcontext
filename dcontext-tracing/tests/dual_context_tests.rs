@@ -190,8 +190,8 @@ async fn async_and_sync_stores_are_independent() {
 #[tokio::test]
 async fn scope_chain_does_not_leak_on_yield() {
     // Setup: subscriber with AsyncDcontextLayer
-    let subscriber = tracing_subscriber::registry()
-        .with(dcontext_tracing::AsyncDcontextLayer::new());
+    let subscriber =
+        tracing_subscriber::registry().with(dcontext_tracing::AsyncDcontextLayer::new());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let snap = dcontext::ContextSnapshot::empty();
@@ -215,8 +215,8 @@ async fn scope_chain_does_not_leak_on_yield() {
 
 #[tokio::test]
 async fn repeated_yields_do_not_grow_scope_chain() {
-    let subscriber = tracing_subscriber::registry()
-        .with(dcontext_tracing::AsyncDcontextLayer::new());
+    let subscriber =
+        tracing_subscriber::registry().with(dcontext_tracing::AsyncDcontextLayer::new());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let snap = dcontext::ContextSnapshot::empty();
@@ -254,8 +254,8 @@ async fn repeated_yields_do_not_grow_scope_chain() {
 fn sync_layer_manages_thread_local_scopes() {
     dcontext::sync_ctx::clear();
 
-    let subscriber = tracing_subscriber::registry()
-        .with(dcontext_tracing::SyncDcontextLayer::new());
+    let subscriber =
+        tracing_subscriber::registry().with(dcontext_tracing::SyncDcontextLayer::new());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     {

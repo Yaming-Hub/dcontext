@@ -111,7 +111,7 @@ Run any sample with `cargo run --bin <name>`:
 | `async_scopes` | `scope_async` across `.await` points |
 | `cross_process` | Serialization (bytes/base64) |
 | `typed_keys` | `ContextKey<T>` type safety |
-| `macros` | `register_contexts!` & `with_scope!` |
+| `macros` | `register_contexts!` macro |
 | `worker_pool` | Context-aware work dispatch |
 | `feature_flags` | Per-request feature flag overrides |
 | `size_limits` | `set_max_context_size` cap |

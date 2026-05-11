@@ -8,10 +8,10 @@
 //! Usage: `cargo run --bin versioned_registration`
 
 use dcontext::{
-    RegistryBuilder, initialize, set_context, get_context, scope,
-    serialize_context, deserialize_context,
+    deserialize_context, get_context, initialize, scope, serialize_context, set_context,
+    RegistryBuilder,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Version 1 of the trace context — original schema.
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -41,10 +41,13 @@ fn main() {
     println!("1. Same version (v2 → v2): success");
     {
         // Sender registers v2 and serializes.
-        set_context("trace_ctx_v2_same", TraceContextV2 {
-            trace_id: "tid-001".into(),
-            span_id: "span-42".into(),
-        });
+        set_context(
+            "trace_ctx_v2_same",
+            TraceContextV2 {
+                trace_id: "tid-001".into(),
+                span_id: "span-42".into(),
+            },
+        );
         let bytes = serialize_context().unwrap();
 
         // Receiver also has v2 registered — deserialize succeeds.
@@ -64,26 +67,38 @@ fn main() {
 
     // Show the version is embedded in the wire format.
     {
-        set_context("trace_ctx_v1_demo", TraceContextV1 {
-            trace_id: "tid-v1".into(),
-        });
+        set_context(
+            "trace_ctx_v1_demo",
+            TraceContextV1 {
+                trace_id: "tid-v1".into(),
+            },
+        );
 
-        set_context("trace_ctx_v2_demo", TraceContextV2 {
-            trace_id: "tid-v2".into(),
-            span_id: "span-v2".into(),
-        });
+        set_context(
+            "trace_ctx_v2_demo",
+            TraceContextV2 {
+                trace_id: "tid-v2".into(),
+                span_id: "span-v2".into(),
+            },
+        );
 
         let bytes = serialize_context().unwrap();
-        println!("   Serialized both v1 and v2 keys into {} bytes", bytes.len());
+        println!(
+            "   Serialized both v1 and v2 keys into {} bytes",
+            bytes.len()
+        );
         println!("   Each WireEntry includes the key_version for mismatch detection.");
     }
 
     // --- Scenario 3: Unknown key on receiver ---
     println!("\n3. Unknown key on receiver: silently skipped");
     {
-        set_context("trace_ctx_unknown", TraceContextV1 {
-            trace_id: "tid-003".into(),
-        });
+        set_context(
+            "trace_ctx_unknown",
+            TraceContextV1 {
+                trace_id: "tid-003".into(),
+            },
+        );
         let bytes = serialize_context().unwrap();
 
         // Receiver doesn't have "trace_ctx_unknown" registered at all.

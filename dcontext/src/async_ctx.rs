@@ -97,9 +97,9 @@ where
     T: Clone + Send + Sync + 'static,
 {
     try_apply(|store| {
-        store.get_value(key).and_then(|arc| {
-            arc.as_any().downcast_ref::<T>().cloned()
-        })
+        store
+            .get_value(key)
+            .and_then(|arc| arc.as_any().downcast_ref::<T>().cloned())
     })
     .flatten()
 }
@@ -146,10 +146,7 @@ pub fn get_raw_value(key: &str) -> Option<Arc<dyn ContextValue>> {
 /// Access the current context value for a key as `&dyn Any` via callback.
 ///
 /// Returns `None` if the key has no value or not in an async task.
-pub fn with_context_value<R>(
-    key: &str,
-    f: impl FnOnce(&dyn std::any::Any) -> R,
-) -> Option<R> {
+pub fn with_context_value<R>(key: &str, f: impl FnOnce(&dyn std::any::Any) -> R) -> Option<R> {
     get_raw_value(key).map(|arc_val| f(arc_val.as_any()))
 }
 
@@ -169,6 +166,38 @@ pub fn snapshot() -> ContextSnapshot {
         }
     })
     .unwrap_or_default()
+}
+
+/// Attach a snapshot to the task-local context by pushing a new scope
+/// with its values. Returns a [`ScopeGuard`] that pops the scope on drop.
+/// Returns a no-op guard if not in an async task.
+pub fn attach(snap: ContextSnapshot) -> ScopeGuard {
+    let guard = push_scope("");
+    if !snap.scope_chain.is_empty() {
+        set_remote_chain(snap.scope_chain);
+    }
+    for (key, val) in snap.values.iter() {
+        set_raw_value(key, Arc::clone(val));
+    }
+    guard
+}
+
+/// Serialize the current task-local context into bytes.
+pub fn serialize_context() -> Result<Vec<u8>, crate::error::ContextError> {
+    let values = snapshot()
+        .values
+        .iter()
+        .map(|(k, v)| (*k, Arc::clone(v)))
+        .collect();
+    let chain = scope_chain();
+    crate::wire::serialize_from(values, chain)
+}
+
+/// Restore context from bytes into the task-local store.
+/// Pushes a new scope with deserialized values and activates a scope
+/// barrier that hides parent scopes.
+pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, crate::error::ContextError> {
+    crate::wire::deserialize_into(bytes, true)
 }
 
 /// Run a future with a new task-local context initialized from a snapshot.

@@ -41,9 +41,9 @@ mod tests {
 
     #[test]
     fn push_pop_single() {
-        let _guard = dcontext::enter_scope();
+        let _guard = dcontext::sync_ctx::enter_scope();
         let id = span::Id::from_u64(1);
-        let scope_guard = dcontext::enter_scope();
+        let scope_guard = dcontext::sync_ctx::enter_scope();
         push_guard(&id, scope_guard);
 
         // Verify stack has one entry
@@ -55,12 +55,12 @@ mod tests {
 
     #[test]
     fn push_pop_nested() {
-        let _guard = dcontext::enter_scope();
+        let _guard = dcontext::sync_ctx::enter_scope();
         let id1 = span::Id::from_u64(1);
         let id2 = span::Id::from_u64(2);
 
-        push_guard(&id1, dcontext::enter_scope());
-        push_guard(&id2, dcontext::enter_scope());
+        push_guard(&id1, dcontext::sync_ctx::enter_scope());
+        push_guard(&id2, dcontext::sync_ctx::enter_scope());
 
         SCOPE_GUARDS.with(|s| assert_eq!(s.borrow().len(), 2));
 

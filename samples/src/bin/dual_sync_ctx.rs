@@ -51,7 +51,10 @@ fn main() {
     // outer scope reverted
     let chain = sync_ctx::scope_chain();
     let bs: Option<u32> = sync_ctx::get_context("batch_size");
-    println!("  After outer drop: chain = {:?}, batch_size = {:?}", chain, bs);
+    println!(
+        "  After outer drop: chain = {:?}, batch_size = {:?}",
+        chain, bs
+    );
 
     // ── Cross-thread with sync_ctx ────────────────────────────
     println!("\n--- Cross-thread ---");
@@ -60,7 +63,10 @@ fn main() {
     let handle = std::thread::spawn(|| {
         // Each thread has its own thread-local — starts empty
         let val: Option<String> = sync_ctx::get_context("parent_value");
-        println!("  [child thread] parent_value = {:?} (None — independent store)", val);
+        println!(
+            "  [child thread] parent_value = {:?} (None — independent store)",
+            val
+        );
 
         // Set own values
         sync_ctx::set_context("child_value", "from child".to_string());

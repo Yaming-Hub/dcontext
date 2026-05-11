@@ -19,9 +19,9 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use crate::async_ctx::{self, TASK_CONTEXT};
-use crate::sync_ctx;
-use crate::store::ContextStore;
 use crate::snapshot::ContextSnapshot;
+use crate::store::ContextStore;
+use crate::sync_ctx;
 
 /// Controls how context is captured when crossing task/thread boundaries.
 ///
@@ -129,23 +129,15 @@ where
 
 fn capture_async(mode: ContextInheritance) -> ContextStore {
     match mode {
-        ContextInheritance::Fork => {
-            async_ctx::fork().unwrap_or_else(ContextStore::new)
-        }
-        ContextInheritance::Snapshot => {
-            snapshot_to_store(async_ctx::snapshot())
-        }
+        ContextInheritance::Fork => async_ctx::fork().unwrap_or_else(ContextStore::new),
+        ContextInheritance::Snapshot => snapshot_to_store(async_ctx::snapshot()),
     }
 }
 
 fn capture_sync(mode: ContextInheritance) -> ContextStore {
     match mode {
-        ContextInheritance::Fork => {
-            sync_ctx::fork().unwrap_or_else(ContextStore::new)
-        }
-        ContextInheritance::Snapshot => {
-            snapshot_to_store(sync_ctx::snapshot())
-        }
+        ContextInheritance::Fork => sync_ctx::fork().unwrap_or_else(ContextStore::new),
+        ContextInheritance::Snapshot => snapshot_to_store(sync_ctx::snapshot()),
     }
 }
 

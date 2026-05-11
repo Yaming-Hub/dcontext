@@ -48,8 +48,10 @@ async fn main() {
             async_ctx::scope("validate", async {
                 let chain = async_ctx::scope_chain();
                 println!("  Nested scope chain: {:?}", chain);
-            }).await;
-        }).await;
+            })
+            .await;
+        })
+        .await;
 
         // After scope exits, values revert
         let rid: Option<String> = async_ctx::get_context("request_id");
@@ -63,8 +65,12 @@ async fn main() {
             println!("  Before yield: chain = {:?}", async_ctx::scope_chain());
             tokio::task::yield_now().await; // simulates I/O
             println!("  After yield:  chain = {:?}", async_ctx::scope_chain());
-        }).await;
-        println!("  After scope:  chain = {:?} (clean)", async_ctx::scope_chain());
+        })
+        .await;
+        println!(
+            "  After scope:  chain = {:?} (clean)",
+            async_ctx::scope_chain()
+        );
 
         // ── Propagate to child tasks ──────────────────────────────
         println!("\n--- Propagate to child tasks via snapshot ---");
@@ -81,14 +87,16 @@ async fn main() {
 
                 // Child modifications are isolated
                 async_ctx::set_context("trace_id", "trace-child".to_string());
-            }).await;
+            })
+            .await;
         });
         handle.await.unwrap();
 
         // Parent is unaffected
         let tid: Option<String> = async_ctx::get_context("trace_id");
         println!("  [parent] trace_id still = {:?}", tid);
-    }).await;
+    })
+    .await;
 
     // Outside async context, async_ctx gracefully returns defaults
     println!("\n--- Outside async context (graceful no-op) ---");

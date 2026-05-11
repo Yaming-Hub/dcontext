@@ -49,24 +49,22 @@ where
     F: std::future::Future<Output = R>,
 {
     match extract_context(ctx) {
-        Some(snap) => dcontext::with_context(snap, f).await,
+        Some(snap) => dcontext::async_ctx::with_context(snap, f).await,
         None => f.await,
     }
 }
 
 /// Convert serialized wire bytes into a `ContextSnapshot`.
 ///
-/// Uses `force_thread_local` to temporarily deserialize into thread-local
-/// storage, captures a snapshot, then reverts. This avoids interfering
-/// with any active task-local context.
+/// Temporarily deserializes into sync (thread-local) storage, captures a
+/// snapshot, then reverts. This avoids interfering with any active task-local
+/// context.
 pub(crate) fn bytes_to_snapshot(bytes: &[u8]) -> Option<ContextSnapshot> {
-    dcontext::force_thread_local(|| {
-        // Push a temporary scope, deserialize wire values into it,
-        // capture as snapshot, then let guards revert everything.
-        let _outer = dcontext::enter_scope();
-        let _wire_guard = dcontext::deserialize_context(bytes).ok()?;
-        Some(dcontext::snapshot())
-        // _wire_guard drops → pops deserialized scope
-        // _outer drops → pops isolation scope
-    })
+    // Push a temporary scope, deserialize wire values into it,
+    // capture as snapshot, then let guards revert everything.
+    let _outer = dcontext::sync_ctx::enter_scope();
+    let _wire_guard = dcontext::sync_ctx::deserialize_context(bytes).ok()?;
+    Some(dcontext::sync_ctx::snapshot())
+    // _wire_guard drops → pops deserialized scope
+    // _outer drops → pops isolation scope
 }

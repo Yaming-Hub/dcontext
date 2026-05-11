@@ -6,11 +6,10 @@
 //! Usage: `cargo run --bin size_limits`
 
 use dcontext::{
-    RegistryBuilder, initialize, set_context,
-    serialize_context, set_max_context_size, max_context_size,
-    ContextError,
+    initialize, max_context_size, serialize_context, set_context, set_max_context_size,
+    ContextError, RegistryBuilder,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct Payload(String);
@@ -53,7 +52,10 @@ fn main() {
     println!("\nDisabling size limit...");
     set_max_context_size(0);
     match serialize_context() {
-        Ok(bytes) => println!("Large payload OK after disabling limit: {} bytes", bytes.len()),
+        Ok(bytes) => println!(
+            "Large payload OK after disabling limit: {} bytes",
+            bytes.len()
+        ),
         Err(e) => println!("Error: {}", e),
     }
 }

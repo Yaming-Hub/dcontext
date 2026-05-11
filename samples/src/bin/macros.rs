@@ -5,8 +5,8 @@
 //!
 //! Usage: `cargo run --bin macros`
 
-use dcontext::{with_scope, get_context, set_context, RegistryBuilder};
-use serde::{Serialize, Deserialize};
+use dcontext::{get_context, set_context, with_scope, RegistryBuilder};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct TraceId(String);

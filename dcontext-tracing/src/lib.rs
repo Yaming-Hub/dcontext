@@ -34,11 +34,11 @@
 //! #     .init();
 //! #
 //! // Register context keys, then inside a span:
-//! // dcontext::set_context("user", "alice".to_string());
+//! // dcontext::sync_ctx::set_context("user", "alice".to_string());
 //! // {
 //! //     let _span = tracing::info_span!("request").entered();
 //! //     // New scope created — inherits parent values
-//! //     dcontext::set_context("request_id", "abc-123".to_string());
+//! //     dcontext::sync_ctx::set_context("request_id", "abc-123".to_string());
 //! // }
 //! // Scope reverted — "request_id" gone, "user" remains
 //! ```
@@ -90,7 +90,7 @@
 //!     .build();
 //!
 //! // Inside a span:
-//! // let info: SpanInfo = dcontext::get_context("dcontext.span");
+//! // let info: SpanInfo = dcontext::sync_ctx::get_context("dcontext.span").unwrap_or_default();
 //! // info.name, info.target, info.level
 //! ```
 //!
@@ -111,16 +111,16 @@
 //! scope chain entries persist across `.await` points in the task.
 //!
 //! [`SyncDcontextLayer`] (and the legacy [`DcontextLayer`] alias) remain useful
-//! for synchronous or explicitly thread-local code. `dcontext::force_thread_local()`
-//! is preserved only as a deprecated no-op compatibility shim.
+//! for synchronous or explicitly thread-local code. `dcontext::sync_ctx` always uses
+//! thread-local storage directly, so no `force_thread_local()` wrapper is needed.
 
+mod async_layer;
 mod field_mapping;
 pub(crate) mod guard_stack;
 mod layer_common;
 mod span_info;
-mod tracing_field;
-mod async_layer;
 mod sync_layer;
+mod tracing_field;
 
 #[cfg(test)]
 mod tests;
@@ -131,5 +131,5 @@ pub use sync_layer::{SyncDcontextLayer, SyncDcontextLayerBuilder};
 pub type DcontextLayer<S> = SyncDcontextLayer<S>;
 /// Type alias for backward compatibility — `DcontextLayerBuilder` is now `SyncDcontextLayerBuilder`.
 pub type DcontextLayerBuilder<S> = SyncDcontextLayerBuilder<S>;
-pub use tracing_field::{TracingField, TracingFieldBuilder, WithContextFields, collect_log_fields};
 pub use span_info::{SpanInfo, SPAN_INFO_KEY};
+pub use tracing_field::{collect_log_fields, TracingField, TracingFieldBuilder, WithContextFields};

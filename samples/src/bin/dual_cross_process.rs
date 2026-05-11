@@ -13,13 +13,11 @@
 //! Usage: `cargo run --bin dual_cross_process`
 
 use dcontext::{
-    async_ctx, sync_ctx,
-    RegistryBuilder, initialize, set_context, get_context,
-    serialize_context, deserialize_context,
-    serialize_context_string, deserialize_context_string,
-    force_thread_local, scope_chain,
+    async_ctx, deserialize_context, deserialize_context_string, force_thread_local, get_context,
+    initialize, scope_chain, serialize_context, serialize_context_string, set_context, sync_ctx,
+    RegistryBuilder,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct TraceId(String);
@@ -104,13 +102,18 @@ async fn main() {
 
         // Process the request in an async scope
         async_ctx::scope("process_order", async {
-            println!("  [async_ctx] in scope: chain = {:?}", async_ctx::scope_chain());
+            println!(
+                "  [async_ctx] in scope: chain = {:?}",
+                async_ctx::scope_chain()
+            );
 
             // Simulate downstream call — serialize again for next hop
             println!("\n--- Forwarding to downstream (Inventory Service) ---");
             // In a real app, you'd serialize the registered context here
-        }).await;
-    }).await;
+        })
+        .await;
+    })
+    .await;
 
     // ══════════════════════════════════════════════════════════
     //  Receiver Side — Sync Service (e.g., Legacy worker)

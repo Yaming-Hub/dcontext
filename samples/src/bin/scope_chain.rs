@@ -6,12 +6,11 @@
 //! Usage: `cargo run --bin scope_chain`
 
 use dcontext::{
-    RegistryBuilder, initialize, enter_scope, enter_named_scope,
-    scope_chain, set_context, get_context, serialize_context,
-    deserialize_context, named_scope_async, set_max_scope_chain_len,
-    force_thread_local, snapshot, with_context,
+    deserialize_context, enter_named_scope, enter_scope, force_thread_local, get_context,
+    initialize, named_scope_async, scope_chain, serialize_context, set_context,
+    set_max_scope_chain_len, snapshot, with_context, RegistryBuilder,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct RequestId(String);
@@ -56,8 +55,14 @@ async fn main() {
             {
                 let _unnamed = enter_scope();
                 set_context("request_id", RequestId("req-99".into()));
-                println!("Inside unnamed scope:  {:?}  (chain unchanged)", scope_chain());
-                println!("  request_id = {:?}", get_context::<RequestId>("request_id"));
+                println!(
+                    "Inside unnamed scope:  {:?}  (chain unchanged)",
+                    scope_chain()
+                );
+                println!(
+                    "  request_id = {:?}",
+                    get_context::<RequestId>("request_id")
+                );
             }
             println!("After unnamed exits:   {:?}", scope_chain());
         }
@@ -82,7 +87,10 @@ async fn main() {
             let _scope = enter_scope();
             let _guard = deserialize_context(&wire_bytes).expect("deserialize failed");
             println!("After deserialize, chain: {:?}", scope_chain());
-            println!("  request_id = {:?}", get_context::<RequestId>("request_id"));
+            println!(
+                "  request_id = {:?}",
+                get_context::<RequestId>("request_id")
+            );
         }
 
         // ── 5. Remote prefix + local named scopes ──────────────────────
@@ -110,7 +118,10 @@ async fn main() {
             println!("After a/b/c:    {:?}", scope_chain());
             {
                 let _g4 = enter_named_scope("d");
-                println!("After a/b/c/d:  {:?}  (oldest trimmed to stay within limit)", scope_chain());
+                println!(
+                    "After a/b/c/d:  {:?}  (oldest trimmed to stay within limit)",
+                    scope_chain()
+                );
             }
         }
         // Restore default.

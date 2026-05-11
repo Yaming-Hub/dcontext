@@ -173,7 +173,12 @@ impl ContextStore {
         self.depth
     }
 
-    /// Pop the current scope, restoring state from the frozen ScopeNode.
+    /// Pop scopes down to the expected depth, restoring state from frozen ScopeNodes.
+    ///
+    /// - If `self.depth > expected_depth`: pops repeatedly until the expected
+    ///   depth is reached. This recovers from out-of-order guard drops.
+    /// - If `self.depth == expected_depth`: pops once (normal case).
+    /// - If `self.depth < expected_depth`: no-op (already popped).
     ///
     /// If the current depth is above [`MAX_SCOPE_DEPTH`] + 1 (a dead scope),
     /// just decrements the counter without touching the scope chain.
@@ -184,46 +189,58 @@ impl ContextStore {
         &mut self,
         expected_depth: usize,
     ) -> Option<crate::scope::ScopeGarbage> {
-        if self.depth != expected_depth || self.depth <= 1 {
+        if self.depth < expected_depth || expected_depth <= 1 {
             return None;
         }
 
-        // Dead scope: just decrement the counter.
-        if self.depth > MAX_SCOPE_DEPTH + 1 {
-            self.depth -= 1;
-            return None;
+        let mut all_old: Option<HashMap<&'static str, Arc<dyn ContextValue>>> = None;
+
+        while self.depth >= expected_depth && self.depth > 1 {
+            // Dead scope: just decrement the counter.
+            if self.depth > MAX_SCOPE_DEPTH + 1 {
+                self.depth -= 1;
+                continue;
+            }
+
+            let node = match self.scope_chain.take() {
+                Some(n) => n,
+                None => break,
+            };
+
+            let old_current = std::mem::take(&mut self.current_values);
+            // Accumulate garbage from all popped scopes.
+            match &mut all_old {
+                Some(existing) => existing.extend(old_current),
+                None => all_old = Some(old_current),
+            }
+
+            match Arc::try_unwrap(node) {
+                Ok(owned) => {
+                    self.scope_chain = owned.parent;
+                    self.current_name = owned.name;
+                    self.current_values = owned.values;
+                    self.depth = owned.depth;
+                    self.remote_chain = owned.remote_chain;
+                    self.remote_chain_base_depth = owned.remote_chain_base_depth;
+                    self.scope_barrier = owned.saved_scope_barrier;
+                }
+                Err(shared) => {
+                    self.scope_chain = shared.parent.clone();
+                    self.current_name = shared.name.clone();
+                    self.current_values = shared
+                        .values
+                        .iter()
+                        .map(|(&k, v)| (k, Arc::clone(v)))
+                        .collect();
+                    self.depth = shared.depth;
+                    self.remote_chain = Arc::clone(&shared.remote_chain);
+                    self.remote_chain_base_depth = shared.remote_chain_base_depth;
+                    self.scope_barrier = shared.saved_scope_barrier;
+                }
+            }
         }
 
-        let node = self.scope_chain.take()?;
-
-        let old_current = std::mem::take(&mut self.current_values);
-
-        match Arc::try_unwrap(node) {
-            Ok(owned) => {
-                self.scope_chain = owned.parent;
-                self.current_name = owned.name;
-                self.current_values = owned.values;
-                self.depth = owned.depth;
-                self.remote_chain = owned.remote_chain;
-                self.remote_chain_base_depth = owned.remote_chain_base_depth;
-                self.scope_barrier = owned.saved_scope_barrier;
-            }
-            Err(shared) => {
-                self.scope_chain = shared.parent.clone();
-                self.current_name = shared.name.clone();
-                self.current_values = shared.values.iter()
-                    .map(|(&k, v)| (k, Arc::clone(v)))
-                    .collect();
-                self.depth = shared.depth;
-                self.remote_chain = Arc::clone(&shared.remote_chain);
-                self.remote_chain_base_depth = shared.remote_chain_base_depth;
-                self.scope_barrier = shared.saved_scope_barrier;
-            }
-        }
-
-        Some(crate::scope::ScopeGarbage {
-            _old_values: old_current,
-        })
+        all_old.map(|old| crate::scope::ScopeGarbage { _old_values: old })
     }
 
     /// Set a value in the current scope.

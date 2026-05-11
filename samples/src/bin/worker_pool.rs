@@ -5,8 +5,8 @@
 //!
 //! Usage: `cargo run --bin worker_pool`
 
-use dcontext::{RegistryBuilder, initialize, set_context, get_context, scope, snapshot, attach};
-use serde::{Serialize, Deserialize};
+use dcontext::{attach, get_context, initialize, scope, set_context, snapshot, RegistryBuilder};
+use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]

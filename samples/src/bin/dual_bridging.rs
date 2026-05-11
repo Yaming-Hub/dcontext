@@ -28,7 +28,10 @@ async fn main() {
         async_ctx::set_context("user_id", "alice".to_string());
         let _guard = async_ctx::push_scope("handle_request");
 
-        println!("[async] request_id = {:?}", async_ctx::get_context::<String>("request_id"));
+        println!(
+            "[async] request_id = {:?}",
+            async_ctx::get_context::<String>("request_id")
+        );
         println!("[async] scope_chain = {:?}", async_ctx::scope_chain());
 
         // ── Pattern 1: spawn_blocking ─────────────────────────
@@ -48,13 +51,18 @@ async fn main() {
 
             // Can push scopes on the sync side
             let _guard = sync_ctx::push_scope("heavy_computation");
-            println!("  [blocking] chain (in scope) = {:?}", sync_ctx::scope_chain());
+            println!(
+                "  [blocking] chain (in scope) = {:?}",
+                sync_ctx::scope_chain()
+            );
 
             // Simulate heavy work
             std::thread::sleep(std::time::Duration::from_millis(10));
 
             "computation_result"
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         println!("  [async] got result: {:?}", result);
 
         // ── Pattern 2: Thread pool / OS threads ───────────────
@@ -74,8 +82,10 @@ async fn main() {
         handle.join().unwrap();
 
         // Async context is unaffected
-        println!("\n  [async] request_id still = {:?}",
-            async_ctx::get_context::<String>("request_id"));
+        println!(
+            "\n  [async] request_id still = {:?}",
+            async_ctx::get_context::<String>("request_id")
+        );
 
         // ── Pattern 3: Multiple child tasks from same snapshot ─
         println!("\n--- Pattern 3: Fan-out to multiple blocking threads ---");
@@ -94,7 +104,8 @@ async fn main() {
         for h in handles {
             h.await.unwrap();
         }
-    }).await;
+    })
+    .await;
 
     println!("\nDone!");
 }

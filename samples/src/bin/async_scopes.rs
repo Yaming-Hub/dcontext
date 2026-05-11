@@ -6,10 +6,10 @@
 //! Usage: `cargo run --bin async_scopes`
 
 use dcontext::{
-    RegistryBuilder, initialize, set_context, get_context, scope_async, snapshot,
-    with_context, spawn_with_context_async, force_thread_local,
+    force_thread_local, get_context, initialize, scope_async, set_context, snapshot,
+    spawn_with_context_async, with_context, RegistryBuilder,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct RequestId(String);
@@ -35,30 +35,48 @@ async fn main() {
     });
 
     with_context(snap, async {
-        println!("[main] request_id = {:?}", get_context::<RequestId>("request_id"));
+        println!(
+            "[main] request_id = {:?}",
+            get_context::<RequestId>("request_id")
+        );
         println!("[main] phase      = {:?}", get_context::<Phase>("phase"));
 
         // scope_async works across .await points.
         scope_async(async {
             set_context("phase", Phase("processing".into()));
-            println!("\n[scope_async] phase = {:?}", get_context::<Phase>("phase"));
+            println!(
+                "\n[scope_async] phase = {:?}",
+                get_context::<Phase>("phase")
+            );
 
             // .await inside scope_async — context is preserved.
             simulate_io().await;
 
-            println!("[scope_async after await] phase = {:?}", get_context::<Phase>("phase"));
+            println!(
+                "[scope_async after await] phase = {:?}",
+                get_context::<Phase>("phase")
+            );
 
             // Spawn a child task from within the async scope.
             let handle = spawn_with_context_async(async {
-                println!("[child task] request_id = {:?}", get_context::<RequestId>("request_id"));
-                println!("[child task] phase      = {:?}", get_context::<Phase>("phase"));
+                println!(
+                    "[child task] request_id = {:?}",
+                    get_context::<RequestId>("request_id")
+                );
+                println!(
+                    "[child task] phase      = {:?}",
+                    get_context::<Phase>("phase")
+                );
             });
             handle.await.unwrap();
         })
         .await;
 
         // After scope_async — phase reverted.
-        println!("\n[main after scope_async] phase = {:?}", get_context::<Phase>("phase"));
+        println!(
+            "\n[main after scope_async] phase = {:?}",
+            get_context::<Phase>("phase")
+        );
     })
     .await;
 }

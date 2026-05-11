@@ -225,10 +225,9 @@ where
             if user_set.contains(entry.record_field) {
                 return None;
             }
-            let formatted = dcontext::sync_ctx::with_context_value(
-                entry.context_key,
-                |any_val| fmt_fn(any_val),
-            )
+            let formatted = dcontext::sync_ctx::with_context_value(entry.context_key, |any_val| {
+                fmt_fn(any_val)
+            })
             .flatten()?;
             Some((entry.record_field, formatted))
         })
@@ -250,23 +249,13 @@ impl<S> Layer<S> for SyncDcontextLayer<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    fn on_new_span(
-        &self,
-        attrs: &span::Attributes<'_>,
-        id: &span::Id,
-        ctx: Context<'_, S>,
-    ) {
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(id) {
             layer_common::extract_span_fields(attrs, &span);
         }
     }
 
-    fn on_record(
-        &self,
-        id: &span::Id,
-        values: &span::Record<'_>,
-        ctx: Context<'_, S>,
-    ) {
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(id) {
             layer_common::merge_recorded_fields(values, &span);
         }

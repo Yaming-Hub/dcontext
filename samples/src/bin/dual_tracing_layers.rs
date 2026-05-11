@@ -30,7 +30,11 @@ async fn main() {
         // Set up subscriber with AsyncDcontextLayer
         let subscriber = tracing_subscriber::registry()
             .with(AsyncDcontextLayer::new())
-            .with(tracing_subscriber::fmt::layer().with_target(false).compact());
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .compact(),
+            );
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let snap = ContextSnapshot::empty();
@@ -51,7 +55,8 @@ async fn main() {
 
                     let chain = async_ctx::scope_chain();
                     println!("  After yield: chain = {:?} (still correct!)", chain);
-                }).await;
+                })
+                .await;
 
                 // After app scope exits
                 let chain = async_ctx::scope_chain();
@@ -63,7 +68,8 @@ async fn main() {
             // After span closes
             let chain = async_ctx::scope_chain();
             println!("  After span close: chain = {:?} (clean)", chain);
-        }).await;
+        })
+        .await;
     }
 
     // ══════════════════════════════════════════════════════════
@@ -72,8 +78,7 @@ async fn main() {
     println!("\n--- Multiple iterations (leak-free) ---\n");
 
     {
-        let subscriber = tracing_subscriber::registry()
-            .with(AsyncDcontextLayer::new());
+        let subscriber = tracing_subscriber::registry().with(AsyncDcontextLayer::new());
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let snap = ContextSnapshot::empty();
@@ -83,15 +88,20 @@ async fn main() {
                 async {
                     async_ctx::scope("inner_work", async {
                         tokio::task::yield_now().await;
-                    }).await;
+                    })
+                    .await;
                 }
                 .instrument(span)
                 .await;
             }
 
             let chain = async_ctx::scope_chain();
-            println!("  After 5 iterations: chain = {:?} (empty = no leak)", chain);
-        }).await;
+            println!(
+                "  After 5 iterations: chain = {:?} (empty = no leak)",
+                chain
+            );
+        })
+        .await;
     }
 
     // ══════════════════════════════════════════════════════════
@@ -105,7 +115,11 @@ async fn main() {
 
         let subscriber = tracing_subscriber::registry()
             .with(SyncDcontextLayer::new())
-            .with(tracing_subscriber::fmt::layer().with_target(false).compact());
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .compact(),
+            );
         let _guard = tracing::subscriber::set_default(subscriber);
 
         {
@@ -140,8 +154,7 @@ async fn main() {
     println!("\n--- Combined: async tracing + sync bridging ---\n");
 
     {
-        let subscriber = tracing_subscriber::registry()
-            .with(AsyncDcontextLayer::new());
+        let subscriber = tracing_subscriber::registry().with(AsyncDcontextLayer::new());
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let snap = ContextSnapshot::empty();
@@ -159,12 +172,15 @@ async fn main() {
                     println!("  [blocking] correlation_id = {:?}", cid);
                     println!("  [blocking] chain = {:?} (from async snapshot)", chain);
                     "ok"
-                }).await.unwrap();
+                })
+                .await
+                .unwrap();
                 println!("  [async] blocking result = {:?}", result);
             }
             .instrument(span)
             .await;
-        }).await;
+        })
+        .await;
     }
 
     println!("\nDone!");

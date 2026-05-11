@@ -43,9 +43,7 @@ fn init() -> tracing::subscriber::DefaultGuard {
     dcontext::initialize(builder);
 
     // 2. Configure the tracing layer with span info
-    let layer = DcontextLayer::builder()
-        .include_span_info()
-        .build();
+    let layer = DcontextLayer::builder().include_span_info().build();
 
     tracing_subscriber::registry()
         .with(layer)
@@ -60,25 +58,40 @@ fn demo_auto_scoping() {
     println!("\n=== Level 1: Automatic Scoping ===\n");
 
     dcontext::set_context("status", "root".to_string());
-    println!("  Before span: status = {:?}", dcontext::get_context::<String>("status"));
+    println!(
+        "  Before span: status = {:?}",
+        dcontext::get_context::<String>("status")
+    );
 
     {
         let _span = tracing::info_span!("outer_operation").entered();
         dcontext::set_context("status", "in-outer-span".to_string());
-        println!("  In outer span: status = {:?}", dcontext::get_context::<String>("status"));
+        println!(
+            "  In outer span: status = {:?}",
+            dcontext::get_context::<String>("status")
+        );
 
         {
             let _span = tracing::info_span!("inner_operation").entered();
             dcontext::set_context("status", "in-inner-span".to_string());
-            println!("  In inner span: status = {:?}", dcontext::get_context::<String>("status"));
+            println!(
+                "  In inner span: status = {:?}",
+                dcontext::get_context::<String>("status")
+            );
         }
 
         // Inner span exited — context reverted
-        println!("  After inner exits: status = {:?}", dcontext::get_context::<String>("status"));
+        println!(
+            "  After inner exits: status = {:?}",
+            dcontext::get_context::<String>("status")
+        );
     }
 
     // Outer span exited — context reverted to root
-    println!("  After outer exits: status = {:?}", dcontext::get_context::<String>("status"));
+    println!(
+        "  After outer exits: status = {:?}",
+        dcontext::get_context::<String>("status")
+    );
 }
 
 /// Level 2: Field mapping — span fields become context values
@@ -123,8 +136,7 @@ async fn demo_async() {
 
     async fn process_order(order_id: &str) {
         let rid: RequestId = dcontext::force_thread_local(|| dcontext::get_context("request_id"));
-        let info: SpanInfo =
-            dcontext::force_thread_local(|| dcontext::get_context(SPAN_INFO_KEY));
+        let info: SpanInfo = dcontext::force_thread_local(|| dcontext::get_context(SPAN_INFO_KEY));
         println!(
             "  Processing order {} — request={}, span={}",
             order_id, rid.0, info.name
@@ -132,7 +144,10 @@ async fn demo_async() {
     }
 
     process_order("ORD-001")
-        .instrument(tracing::info_span!("process_order", request_id = "req-async-789"))
+        .instrument(tracing::info_span!(
+            "process_order",
+            request_id = "req-async-789"
+        ))
         .await;
 }
 
@@ -150,7 +165,9 @@ fn main() {
     demo_span_info();
 
     // Run async demo inside tokio runtime
-    tokio::runtime::Runtime::new().unwrap().block_on(demo_async());
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(demo_async());
 
     println!("\nDone!");
 }

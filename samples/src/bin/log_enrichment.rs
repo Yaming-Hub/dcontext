@@ -183,7 +183,8 @@ fn demo_metadata_queries() {
     }
 
     // Query a specific key's metadata
-    if let Some(name) = dcontext::with_metadata::<TracingField, _>("request_id", |tf| tf.log_name()) {
+    if let Some(name) = dcontext::with_metadata::<TracingField, _>("request_id", |tf| tf.log_name())
+    {
         println!("  request_id log field name: {:?}", name);
     }
 }

@@ -44,8 +44,14 @@ fn demo_local_propagation() {
     // Outbound interceptor captures a snapshot (zero-copy for local)
     let snapshot = dcontext::snapshot();
     println!("  Sender captured snapshot with {} values", 2);
-    println!("  request_id = {:?}", dcontext::get_context::<String>("request_id"));
-    println!("  tenant     = {:?}", dcontext::get_context::<String>("tenant"));
+    println!(
+        "  request_id = {:?}",
+        dcontext::get_context::<String>("request_id")
+    );
+    println!(
+        "  tenant     = {:?}",
+        dcontext::get_context::<String>("tenant")
+    );
 
     // Simulate message delivery to another actor
     println!("\n  --- message delivered locally ---\n");
@@ -85,8 +91,8 @@ fn demo_serialization_roundtrip() {
     // Inbound interceptor deserializes and restores
     dcontext::force_thread_local(|| {
         let _scope = dcontext::enter_scope();
-        let _restored = dcontext::deserialize_context(&bytes)
-            .expect("deserialization should succeed");
+        let _restored =
+            dcontext::deserialize_context(&bytes).expect("deserialization should succeed");
 
         let rid: String = dcontext::get_context("request_id");
         let tid: String = dcontext::get_context("trace_id");

@@ -6,11 +6,10 @@
 //! Usage: `cargo run --bin cross_process`
 
 use dcontext::{
-    RegistryBuilder, initialize, set_context, get_context, scope,
-    serialize_context, deserialize_context,
-    serialize_context_string, deserialize_context_string,
+    deserialize_context, deserialize_context_string, get_context, initialize, scope,
+    serialize_context, serialize_context_string, set_context, RegistryBuilder,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct TraceContext {
@@ -31,14 +30,20 @@ fn main() {
     initialize(builder);
 
     // --- Sender side: serialize context ---
-    set_context("trace_context", TraceContext {
-        trace_id: "tid-abc-123".into(),
-        span_id: "span-001".into(),
-    });
-    set_context("auth_info", AuthInfo {
-        user_id: "alice".into(),
-        roles: vec!["admin".into(), "viewer".into()],
-    });
+    set_context(
+        "trace_context",
+        TraceContext {
+            trace_id: "tid-abc-123".into(),
+            span_id: "span-001".into(),
+        },
+    );
+    set_context(
+        "auth_info",
+        AuthInfo {
+            user_id: "alice".into(),
+            roles: vec!["admin".into(), "viewer".into()],
+        },
+    );
 
     println!("=== Sender ===");
     println!("trace = {:?}", get_context::<TraceContext>("trace_context"));

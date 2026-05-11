@@ -71,22 +71,22 @@ fn with_layer<F: FnOnce()>(layer: DcontextLayer<tracing_subscriber::Registry>, f
 #[test]
 fn basic_scope_enter_exit() {
     with_layer(DcontextLayer::new(), || {
-        dcontext::set_context("outer", "hello".to_string());
+        dcontext::sync_ctx::set_context("outer", "hello".to_string());
 
         {
             let _span = tracing::info_span!("my_span").entered();
-            let val: String = dcontext::get_context("outer");
+            let val: String = dcontext::sync_ctx::get_context("outer").unwrap_or_default();
             assert_eq!(val, "hello");
 
-            dcontext::set_context("inner", "world".to_string());
-            let inner: String = dcontext::get_context("inner");
+            dcontext::sync_ctx::set_context("inner", "world".to_string());
+            let inner: String = dcontext::sync_ctx::get_context("inner").unwrap_or_default();
             assert_eq!(inner, "world");
         }
 
-        let inner: String = dcontext::get_context("inner");
+        let inner: String = dcontext::sync_ctx::get_context("inner").unwrap_or_default();
         assert_eq!(inner, "", "inner should be empty after span exit");
 
-        let outer: String = dcontext::get_context("outer");
+        let outer: String = dcontext::sync_ctx::get_context("outer").unwrap_or_default();
         assert_eq!(outer, "hello");
     });
 }
@@ -94,25 +94,25 @@ fn basic_scope_enter_exit() {
 #[test]
 fn nested_spans() {
     with_layer(DcontextLayer::new(), || {
-        dcontext::set_context("level", "root".to_string());
+        dcontext::sync_ctx::set_context("level", "root".to_string());
 
         {
             let _span1 = tracing::info_span!("span1").entered();
-            dcontext::set_context("level", "span1".to_string());
+            dcontext::sync_ctx::set_context("level", "span1".to_string());
 
             {
                 let _span2 = tracing::info_span!("span2").entered();
-                dcontext::set_context("level", "span2".to_string());
+                dcontext::sync_ctx::set_context("level", "span2".to_string());
 
-                let val: String = dcontext::get_context("level");
+                let val: String = dcontext::sync_ctx::get_context("level").unwrap_or_default();
                 assert_eq!(val, "span2");
             }
 
-            let val: String = dcontext::get_context("level");
+            let val: String = dcontext::sync_ctx::get_context("level").unwrap_or_default();
             assert_eq!(val, "span1");
         }
 
-        let val: String = dcontext::get_context("level");
+        let val: String = dcontext::sync_ctx::get_context("level").unwrap_or_default();
         assert_eq!(val, "root");
     });
 }
@@ -124,15 +124,15 @@ fn span_reenter() {
 
         {
             let _entered = span.enter();
-            dcontext::set_context("visit", "first".to_string());
+            dcontext::sync_ctx::set_context("visit", "first".to_string());
         }
 
-        let val: String = dcontext::get_context("visit");
+        let val: String = dcontext::sync_ctx::get_context("visit").unwrap_or_default();
         assert_eq!(val, "", "should be reverted after first exit");
 
         {
             let _entered = span.enter();
-            let val: String = dcontext::get_context("visit");
+            let val: String = dcontext::sync_ctx::get_context("visit").unwrap_or_default();
             assert_eq!(val, "", "should be empty on re-enter");
         }
     });
@@ -151,11 +151,11 @@ fn field_extraction_string() {
     with_layer(DcontextLayer::new(), || {
         {
             let _span = tracing::info_span!("handler", request_id = "abc-123").entered();
-            let id: String = dcontext::get_context("request_id");
+            let id: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
             assert_eq!(id, "abc-123");
         }
 
-        let id: String = dcontext::get_context("request_id");
+        let id: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
         assert_eq!(id, String::default());
     });
 }
@@ -165,11 +165,11 @@ fn field_extraction_u64() {
     with_layer(DcontextLayer::new(), || {
         {
             let _span = tracing::info_span!("handler", count = 42u64).entered();
-            let c: Counter = dcontext::get_context("count");
+            let c: Counter = dcontext::sync_ctx::get_context("count").unwrap_or_default();
             assert_eq!(c, Counter(42));
         }
 
-        let c: Counter = dcontext::get_context("count");
+        let c: Counter = dcontext::sync_ctx::get_context("count").unwrap_or_default();
         assert_eq!(c, Counter::default());
     });
 }
@@ -179,11 +179,11 @@ fn field_extraction_bool() {
     with_layer(DcontextLayer::new(), || {
         {
             let _span = tracing::info_span!("handler", enabled = true).entered();
-            let f: Flag = dcontext::get_context("enabled");
+            let f: Flag = dcontext::sync_ctx::get_context("enabled").unwrap_or_default();
             assert_eq!(f, Flag(true));
         }
 
-        let f: Flag = dcontext::get_context("enabled");
+        let f: Flag = dcontext::sync_ctx::get_context("enabled").unwrap_or_default();
         assert_eq!(f, Flag::default());
     });
 }
@@ -194,7 +194,7 @@ fn field_extraction_missing_field() {
         {
             // Span without the mapped field — should not set anything
             let _span = tracing::info_span!("handler", other_field = "value").entered();
-            let id: String = dcontext::get_context("request_id");
+            let id: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
             assert_eq!(id, String::default());
         }
     });
@@ -209,7 +209,7 @@ fn field_extraction_late_record() {
 
         {
             let _entered = span.enter();
-            let id: String = dcontext::get_context("request_id");
+            let id: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
             assert_eq!(id, "late-value");
         }
     });
@@ -218,14 +218,11 @@ fn field_extraction_late_record() {
 #[test]
 fn multiple_field_extractions() {
     with_layer(DcontextLayer::new(), || {
-        {
-            let _span =
-                tracing::info_span!("handler", request_id = "abc", count = 10u64).entered();
-            let id: String = dcontext::get_context("request_id");
-            let c: Counter = dcontext::get_context("count");
-            assert_eq!(id, "abc");
-            assert_eq!(c, Counter(10));
-        }
+        let _span = tracing::info_span!("handler", request_id = "abc", count = 10u64).entered();
+        let id: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
+        let c: Counter = dcontext::sync_ctx::get_context("count").unwrap_or_default();
+        assert_eq!(id, "abc");
+        assert_eq!(c, Counter(10));
     });
 }
 
@@ -238,7 +235,7 @@ fn span_info_basic() {
     with_layer(layer, || {
         {
             let _span = tracing::info_span!("my_operation").entered();
-            let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
+            let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
             assert_eq!(info.name, "my_operation");
             assert!(
                 info.target.contains("tests"),
@@ -248,7 +245,7 @@ fn span_info_basic() {
             assert_eq!(info.level, "INFO");
         }
 
-        let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
+        let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
         assert_eq!(info.name, "");
     });
 }
@@ -260,12 +257,12 @@ fn span_info_different_levels() {
     with_layer(layer, || {
         {
             let _span = tracing::debug_span!("debug_op").entered();
-            let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
+            let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
             assert_eq!(info.level, "DEBUG");
         }
         {
             let _span = tracing::warn_span!("warn_op").entered();
-            let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
+            let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
             assert_eq!(info.level, "WARN");
         }
     });
@@ -276,20 +273,18 @@ fn span_info_nested_shows_innermost() {
     let layer = DcontextLayer::builder().include_span_info().build();
 
     with_layer(layer, || {
+        let _span1 = tracing::info_span!("outer").entered();
+        let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
+        assert_eq!(info.name, "outer");
+
         {
-            let _span1 = tracing::info_span!("outer").entered();
-            let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
-            assert_eq!(info.name, "outer");
-
-            {
-                let _span2 = tracing::info_span!("inner").entered();
-                let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
-                assert_eq!(info.name, "inner");
-            }
-
-            let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
-            assert_eq!(info.name, "outer");
+            let _span2 = tracing::info_span!("inner").entered();
+            let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
+            assert_eq!(info.name, "inner");
         }
+
+        let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
+        assert_eq!(info.name, "outer");
     });
 }
 
@@ -297,27 +292,25 @@ fn span_info_nested_shows_innermost() {
 
 #[test]
 fn all_features_combined() {
-    let layer = DcontextLayer::builder()
-        .include_span_info()
-        .build();
+    let layer = DcontextLayer::builder().include_span_info().build();
 
     with_layer(layer, || {
-        dcontext::set_context("tenant", "acme".to_string());
+        dcontext::sync_ctx::set_context("tenant", "acme".to_string());
 
         {
             let _span = tracing::info_span!("process", request_id = "req-001").entered();
 
-            let id: String = dcontext::get_context("request_id");
+            let id: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
             assert_eq!(id, "req-001");
 
-            let info: SpanInfo = dcontext::get_context(SPAN_INFO_KEY);
+            let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
             assert_eq!(info.name, "process");
 
-            let tenant: String = dcontext::get_context("tenant");
+            let tenant: String = dcontext::sync_ctx::get_context("tenant").unwrap_or_default();
             assert_eq!(tenant, "acme");
         }
 
-        let id: String = dcontext::get_context("request_id");
+        let id: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
         assert_eq!(id, String::default());
     });
 }
@@ -335,12 +328,15 @@ async fn async_with_instrument() {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     async fn inner_task() {
-        let id: String = dcontext::force_thread_local(|| dcontext::get_context("request_id"));
+        let id: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
         assert_eq!(id, "async-001");
     }
 
     inner_task()
-        .instrument(tracing::info_span!("async_handler", request_id = "async-001"))
+        .instrument(tracing::info_span!(
+            "async_handler",
+            request_id = "async-001"
+        ))
         .await;
 }
 
@@ -355,28 +351,21 @@ async fn async_nested_instrument() {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     async fn outer() {
-        let info: SpanInfo =
-            dcontext::force_thread_local(|| dcontext::get_context(SPAN_INFO_KEY));
+        let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
         assert_eq!(info.name, "outer_span");
 
         async fn inner() {
-            let info: SpanInfo =
-                dcontext::force_thread_local(|| dcontext::get_context(SPAN_INFO_KEY));
+            let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
             assert_eq!(info.name, "inner_span");
         }
 
-        inner()
-            .instrument(tracing::info_span!("inner_span"))
-            .await;
+        inner().instrument(tracing::info_span!("inner_span")).await;
 
-        let info: SpanInfo =
-            dcontext::force_thread_local(|| dcontext::get_context(SPAN_INFO_KEY));
+        let info: SpanInfo = dcontext::sync_ctx::get_context(SPAN_INFO_KEY).unwrap_or_default();
         assert_eq!(info.name, "outer_span");
     }
 
-    outer()
-        .instrument(tracing::info_span!("outer_span"))
-        .await;
+    outer().instrument(tracing::info_span!("outer_span")).await;
 }
 
 // --- Scope chain tests ---
@@ -385,14 +374,11 @@ async fn async_nested_instrument() {
 fn scope_chain_from_span_names() {
     with_layer(DcontextLayer::new(), || {
         let _outer = tracing::info_span!("api_handler").entered();
-        assert_eq!(
-            dcontext::force_thread_local(dcontext::scope_chain),
-            vec!["api_handler"]
-        );
+        assert_eq!(dcontext::sync_ctx::scope_chain(), vec!["api_handler"]);
 
         let _inner = tracing::info_span!("db_query").entered();
         assert_eq!(
-            dcontext::force_thread_local(dcontext::scope_chain),
+            dcontext::sync_ctx::scope_chain(),
             vec!["api_handler", "db_query"]
         );
     });
@@ -404,11 +390,11 @@ fn field_extraction_string_directly() {
     with_layer(DcontextLayer::new(), || {
         {
             let _span = tracing::info_span!("handler", request_id = "direct-str").entered();
-            let t: String = dcontext::force_thread_local(|| dcontext::get_context("request_id"));
+            let t: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
             assert_eq!(t, "direct-str");
         }
 
-        let t: String = dcontext::force_thread_local(|| dcontext::get_context("request_id"));
+        let t: String = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
         assert_eq!(t, String::default());
     });
 }
@@ -419,15 +405,9 @@ fn scope_chain_reverts_on_exit() {
         let _outer = tracing::info_span!("root").entered();
         {
             let _inner = tracing::info_span!("child").entered();
-            assert_eq!(
-                dcontext::force_thread_local(dcontext::scope_chain),
-                vec!["root", "child"]
-            );
+            assert_eq!(dcontext::sync_ctx::scope_chain(), vec!["root", "child"]);
         }
-        assert_eq!(
-            dcontext::force_thread_local(dcontext::scope_chain),
-            vec!["root"]
-        );
+        assert_eq!(dcontext::sync_ctx::scope_chain(), vec!["root"]);
     });
 }
 
@@ -436,10 +416,10 @@ fn scope_chain_reverts_on_exit() {
 #[test]
 fn collect_log_fields_returns_set_values() {
     init_registry();
-    dcontext::force_thread_local(|| {
-        let _g = dcontext::enter_scope();
-        dcontext::set_context("log_rid", "req-123".to_string());
-        dcontext::set_context("log_counter", Counter(42));
+    {
+        let _g = dcontext::sync_ctx::enter_scope();
+        dcontext::sync_ctx::set_context("log_rid", "req-123".to_string());
+        dcontext::sync_ctx::set_context("log_counter", Counter(42));
 
         let fields = crate::collect_log_fields();
         let map: std::collections::HashMap<&str, &str> =
@@ -447,19 +427,19 @@ fn collect_log_fields_returns_set_values() {
 
         assert_eq!(map.get("rid"), Some(&"req-123"));
         assert_eq!(map.get("cnt"), Some(&"Counter(42)"));
-    });
+    };
 }
 
 #[test]
 fn collect_log_fields_skips_unset_values() {
     init_registry();
-    dcontext::force_thread_local(|| {
-        let _g = dcontext::enter_scope();
+    {
+        let _g = dcontext::sync_ctx::enter_scope();
         let fields = crate::collect_log_fields();
         let names: Vec<&str> = fields.iter().map(|(k, _)| *k).collect();
         assert!(!names.contains(&"rid"));
         assert!(!names.contains(&"cnt"));
-    });
+    };
 }
 
 #[test]
@@ -532,7 +512,11 @@ fn with_context_fields_enriches_output() {
         .with_level(false)
         .with_target(false)
         .event_format(crate::WithContextFields::wrap(
-            fmt::format().without_time().with_ansi(false).with_level(false).with_target(false),
+            fmt::format()
+                .without_time()
+                .with_ansi(false)
+                .with_level(false)
+                .with_target(false),
         ));
 
     let subscriber = tracing_subscriber::registry()
@@ -541,12 +525,12 @@ fn with_context_fields_enriches_output() {
 
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    dcontext::force_thread_local(|| {
-        let _scope = dcontext::enter_scope();
-        dcontext::set_context("log_rid", "req-abc".to_string());
+    {
+        let _scope = dcontext::sync_ctx::enter_scope();
+        dcontext::sync_ctx::set_context("log_rid", "req-abc".to_string());
 
         tracing::info!("test event");
-    });
+    };
 
     let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     assert!(
@@ -601,14 +585,14 @@ fn span_record_auto_fills_empty_fields() {
 
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    dcontext::force_thread_local(|| {
-        let _scope = dcontext::enter_scope();
-        dcontext::set_context("request_id", "req-auto-recorded".to_string());
+    {
+        let _scope = dcontext::sync_ctx::enter_scope();
+        dcontext::sync_ctx::set_context("request_id", "req-auto-recorded".to_string());
 
         // Span declares request_id as Empty — DcontextLayer should record it
         let _span = tracing::info_span!("handler", request_id = tracing::field::Empty).entered();
         tracing::info!("inside span");
-    });
+    };
 
     let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     // The span's request_id field should be recorded and visible in output
@@ -642,14 +626,14 @@ fn span_record_skips_undeclared_fields() {
 
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    dcontext::force_thread_local(|| {
-        let _scope = dcontext::enter_scope();
-        dcontext::set_context("request_id", "req-skip".to_string());
+    {
+        let _scope = dcontext::sync_ctx::enter_scope();
+        dcontext::sync_ctx::set_context("request_id", "req-skip".to_string());
 
         // Span does NOT declare request_id — should not panic
         let _span = tracing::info_span!("simple_op").entered();
         tracing::info!("no crash");
-    });
+    };
 
     let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     assert!(output.contains("no crash"));
@@ -690,11 +674,14 @@ fn enrich_span_only_does_not_enable_log() {
     assert!(!tf.has_log_enrich());
     assert!(tf.has_span_record());
     assert!(tf.has_enrich()); // "either" semantics
-    // format() (log-only) returns None
+                              // format() (log-only) returns None
     let val = "hello".to_string();
     assert_eq!(tf.format(&val as &dyn std::any::Any), None);
     // format_for_span() returns the value
-    assert_eq!(tf.format_for_span(&val as &dyn std::any::Any), Some("hello".to_string()));
+    assert_eq!(
+        tf.format_for_span(&val as &dyn std::any::Any),
+        Some("hello".to_string())
+    );
 }
 
 #[test]
@@ -740,15 +727,14 @@ fn span_record_does_not_overwrite_user_set_fields() {
 
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    dcontext::force_thread_local(|| {
-        let _scope = dcontext::enter_scope();
-        dcontext::set_context("request_id", "from-context".to_string());
+    {
+        let _scope = dcontext::sync_ctx::enter_scope();
+        dcontext::sync_ctx::set_context("request_id", "from-context".to_string());
 
         // Span declares request_id with a non-Empty value (user-set)
-        let _span =
-            tracing::info_span!("user_op", request_id = "explicit-value").entered();
+        let _span = tracing::info_span!("user_op", request_id = "explicit-value").entered();
         tracing::info!("check");
-    });
+    };
 
     let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     // The span should retain the explicit user value, not be overwritten
@@ -789,16 +775,16 @@ fn self_recording_does_not_poison_extraction() {
 
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    dcontext::force_thread_local(|| {
-        let _scope = dcontext::enter_scope();
+    {
+        let _scope = dcontext::sync_ctx::enter_scope();
 
         // Set context value; span has Empty field for recording
-        dcontext::set_context("request_id", "original".to_string());
+        dcontext::sync_ctx::set_context("request_id", "original".to_string());
         let span = tracing::info_span!("poison_op", request_id = tracing::field::Empty);
         let _enter = span.enter();
 
         // After entering, the context should still have "original"
-        let val = dcontext::get_context_option::<String>("request_id");
+        let val = dcontext::sync_ctx::get_context::<String>("request_id");
         assert_eq!(
             val,
             Some("original".to_string()),
@@ -806,7 +792,7 @@ fn self_recording_does_not_poison_extraction() {
         );
 
         tracing::info!("verify");
-    });
+    };
 
     let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     assert!(output.contains("verify"));

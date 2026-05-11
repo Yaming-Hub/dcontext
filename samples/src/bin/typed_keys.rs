@@ -6,7 +6,7 @@
 //! Usage: `cargo run --bin typed_keys`
 
 use dcontext::{ContextKey, RegistryBuilder};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 // Define typed keys as statics — the string is only for serialization/diagnostics.
 static REQUEST_ID: ContextKey<RequestId> = ContextKey::new("request_id");
@@ -42,7 +42,10 @@ fn main() {
 
     // Set values — no turbofish, no string key at call site.
     REQUEST_ID.set(RequestId("req-typed-001".into()));
-    USER_INFO.set(UserInfo { id: 42, name: "Alice".into() });
+    USER_INFO.set(UserInfo {
+        id: 42,
+        name: "Alice".into(),
+    });
     FEATURE_FLAGS.set(Flags { dark_mode: true });
 
     // Get values — fully type-safe.

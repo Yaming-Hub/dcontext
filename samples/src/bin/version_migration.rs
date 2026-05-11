@@ -8,10 +8,10 @@
 //! Usage: `cargo run --bin version_migration`
 
 use dcontext::{
-    RegistryBuilder, initialize, set_context, get_context,
-    scope, serialize_context, deserialize_context, make_wire_bytes,
+    deserialize_context, get_context, initialize, make_wire_bytes, scope, serialize_context,
+    set_context, RegistryBuilder,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Version 1: original schema with just a trace_id.
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -40,19 +40,22 @@ fn main() {
     builder.register_migration::<TraceContextV1, TraceContextV2>("trace_ctx", 1, |v1| {
         TraceContextV2 {
             trace_id: v1.trace_id,
-            span_id: String::new(),  // V1 didn't have span_id
-            sampled: true,           // default: sampled
+            span_id: String::new(), // V1 didn't have span_id
+            sampled: true,          // default: sampled
         }
     });
     initialize(builder);
 
     // --- Scenario 1: Current version roundtrip (V2 → V2) ---
     println!("1. Current version roundtrip (V2 → V2):");
-    set_context("trace_ctx", TraceContextV2 {
-        trace_id: "tid-current".into(),
-        span_id: "span-42".into(),
-        sampled: false,
-    });
+    set_context(
+        "trace_ctx",
+        TraceContextV2 {
+            trace_id: "tid-current".into(),
+            span_id: "span-42".into(),
+            sampled: false,
+        },
+    );
     let bytes_v2 = serialize_context().unwrap();
 
     scope(|| {
@@ -70,7 +73,9 @@ fn main() {
     // To simulate V1 wire bytes, we construct them using make_wire_bytes.
     // In production, these would come from serialize_context() on a V1 sender.
     let v1_wire = {
-        let v1 = TraceContextV1 { trace_id: "tid-from-old-node".into() };
+        let v1 = TraceContextV1 {
+            trace_id: "tid-from-old-node".into(),
+        };
         let v1_bytes = bincode::serialize(&v1).unwrap();
         make_wire_bytes("trace_ctx", 1, &v1_bytes)
     };
@@ -79,8 +84,14 @@ fn main() {
         let _guard = deserialize_context(&v1_wire).unwrap();
         let ctx: TraceContextV2 = get_context("trace_ctx");
         println!("   trace_id = {} (preserved from V1)", ctx.trace_id);
-        println!("   span_id  = {:?} (default — V1 didn't have it)", ctx.span_id);
-        println!("   sampled  = {} (default — V1 didn't have it)", ctx.sampled);
+        println!(
+            "   span_id  = {:?} (default — V1 didn't have it)",
+            ctx.span_id
+        );
+        println!(
+            "   sampled  = {} (default — V1 didn't have it)",
+            ctx.sampled
+        );
     });
 
     // --- Scenario 3: Multiple versions coexist ---

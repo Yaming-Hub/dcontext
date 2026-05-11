@@ -22,8 +22,10 @@ thread_local! {
 
 /// Extract fields from span attributes and store in span extensions.
 /// Called from `on_new_span` in both layers.
-pub(crate) fn extract_span_fields<S>(attrs: &tracing_core::span::Attributes<'_>, span: &SpanRef<'_, S>)
-where
+pub(crate) fn extract_span_fields<S>(
+    attrs: &tracing_core::span::Attributes<'_>,
+    span: &SpanRef<'_, S>,
+) where
     S: for<'a> LookupSpan<'a>,
 {
     let metadata_fields = get_tracing_fields();
@@ -70,8 +72,10 @@ where
 
 /// Merge late-recorded field values into span extensions.
 /// Called from `on_record` in both layers.
-pub(crate) fn merge_recorded_fields<S>(values: &tracing_core::span::Record<'_>, span: &SpanRef<'_, S>)
-where
+pub(crate) fn merge_recorded_fields<S>(
+    values: &tracing_core::span::Record<'_>,
+    span: &SpanRef<'_, S>,
+) where
     S: for<'a> LookupSpan<'a>,
 {
     if SELF_RECORDING.with(|f| f.get()) {
@@ -117,11 +121,15 @@ where
         }
 
         if let Some(existing) = extensions.get_mut::<ExtractedFields>() {
-            existing.string_values.extend(extractor.extracted.string_values);
+            existing
+                .string_values
+                .extend(extractor.extracted.string_values);
             existing.u64_values.extend(extractor.extracted.u64_values);
             existing.i64_values.extend(extractor.extracted.i64_values);
             existing.bool_values.extend(extractor.extracted.bool_values);
-            existing.user_set_fields.extend(extractor.extracted.user_set_fields);
+            existing
+                .user_set_fields
+                .extend(extractor.extracted.user_set_fields);
         } else {
             extensions.insert(extractor.extracted);
         }

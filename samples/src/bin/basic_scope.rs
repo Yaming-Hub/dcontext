@@ -5,8 +5,8 @@
 //!
 //! Usage: `cargo run --bin basic_scope`
 
-use dcontext::{RegistryBuilder, initialize, enter_scope, get_context, set_context, scope};
-use serde::{Serialize, Deserialize};
+use dcontext::{enter_scope, get_context, initialize, scope, set_context, RegistryBuilder};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct RequestId(String);
@@ -24,18 +24,30 @@ fn main() {
     // 2. Set values in the root scope.
     set_context("request_id", RequestId("req-001".into()));
     set_context("user_id", UserId(42));
-    println!("[root] request_id = {:?}", get_context::<RequestId>("request_id"));
+    println!(
+        "[root] request_id = {:?}",
+        get_context::<RequestId>("request_id")
+    );
     println!("[root] user_id    = {:?}", get_context::<UserId>("user_id"));
 
     // 3. Enter a child scope — changes here are isolated.
     {
         let _guard = enter_scope();
         set_context("request_id", RequestId("req-002-child".into()));
-        println!("[child] request_id = {:?}", get_context::<RequestId>("request_id"));
-        println!("[child] user_id    = {:?}", get_context::<UserId>("user_id")); // inherited
+        println!(
+            "[child] request_id = {:?}",
+            get_context::<RequestId>("request_id")
+        );
+        println!(
+            "[child] user_id    = {:?}",
+            get_context::<UserId>("user_id")
+        ); // inherited
     }
     // Child scope exited — request_id reverted.
-    println!("[root] request_id = {:?}", get_context::<RequestId>("request_id"));
+    println!(
+        "[root] request_id = {:?}",
+        get_context::<RequestId>("request_id")
+    );
 
     // 4. Closure-based scope (recommended API).
     scope(|| {

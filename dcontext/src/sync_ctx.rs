@@ -89,9 +89,9 @@ where
     T: Clone + Send + Sync + 'static,
 {
     try_apply(|store| {
-        store.get_value(key).and_then(|arc| {
-            arc.as_any().downcast_ref::<T>().cloned()
-        })
+        store
+            .get_value(key)
+            .and_then(|arc| arc.as_any().downcast_ref::<T>().cloned())
     })
     .flatten()
 }
@@ -129,10 +129,7 @@ pub fn get_raw_value(key: &str) -> Option<Arc<dyn ContextValue>> {
 /// Access the current context value for a key as `&dyn Any` via callback.
 ///
 /// Returns `None` if the key has no value or the store is busy.
-pub fn with_context_value<R>(
-    key: &str,
-    f: impl FnOnce(&dyn std::any::Any) -> R,
-) -> Option<R> {
+pub fn with_context_value<R>(key: &str, f: impl FnOnce(&dyn std::any::Any) -> R) -> Option<R> {
     get_raw_value(key).map(|arc_val| f(arc_val.as_any()))
 }
 
@@ -186,13 +183,37 @@ pub fn clear() {
     });
 }
 
+/// Attach a snapshot to the thread-local context by pushing a new scope
+/// with its values. Returns a [`ScopeGuard`] that pops the scope on drop.
+pub fn attach(snap: ContextSnapshot) -> ScopeGuard {
+    let guard = enter_scope();
+    if !snap.scope_chain.is_empty() {
+        set_remote_chain(snap.scope_chain);
+    }
+    for (key, val) in snap.values.iter() {
+        set_value(key, Arc::clone(val));
+    }
+    guard
+}
+
+/// Serialize the current thread-local context into bytes.
+pub fn serialize_context() -> Result<Vec<u8>, crate::error::ContextError> {
+    crate::wire::serialize_from(collect_values(), collect_scope_chain())
+}
+
+/// Restore context from bytes into the thread-local store.
+/// Pushes a new scope with deserialized values and activates a scope
+/// barrier that hides parent scopes.
+pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, crate::error::ContextError> {
+    crate::wire::deserialize_into(bytes, false)
+}
+
 // ── Legacy scope management (re-exported at crate root) ────────
 
 /// Push a new scope and return a guard.
 /// Returns a no-op guard if the store is busy (re-entrant access).
 pub fn enter_scope() -> ScopeGuard {
-    try_apply(|store| ScopeGuard::new(store.push_scope(None)))
-        .unwrap_or_else(ScopeGuard::noop)
+    try_apply(|store| ScopeGuard::new(store.push_scope(None))).unwrap_or_else(ScopeGuard::noop)
 }
 
 /// Push a new **named** scope and return a guard.
@@ -218,77 +239,6 @@ pub(crate) fn leave_scope(expected_depth: usize) {
     let _garbage = try_apply(|store| store.pop_scope(expected_depth));
 }
 
-// ── Deprecated compatibility ───────────────────────────────────
-
-/// No-op compatibility shim. With the dual-context redesign, there is no
-/// dispatch logic to override — all access in this module is already
-/// thread-local. This function simply calls `f()` and returns the result.
-#[deprecated(note = "No longer needed: sync_ctx always uses thread-local. Will be removed in a future release.")]
-pub fn force_thread_local<R>(f: impl FnOnce() -> R) -> R {
-    f()
-}
-
-/// Deprecated: use `async_ctx::scope()` instead.
-/// For backward compatibility, dispatches to task-local if available.
-#[deprecated(note = "Use async_ctx::scope() for task-local scoping.")]
-pub async fn scope_async<F, R>(f: F) -> R
-where
-    F: std::future::Future<Output = R>,
-{
-    // If task-local is available, use it (old dispatch behavior)
-    if crate::async_ctx::current_depth().is_some() {
-        return crate::async_ctx::scope("", f).await;
-    }
-    let depth = try_apply(|store| store.push_scope(None));
-
-    match depth {
-        None => f.await,
-        Some(depth) => {
-            let cleanup = ScopeCleanup(depth);
-            let result = f.await;
-            std::mem::forget(cleanup);
-            leave_scope(depth);
-            result
-        }
-    }
-}
-
-/// Deprecated: use `async_ctx::scope()` instead.
-/// For backward compatibility, dispatches to task-local if available.
-#[deprecated(note = "Use async_ctx::scope() for task-local scoping.")]
-pub async fn named_scope_async<F, R>(name: impl Into<String>, f: F) -> R
-where
-    F: std::future::Future<Output = R>,
-{
-    let name = name.into();
-    // If task-local is available, use it (old dispatch behavior)
-    if crate::async_ctx::current_depth().is_some() {
-        return crate::async_ctx::scope(&name, f).await;
-    }
-    let depth = try_apply(|store| store.push_scope(Some(name)));
-
-    match depth {
-        None => f.await,
-        Some(depth) => {
-            let cleanup = ScopeCleanup(depth);
-            let result = f.await;
-            std::mem::forget(cleanup);
-            leave_scope(depth);
-            result
-        }
-    }
-}
-
-/// RAII guard that pops a scope during unwind if the async future panics.
-/// On the normal path the caller calls `std::mem::forget(cleanup)` to disarm it.
-struct ScopeCleanup(usize);
-
-impl Drop for ScopeCleanup {
-    fn drop(&mut self) {
-        leave_scope(self.0);
-    }
-}
-
 // ── Fork support ───────────────────────────────────────────────
 
 /// Create a forked child context from the current thread-local state.
@@ -304,11 +254,6 @@ pub(crate) fn fork() -> Option<crate::store::ContextStore> {
 
 // ── Value access (internal, used by lib.rs dispatch) ───────────
 
-/// Get a value from the context. Returns an Arc clone.
-/// Returns `None` if the key is not set or the store is busy.
-pub(crate) fn get_value(key: &str) -> Option<Arc<dyn ContextValue>> {
-    try_apply(|store| store.get_value(key)).flatten()
-}
 
 /// Set a value in the current scope.
 /// Silently skips if the store is busy (re-entrant access).
@@ -320,8 +265,7 @@ pub(crate) fn set_value(key: &'static str, value: Arc<dyn ContextValue>) {
 /// Collect all effective values (for snapshot/serialization).
 /// Returns an empty map if the store is busy.
 pub(crate) fn collect_values() -> HashMap<&'static str, Arc<dyn ContextValue>> {
-    try_apply(|store| store.collect_values())
-        .unwrap_or_default()
+    try_apply(|store| store.collect_values()).unwrap_or_default()
 }
 
 /// Collect the scope chain for serialization.
@@ -344,10 +288,12 @@ pub(crate) fn set_remote_chain(chain: Vec<String>) {
 /// The Cell is restored (`set(Some(store))`) before the return value is
 /// dropped, so any user Drop code runs with a valid store in the Cell.
 pub(crate) fn try_apply<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
-    CONTEXT.try_with(|cell| {
-        let mut store = cell.take()?; // None = busy
-        let result = f(&mut store);
-        cell.set(Some(store));
-        Some(result)
-    }).unwrap_or(None) // Err = thread-local is being destroyed
+    CONTEXT
+        .try_with(|cell| {
+            let mut store = cell.take()?; // None = busy
+            let result = f(&mut store);
+            cell.set(Some(store));
+            Some(result)
+        })
+        .unwrap_or(None) // Err = thread-local is being destroyed
 }

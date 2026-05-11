@@ -6,8 +6,8 @@
 //!
 //! Usage: `cargo run --bin feature_flags`
 
-use dcontext::{RegistryBuilder, initialize, set_context, get_context, scope};
-use serde::{Serialize, Deserialize};
+use dcontext::{get_context, initialize, scope, set_context, RegistryBuilder};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FeatureFlags {
@@ -32,11 +32,14 @@ fn main() {
     initialize(builder);
 
     // Simulate per-request feature flag resolution.
-    set_context("features", FeatureFlags {
-        dark_mode: true,
-        new_pricing: false,
-        beta_search: true,
-    });
+    set_context(
+        "features",
+        FeatureFlags {
+            dark_mode: true,
+            new_pricing: false,
+            beta_search: true,
+        },
+    );
 
     render_page();
 

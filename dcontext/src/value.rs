@@ -29,26 +29,3 @@ where
         false
     }
 }
-
-/// Wrapper for local-only values that don't implement Serialize/DeserializeOwned.
-/// These are excluded from serialization but propagate via snapshot/attach.
-pub(crate) struct LocalValue<T>(pub T);
-
-impl<T> ContextValue for LocalValue<T>
-where
-    T: Clone + Send + Sync + 'static,
-{
-    fn as_any(&self) -> &dyn Any {
-        &self.0
-    }
-
-    fn serialize_value(&self) -> Result<Vec<u8>, ContextError> {
-        Err(ContextError::LocalOnlyKey(
-            std::any::type_name::<T>().to_string(),
-        ))
-    }
-
-    fn is_local(&self) -> bool {
-        true
-    }
-}

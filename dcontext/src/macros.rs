@@ -17,26 +17,3 @@ macro_rules! register_contexts {
         )*
     };
 }
-
-/// Enter a scope, set values, execute a block, and auto-revert.
-///
-/// ```rust,ignore
-/// dcontext::with_scope! {
-///     "trace_id" => TraceId::new(),
-///     "flags" => Flags { debug: true },
-///     => {
-///         do_work();
-///     }
-/// }
-/// ```
-#[macro_export]
-macro_rules! with_scope {
-    ( $( $key:expr => $val:expr ),+ $(,)? => $body:block ) => {
-        $crate::scope(|| {
-            $(
-                $crate::set_context($key, $val);
-            )*
-            $body
-        })
-    };
-}

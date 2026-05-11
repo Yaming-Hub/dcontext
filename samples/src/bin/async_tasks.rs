@@ -7,10 +7,10 @@
 //! Usage: `cargo run --bin async_tasks`
 
 use dcontext::{
-    RegistryBuilder, initialize, set_context, get_context, scope, snapshot,
-    with_context, spawn_with_context_async, force_thread_local,
+    force_thread_local, get_context, initialize, scope, set_context, snapshot,
+    spawn_with_context_async, with_context, RegistryBuilder,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct RequestId(String);
@@ -35,27 +35,45 @@ async fn main() {
 
     // Wrap the main logic in with_context to establish task-local storage.
     with_context(initial_snap, async {
-        println!("[main task] request_id = {:?}", get_context::<RequestId>("request_id"));
-        println!("[main task] span_id    = {:?}", get_context::<SpanId>("span_id"));
+        println!(
+            "[main task] request_id = {:?}",
+            get_context::<RequestId>("request_id")
+        );
+        println!(
+            "[main task] span_id    = {:?}",
+            get_context::<SpanId>("span_id")
+        );
 
         // Spawn a child task — context is automatically inherited.
         let handle = spawn_with_context_async(async {
-            println!("[child task] request_id = {:?}", get_context::<RequestId>("request_id"));
+            println!(
+                "[child task] request_id = {:?}",
+                get_context::<RequestId>("request_id")
+            );
 
             // Child task can create its own scopes.
             scope(|| {
                 set_context("span_id", SpanId(2));
-                println!("[child scope] span_id = {:?}", get_context::<SpanId>("span_id"));
+                println!(
+                    "[child scope] span_id = {:?}",
+                    get_context::<SpanId>("span_id")
+                );
             });
 
             // After scope exits, span_id reverts.
-            println!("[child task] span_id after scope = {:?}", get_context::<SpanId>("span_id"));
+            println!(
+                "[child task] span_id after scope = {:?}",
+                get_context::<SpanId>("span_id")
+            );
         });
 
         handle.await.unwrap();
 
         // Main task is unaffected by child's scopes.
-        println!("[main task] span_id still = {:?}", get_context::<SpanId>("span_id"));
+        println!(
+            "[main task] span_id still = {:?}",
+            get_context::<SpanId>("span_id")
+        );
     })
     .await;
 }

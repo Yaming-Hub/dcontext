@@ -6,8 +6,10 @@
 //!
 //! Usage: `cargo run --bin cross_thread`
 
-use dcontext::{RegistryBuilder, initialize, set_context, get_context, spawn_with_context, wrap_with_context};
-use serde::{Serialize, Deserialize};
+use dcontext::{
+    get_context, initialize, set_context, spawn_with_context, wrap_with_context, RegistryBuilder,
+};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct TraceId(String);
@@ -25,7 +27,8 @@ fn main() {
         let tid = get_context::<TraceId>("trace_id");
         println!("[worker-1] trace_id = {:?}", tid);
         tid.0
-    }).expect("spawn failed");
+    })
+    .expect("spawn failed");
 
     let result = handle.join().unwrap();
     assert_eq!(result, "trace-abc-123");
