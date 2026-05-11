@@ -39,6 +39,8 @@ pub mod error;
 mod value;
 mod registry;
 mod scope;
+pub(crate) mod async_storage;
+pub(crate) mod sync_storage;
 pub(crate) mod storage;
 mod snapshot;
 mod wire;
