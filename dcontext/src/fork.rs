@@ -138,7 +138,7 @@ fn build_forked_store(handle: ForkHandle) -> ContextStore {
 // ── Internal: called from storage.rs ───────────────────────────
 
 /// Create a ForkHandle from the current store state.
-/// Called within the Cell window via with_store.
+/// Called within the Cell window via with_context.
 pub(crate) fn create_fork_handle(store: &ContextStore) -> ForkHandle {
     // Freeze the current scope into a new ScopeNode (Arc-shared with parent)
     let frozen_values: HashMap<&'static str, Arc<dyn ContextValue>> = store

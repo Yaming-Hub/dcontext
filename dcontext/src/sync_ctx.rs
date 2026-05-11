@@ -41,7 +41,7 @@ thread_local! {
 /// Always succeeds (thread-local is always available).
 pub fn push_scope(name: &str) -> ScopeGuard {
     let name = name.to_string();
-    with_thread_store(|store| ScopeGuard::new(store.push_scope(Some(name))))
+    with_context(|store| ScopeGuard::new(store.push_scope(Some(name))))
         .unwrap_or_else(ScopeGuard::noop)
 }
 
@@ -52,12 +52,12 @@ pub fn pop_scope(expected_depth: usize) {
     if expected_depth == usize::MAX {
         return;
     }
-    let _garbage = with_thread_store(|store| store.pop_scope(expected_depth));
+    let _garbage = with_context(|store| store.pop_scope(expected_depth));
 }
 
 /// Get the current scope chain from the thread-local store.
 pub fn scope_chain() -> Vec<String> {
-    with_thread_store(|store| store.scope_chain()).unwrap_or_default()
+    with_context(|store| store.scope_chain()).unwrap_or_default()
 }
 
 // ── Value access (typed) ───────────────────────────────────────
@@ -67,7 +67,7 @@ pub fn set_context<T>(key: &'static str, value: T)
 where
     T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    with_thread_store(|store| {
+    with_context(|store| {
         store.set_value(key, Arc::new(value));
     });
 }
@@ -79,7 +79,7 @@ pub fn get_context<T>(key: &str) -> Option<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    with_thread_store(|store| {
+    with_context(|store| {
         store.get_value(key).and_then(|arc| {
             arc.as_any().downcast_ref::<T>().cloned()
         })
@@ -105,7 +105,7 @@ where
 ///
 /// Used by extension crates (like dcontext-tracing) for field extraction.
 pub fn set_raw_value(key: &'static str, value: Arc<dyn ContextValue>) {
-    with_thread_store(|store| {
+    with_context(|store| {
         store.set_value(key, value);
     });
 }
@@ -114,7 +114,7 @@ pub fn set_raw_value(key: &'static str, value: Arc<dyn ContextValue>) {
 ///
 /// Returns `None` if the key is not set.
 pub fn get_raw_value(key: &str) -> Option<Arc<dyn ContextValue>> {
-    with_thread_store(|store| store.get_value(key)).flatten()
+    with_context(|store| store.get_value(key)).flatten()
 }
 
 /// Access the current context value for a key as `&dyn Any` via callback.
@@ -133,7 +133,7 @@ pub fn with_context_value<R>(
 ///
 /// Used for propagating context to spawned threads or bridging to async.
 pub fn snapshot() -> ContextSnapshot {
-    with_thread_store(|store| {
+    with_context(|store| {
         let values = store.collect_values();
         let scope_chain = store.scope_chain();
         ContextSnapshot {
@@ -159,7 +159,7 @@ pub fn snapshot() -> ContextSnapshot {
 /// }).await;
 /// ```
 pub fn restore(snapshot: ContextSnapshot) {
-    with_thread_store(|store| {
+    with_context(|store| {
         let chain = snapshot.scope_chain.clone();
         let values: HashMap<&'static str, Arc<dyn ContextValue>> = snapshot
             .values
@@ -172,7 +172,7 @@ pub fn restore(snapshot: ContextSnapshot) {
 
 /// Clear the thread-local context entirely.
 pub fn clear() {
-    with_thread_store(|store| {
+    with_context(|store| {
         *store = ContextStore::new();
     });
 }
@@ -182,7 +182,7 @@ pub fn clear() {
 /// Push a new scope and return a guard.
 /// Returns a no-op guard if the store is busy (re-entrant access).
 pub fn enter_scope() -> ScopeGuard {
-    with_store(|store| ScopeGuard::new(store.push_scope(None)))
+    with_context(|store| ScopeGuard::new(store.push_scope(None)))
         .unwrap_or_else(ScopeGuard::noop)
 }
 
@@ -193,7 +193,7 @@ pub fn enter_scope() -> ScopeGuard {
 /// stack that is propagated across process boundaries.
 pub fn enter_named_scope(name: impl Into<String>) -> ScopeGuard {
     let name = name.into();
-    with_store(|store| ScopeGuard::new(store.push_scope(Some(name))))
+    with_context(|store| ScopeGuard::new(store.push_scope(Some(name))))
         .unwrap_or_else(ScopeGuard::noop)
 }
 
@@ -204,9 +204,9 @@ pub(crate) fn leave_scope(expected_depth: usize) {
     if expected_depth == usize::MAX {
         return; // noop guard
     }
-    // Garbage (old Arc values) is returned from with_store and dropped here,
+    // Garbage (old Arc values) is returned from with_context and dropped here,
     // outside the Cell window, so any user Drop code runs with a valid store.
-    let _garbage = with_store(|store| store.pop_scope(expected_depth));
+    let _garbage = with_context(|store| store.pop_scope(expected_depth));
 }
 
 // ── Deprecated compatibility ───────────────────────────────────
@@ -230,7 +230,7 @@ where
     if crate::async_ctx::current_depth().is_some() {
         return crate::async_ctx::scope("", f).await;
     }
-    let depth = with_store(|store| store.push_scope(None));
+    let depth = with_context(|store| store.push_scope(None));
 
     match depth {
         None => f.await,
@@ -256,7 +256,7 @@ where
     if crate::async_ctx::current_depth().is_some() {
         return crate::async_ctx::scope(&name, f).await;
     }
-    let depth = with_store(|store| store.push_scope(Some(name)));
+    let depth = with_context(|store| store.push_scope(Some(name)));
 
     match depth {
         None => f.await,
@@ -285,7 +285,7 @@ impl Drop for ScopeCleanup {
 /// Create a ForkHandle from the current context state.
 /// Returns None if the store is busy.
 pub(crate) fn do_fork() -> Option<crate::fork::ForkHandle> {
-    with_store(|store| crate::fork::create_fork_handle(store))
+    with_context(|store| crate::fork::create_fork_handle(store))
 }
 
 // ── Value access (internal, used by lib.rs dispatch) ───────────
@@ -293,20 +293,20 @@ pub(crate) fn do_fork() -> Option<crate::fork::ForkHandle> {
 /// Get a value from the context. Returns an Arc clone.
 /// Returns `None` if the key is not set or the store is busy.
 pub(crate) fn get_value(key: &str) -> Option<Arc<dyn ContextValue>> {
-    with_store(|store| store.get_value(key)).flatten()
+    with_context(|store| store.get_value(key)).flatten()
 }
 
 /// Set a value in the current scope.
 /// Silently skips if the store is busy (re-entrant access).
 /// Old value is dropped outside the Cell window.
 pub(crate) fn set_value(key: &'static str, value: Arc<dyn ContextValue>) {
-    let _old = with_store(|store| store.set_value(key, value));
+    let _old = with_context(|store| store.set_value(key, value));
 }
 
 /// Collect all effective values (for snapshot/serialization).
 /// Returns an empty map if the store is busy.
 pub(crate) fn collect_values() -> HashMap<&'static str, Arc<dyn ContextValue>> {
-    with_store(|store| store.collect_values())
+    with_context(|store| store.collect_values())
         .unwrap_or_default()
 }
 
@@ -318,51 +318,33 @@ pub(crate) fn collect_scope_chain() -> Vec<String> {
 /// Store a remote scope chain in the current context.
 /// Silently skips if the store is busy (re-entrant access).
 pub(crate) fn set_remote_chain(chain: Vec<String>) {
-    with_store(|store| store.set_remote_chain(chain));
+    with_context(|store| store.set_remote_chain(chain));
 }
 
 // ── Internal helpers ───────────────────────────────────────────
 
 /// Execute `f` with exclusive access to the thread-local context store.
-/// Returns `None` if the store is busy (re-entrant access).
-fn with_thread_store<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
-    match CONTEXT.try_with(|cell| {
-        let mut store = cell.take()?;
-        let r = f(&mut store);
+/// Returns `None` if the store is busy (re-entrant access) or if the
+/// thread-local is being destroyed during thread shutdown.
+///
+/// The Cell is restored (`set(Some(store))`) before the return value is
+/// dropped, so any user Drop code runs with a valid store in the Cell.
+fn with_context<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
+    let f = std::cell::Cell::new(Some(f));
+    let run = |cell: &Cell<Option<ContextStore>>| -> Option<R> {
+        let mut store = cell.take()?; // None = busy
+        let func = f.take().expect("with_context closure called more than once");
+        let result = func(&mut store);
         cell.set(Some(store));
-        Some(r)
-    }) {
-        Ok(r) => r,
-        Err(_) => None,
-    }
-}
-
-/// Access the thread-local Cell directly.
-/// Uses try_with to handle thread shutdown gracefully.
-fn with_thread_cell<R>(mut f: impl FnMut(&Cell<Option<ContextStore>>) -> R) -> R {
-    match CONTEXT.try_with(|cell| f(cell)) {
+        Some(result)
+    };
+    match CONTEXT.try_with(run) {
         Ok(r) => r,
         Err(_) => {
             // Thread-local is being destroyed — provide an empty Cell
             // so callers see None ("busy") and return defaults.
             let temp = Cell::new(None);
-            f(&temp)
+            run(&temp)
         }
     }
-}
-
-/// Execute `f` with exclusive access to the context store (Cell-based).
-/// Returns `None` if the store is busy (re-entrant access).
-///
-/// The Cell is restored (`set(Some(store))`) before the return value is
-/// dropped, so any user Drop code runs with a valid store in the Cell.
-fn with_store<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
-    let f = std::cell::Cell::new(Some(f));
-    with_thread_cell(|cell| {
-        let mut store = cell.take()?; // None = busy
-        let func = f.take().expect("with_store closure called more than once");
-        let result = func(&mut store);
-        cell.set(Some(store));
-        Some(result)
-    })
 }
