@@ -21,6 +21,8 @@ use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 /// Per-span state stored in span extensions.
 /// Tracks whether this span has pushed a scope and at what depth.
 struct AsyncScopeState {
+    /// The scope name that was pushed for this span.
+    scope_name: String,
     /// The depth returned by push_scope — needed for pop_scope on close.
     depth: usize,
 }
@@ -93,9 +95,12 @@ where
         let depth = guard.expected_depth();
         std::mem::forget(guard); // We'll manually pop on close
 
-        // Store depth in span extensions for retrieval on close
+        // Store scope name and depth in span extensions for retrieval on close
         let mut extensions = span.extensions_mut();
-        extensions.insert(AsyncScopeState { depth });
+        extensions.insert(AsyncScopeState {
+            scope_name: name.to_string(),
+            depth,
+        });
     }
 
     fn on_exit(&self, _id: &span::Id, _ctx: Context<'_, S>) {
@@ -115,7 +120,12 @@ where
         };
 
         if let Some(state) = state {
-            dcontext::async_ctx::pop_scope(state.depth);
+            // Only pop if the top of the scope chain matches what we pushed.
+            // This guards against mismatched pops if scopes were manipulated externally.
+            let top = dcontext::async_ctx::peek_scope();
+            if top.as_deref() == Some(state.scope_name.as_str()) {
+                dcontext::async_ctx::pop_scope(state.depth);
+            }
         }
     }
 }

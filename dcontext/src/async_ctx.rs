@@ -40,6 +40,13 @@ pub fn pop_scope(expected_depth: usize) {
     let _garbage = with_task_store(|store| store.pop_scope(expected_depth));
 }
 
+/// Peek at the name of the top scope on the task-local store.
+///
+/// Returns `None` if no scope is pushed or if not in an async task.
+pub fn peek_scope() -> Option<String> {
+    with_task_store(|store| store.current_name.clone()).flatten()
+}
+
 /// Get the current scope chain from the task-local store.
 ///
 /// Returns an empty `Vec` if not in an async task or if the store is busy.
