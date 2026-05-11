@@ -12,7 +12,6 @@ and even process boundaries via serialization.
 - **Type-safe** — Compile-time checked access via generics over `Any` storage
 - **Cross-thread** — Snapshot and attach context when spawning threads
 - **Cross-async** — Helpers for propagating context across Tokio tasks
-- **Runtime-agnostic async** — `ContextFuture` poll-wrapper works with any executor
 - **Serializable** — Serialize context to bytes/string for cross-process propagation
 - **Local-only entries** — Non-serializable context that stays within the process
 - **Version migration** — Rolling upgrades with automatic old→new schema conversion
@@ -94,7 +93,6 @@ fn main() {
 | `tokio` | yes | Tokio task-local storage, `scope_async`, and async spawn helpers |
 | `base64` | yes | Base64 string serialization for HTTP headers/gRPC metadata |
 | `context-key` | yes | `ContextKey<T>` typed key wrapper for compile-time safe access |
-| `context-future` | no | `ContextFuture` poll-wrapper for runtime-agnostic async (non-Tokio executors) |
 
 ## Documentation
 

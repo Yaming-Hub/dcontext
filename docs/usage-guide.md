@@ -14,20 +14,19 @@ async integration, and actor framework support.
 4. [Reading and Writing Context](#4-reading-and-writing-context)
 5. [Snapshots and Cross-Thread Propagation](#5-snapshots-and-cross-thread-propagation)
 6. [Async Integration (Tokio)](#6-async-integration-tokio)
-7. [Runtime-Agnostic Async](#7-runtime-agnostic-async)
-8. [Cross-Process Serialization](#8-cross-process-serialization)
-9. [Local-Only Entries](#9-local-only-entries)
-10. [Typed Keys (ContextKey)](#10-typed-keys-contextkey)
-11. [Custom Codecs](#11-custom-codecs)
-12. [Version Migration](#12-version-migration)
-13. [Configuration](#13-configuration)
-14. [Scope Chain](#14-scope-chain)
-15. [Convenience Macros](#15-convenience-macros)
-16. [Error Handling](#16-error-handling)
-17. [Integration with dactor](#17-integration-with-dactor)
-18. [Cargo Features](#18-cargo-features)
-19. [Log Enrichment](#19-log-enrichment)
-20. [Dual-Context Model (v0.8)](#20-dual-context-model-v08)
+7. [Cross-Process Serialization](#7-cross-process-serialization)
+8. [Local-Only Entries](#8-local-only-entries)
+9. [Typed Keys (ContextKey)](#9-typed-keys-contextkey)
+10. [Custom Codecs](#10-custom-codecs)
+11. [Version Migration](#11-version-migration)
+12. [Configuration](#12-configuration)
+13. [Scope Chain](#13-scope-chain)
+14. [Convenience Macros](#14-convenience-macros)
+15. [Error Handling](#15-error-handling)
+16. [Integration with dactor](#16-integration-with-dactor)
+17. [Cargo Features](#17-cargo-features)
+18. [Log Enrichment](#18-log-enrichment)
+19. [Dual-Context Model (v0.8)](#19-dual-context-model-v08)
 
 ---
 
@@ -175,13 +174,13 @@ assert_eq!(get_context::<UserId>("user").0, 1); // reverted to outer
 
 ### Async scope
 
-For async code, use `scope_async` (requires `tokio` feature):
+For async code, use `async_ctx::scope` with Tokio task-local context:
 
 ```rust
-use dcontext::scope_async;
+use dcontext::async_ctx;
 
-scope_async(async {
-    set_context("request_id", RequestId("async-scope".into()));
+async_ctx::scope("request", async {
+    async_ctx::set_context("request_id", RequestId("async-scope".into()));
     do_async_work().await;
 }).await;
 // reverted after future completes
@@ -306,29 +305,29 @@ for _ in 0..10 {
 
 ## 6. Async Integration (Tokio)
 
-When running inside a Tokio runtime, dcontext uses `tokio::task_local!`
-for context storage. This requires explicit setup.
+`dcontext` is Tokio-only for async context propagation. Use `dcontext::async_ctx`
+for async/task-local context and `dcontext::sync_ctx` for
+synchronous/thread-local context.
 
 ### Establishing task-local context
 
 ```rust
-use dcontext::{with_context, snapshot, force_thread_local};
+use dcontext::{async_ctx, sync_ctx};
 
 #[tokio::main]
 async fn main() {
     // Set up registry...
 
-    // Create initial context in thread-local (we're at top level)
-    let snap = force_thread_local(|| {
-        let _guard = dcontext::enter_scope();
-        dcontext::set_context("request_id", RequestId("req-001".into()));
-        dcontext::snapshot()
-    });
+    // Build initial context in the sync store.
+    let snap = {
+        let _guard = sync_ctx::enter_scope();
+        sync_ctx::set_context("request_id", RequestId("req-001".into()));
+        sync_ctx::snapshot()
+    };
 
-    // Establish task-local context for async code
-    with_context(snap, async {
-        // All async code here sees the context
-        let rid: RequestId = dcontext::get_context("request_id");
+    // Establish task-local context for async code.
+    async_ctx::with_context(snap, async {
+        let rid = async_ctx::get_context::<RequestId>("request_id").unwrap();
         assert_eq!(rid.0, "req-001");
 
         do_async_work().await; // context visible through .await points
@@ -336,88 +335,43 @@ async fn main() {
 }
 ```
 
-### Why `force_thread_local`?
+### About `force_thread_local`
 
-Inside a Tokio runtime, dcontext's storage dispatcher detects the runtime and
-requires task-local context (to prevent accidental thread-local use that would
-break across `.await` points). Use `force_thread_local` as an escape hatch
-when you need to set up initial context before any task-local scope exists.
+`force_thread_local` is a deprecated no-op compatibility shim kept for backward
+compatibility. In the dual-context model there is no runtime dispatch to
+override: `sync_ctx` is always thread-local and `async_ctx` is always Tokio
+task-local. `force_thread_local(f)` simply calls `f()` and returns the result.
 
 ### Spawning async tasks with context
 
 ```rust
-use dcontext::spawn_with_context_async;
+use dcontext::async_ctx;
 
-with_context(snap, async {
-    // Spawn a child task that inherits context
-    let handle = spawn_with_context_async(async {
-        let rid: RequestId = dcontext::get_context("request_id");
-        // context inherited from parent task
+async_ctx::with_context(snap, async {
+    let child_snap = async_ctx::snapshot();
+
+    let handle = tokio::spawn(async move {
+        async_ctx::with_context(child_snap, async {
+            let rid = async_ctx::get_context::<RequestId>("request_id").unwrap();
+            // context inherited from parent task
+        }).await;
     });
+
     handle.await.unwrap();
 }).await;
 ```
 
-### Storage dispatch rules
+### Storage model
 
-| Situation | Storage used |
-|-----------|-------------|
-| No Tokio runtime | Thread-local |
-| Inside `with_context(...)` | Task-local |
-| Inside Tokio but no `with_context` | **Panics** (safety check) |
-| Inside `force_thread_local(...)` | Thread-local (forced) |
-
----
-
-## 7. Runtime-Agnostic Async
-
-For executors other than Tokio (async-std, smol, etc.), enable the
-`context-future` feature:
-
-```toml
-[dependencies]
-dcontext = { version = "0.4", features = ["context-future"] }
-```
-
-### ContextFuture
-
-`ContextFuture` wraps any future with context propagation using thread-local
-storage instead of task-local. It installs/removes context on each `poll()`.
-
-```rust
-use dcontext::with_context_future;
-
-// Set up context in thread-local
-force_thread_local(|| {
-    let _guard = enter_scope();
-    set_context("trace_id", TraceId("abc".into()));
-});
-
-let fut = with_context_future(async {
-    // Context is available — no force_thread_local needed inside
-    let tid: TraceId = get_context("trace_id");
-    assert_eq!(tid.0, "abc");
-});
-
-// Run with any executor
-smol::block_on(fut);
-```
-
-### Comparison with `with_context`
-
-| | `with_context` (Tokio) | `with_context_future` (any runtime) |
-|---|---|---|
-| **Runtime** | Tokio only | Any executor |
-| **Mechanism** | `tokio::task_local!` | Thread-local per `poll()` |
-| **Overhead** | O(1) per poll | O(N) per poll (N = context keys) |
-| **Feature** | `tokio` (default) | `context-future` |
-
-Use `with_context` when you're on Tokio (zero overhead). Use
-`with_context_future` when you need runtime portability.
+| Code path | Storage used |
+|-----------|--------------|
+| `async_ctx::*` / `with_context(...)` | Tokio task-local |
+| `sync_ctx::*` and sync helpers | Thread-local |
+| `force_thread_local(...)` | Deprecated no-op shim; just runs `f()` |
 
 ---
 
-## 8. Cross-Process Serialization
+## 7. Cross-Process Serialization
 
 Context can be serialized to bytes for transport across process boundaries
 (RPC, message queues, HTTP headers).
@@ -470,7 +424,7 @@ receivers — a service only needs to register the keys it cares about.
 
 ---
 
-## 9. Local-Only Entries
+## 8. Local-Only Entries
 
 For values that should propagate within a process (via snapshots) but never
 be serialized for cross-process transport.
@@ -510,7 +464,7 @@ let db: DbConnection = get_context("db_conn");
 
 ---
 
-## 10. Typed Keys (ContextKey)
+## 9. Typed Keys (ContextKey)
 
 The `context-key` feature (enabled by default) provides compile-time
 type-safe access without string literals at call sites.
@@ -546,7 +500,7 @@ let rid = REQUEST_ID.get(); // type inferred from ContextKey<RequestId>
 
 ---
 
-## 11. Custom Codecs
+## 10. Custom Codecs
 
 Replace the default bincode serialization with a custom format per key.
 
@@ -572,7 +526,7 @@ bincode (fast, compact, Rust-native).
 
 ---
 
-## 12. Version Migration
+## 11. Version Migration
 
 Support rolling upgrades where different nodes may run different schema
 versions.
@@ -638,7 +592,7 @@ assert_eq!(tc.span_id, ""); // migrated default
 
 ---
 
-## 13. Configuration
+## 12. Configuration
 
 ### Size limits
 
@@ -663,7 +617,7 @@ Default is `0` (no limit). Set this early in application startup.
 
 ---
 
-## 14. Scope Chain
+## 13. Scope Chain
 
 The scope chain gives you a queryable call path that spans both local scopes
 and remote process boundaries. Named scopes form the chain; unnamed scopes
@@ -685,12 +639,12 @@ let _guard = enter_named_scope("api-gateway");
 }
 ```
 
-For async code (requires `tokio` feature):
+For async code, use `async_ctx::scope` with Tokio task-local context:
 
 ```rust
-use dcontext::named_scope_async;
+use dcontext::async_ctx;
 
-named_scope_async("process-order", async {
+async_ctx::scope("process-order", async {
     // scope chain includes "process-order" across .await points
     do_async_work().await;
 }).await;
@@ -764,7 +718,7 @@ let chain = dcontext::scope_chain();
 
 > **Note:** `dcontext-tracing` uses `force_thread_local()`, so the chain
 > reflects thread-local state. For full async propagation, combine with
-> `dcontext::with_context()`.
+> `dcontext::async_ctx::with_context()`.
 
 ### Integration with dactor
 
@@ -780,7 +734,7 @@ let chain = dcontext::scope_chain();
 
 ---
 
-## 15. Convenience Macros
+## 14. Convenience Macros
 
 ### `register_contexts!`
 
@@ -817,7 +771,7 @@ with_scope! {
 
 ---
 
-## 16. Error Handling
+## 15. Error Handling
 
 All errors are represented by `dcontext::ContextError`:
 
@@ -841,7 +795,7 @@ All errors are represented by `dcontext::ContextError`:
 
 ---
 
-## 17. Integration with dactor
+## 16. Integration with dactor
 
 The `dcontext-dactor` crate provides automatic context propagation through
 [dactor](https://github.com/microsoft/dactor) actor messages.
@@ -912,36 +866,37 @@ ContextInboundInterceptor::new(ErrorPolicy::Reject);
 
 ---
 
-## 18. Cargo Features
+## 17. Cargo Features
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `tokio` | ✅ | Task-local storage, `with_context`, `spawn_with_context_async`, `scope_async` |
 | `base64` | ✅ | Base64 string serialization for HTTP headers |
 | `context-key` | ✅ | `ContextKey<T>` compile-time type-safe wrapper |
-| `context-future` | ❌ | `ContextFuture` for non-Tokio executors |
 
-### Minimal (no async)
+Tokio async context support is built in. Use `async_ctx`, `with_context`, and
+`spawn_with_context_async` inside a Tokio runtime.
+
+### Minimal
 
 ```toml
-dcontext = { version = "0.4", default-features = false }
+dcontext = { version = "0.8", default-features = false }
 ```
 
-### Full (all features)
+### Default (recommended)
 
 ```toml
-dcontext = { version = "0.4", features = ["context-future"] }
+dcontext = "0.8"
 ```
 
 ---
 
-## 19. Log Enrichment
+## 18. Log Enrichment
 
 The `dcontext-tracing` crate provides **log enrichment** — automatic injection
 of context values into every log event. This is powered by the extensible
 **per-key metadata** system in the core `dcontext` crate.
 
-### 19.1 Extensible Metadata
+### 18.1 Extensible Metadata
 
 Any typed metadata can be attached to a registration. Metadata is keyed by
 `TypeId`, so different extension crates can each register their own metadata
@@ -984,7 +939,7 @@ dcontext::initialize(builder);
 Each `with_metadata::<M>(value)` call stores under `TypeId::of::<M>()`.
 Different metadata types coexist independently — one value per type per key.
 
-### 19.2 TracingField Builder
+### 18.2 TracingField Builder
 
 `TracingField` is built with a fluent builder that controls three directions:
 
@@ -1060,7 +1015,7 @@ output. Use `.span_field("other_name")` if the extraction span field name
 differs from the context key, and `.record_as("field")` if the span field to
 record into differs from `log_name`.
 
-### 19.3 WithContextFields Formatter
+### 18.3 WithContextFields Formatter
 
 `WithContextFields` wraps any `FormatEvent` implementation to prepend
 context fields to every log line:
@@ -1089,7 +1044,7 @@ rid=req-123 tenant=acme  INFO query complete, rows=42
 Only keys that have a `TracingField` with an enrich function **and** a value
 set in the current context appear. Unset keys are silently skipped.
 
-### 19.4 collect_log_fields()
+### 18.4 collect_log_fields()
 
 For custom formatters or non-tracing logging, use `collect_log_fields()` to
 get the current context fields as `(name, formatted_value)` pairs:
@@ -1103,7 +1058,7 @@ for (name, value) in &fields {
 }
 ```
 
-### 19.5 Querying Metadata
+### 18.5 Querying Metadata
 
 The core `dcontext` crate exposes general-purpose metadata queries that any
 extension crate can use:
@@ -1120,7 +1075,7 @@ if let Some(name) = dcontext::with_metadata::<TracingField, _>("request_id", |tf
 let field_names: Vec<&str> = dcontext::keys_with_metadata::<TracingField, _>(|_key, tf| tf.log_name());
 ```
 
-### 19.6 Writing Your Own Metadata
+### 18.6 Writing Your Own Metadata
 
 Extension crates define their own metadata struct and use the same registration API:
 
@@ -1151,7 +1106,7 @@ let headers = dcontext::keys_with_metadata::<PropagationHeader, _>(|key, ph| {
 
 ---
 
-## 20. Dual-Context Model (v0.8)
+## 19. Dual-Context Model (v0.8)
 
 Starting with v0.8, dcontext introduces a **dual-context model** that separates
 async and sync context into independent stores. This eliminates a class of bugs

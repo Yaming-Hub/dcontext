@@ -159,19 +159,22 @@ impl FromFieldValue for IsAdmin {
 
 ## Async Behavior
 
-When used with [`Instrument`](https://docs.rs/tracing/latest/tracing/trait.Instrument.html),
-the layer creates and reverts a scope around each poll of the future. Mapped
-field values and span info are re-applied on each enter, so reads via
-`force_thread_local()` will see the correct values during each poll:
+For Tokio async code, prefer `AsyncDcontextLayer`, which stores span-scoped
+context in `dcontext::async_ctx` task-local storage. That means mapped field
+values and span info are available via the normal `dcontext::get_context()`
+API throughout the task:
 
 ```rust
+use dcontext_tracing::AsyncDcontextLayer;
 use tracing::Instrument;
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()
+    .with(AsyncDcontextLayer::new())
+    .init();
 
 async fn handle_request() {
-    // Inside the span, read context via force_thread_local
-    let id: RequestId = dcontext::force_thread_local(|| {
-        dcontext::get_context("request_id")
-    });
+    let id: RequestId = dcontext::get_context("request_id");
 }
 
 handle_request()
@@ -179,10 +182,10 @@ handle_request()
     .await;
 ```
 
-> **Note:** Mutations made inside a span do **not** persist across `.await`
-> points — each poll gets a fresh scope. For full async context propagation
-> across `.await`, use `dcontext::with_context()` or `dcontext::ContextFuture`
-> directly.
+> **Note:** `AsyncDcontextLayer` is the recommended async integration. It uses
+> Tokio task-local storage via `dcontext::async_ctx`, so span context persists
+> across `.await` points in the task. `force_thread_local()` still exists only
+> as a deprecated no-op compatibility shim.
 
 ## Full Example
 
@@ -201,14 +204,18 @@ for a complete working example.
 
 ## How It Works
 
-The layer uses a **thread-local stack** to store dcontext `ScopeGuard`s (which
-are `!Send` and cannot be stored in tracing's span extensions). On span enter,
-a new scope is pushed; on span exit, the scope is popped and the guard dropped,
-reverting context changes. This mirrors the approach used by
-`tracing-opentelemetry`.
+`SyncDcontextLayer` (and the legacy `DcontextLayer` alias) use a
+**thread-local stack** to store dcontext `ScopeGuard`s (which are `!Send` and
+cannot be stored in tracing's span extensions). On span enter, a new scope is
+pushed; on span exit, the scope is popped and the guard dropped, reverting
+context changes. This mirrors the approach used by `tracing-opentelemetry`.
 
-All dcontext operations in callbacks use `force_thread_local()` to ensure
-correct behavior inside tokio runtimes.
+`AsyncDcontextLayer` writes to `dcontext::async_ctx` task-local storage instead
+and keeps per-span lifecycle state in span extensions so scopes survive
+Tokio yield points and task migration.
+
+`force_thread_local()` remains only as a deprecated no-op identity function for
+backward compatibility.
 
 ## Scope Chain Integration
 
@@ -229,12 +236,11 @@ let _outer = tracing::info_span!("api_handler").entered();
 This works transparently — no extra configuration needed beyond installing
 the `DcontextLayer`.
 
-> **Thread-local limitation:** Because `dcontext-tracing` uses
-> `force_thread_local()`, the scope chain reflects thread-local state. In
-> async code with `Instrument`, the chain is correct during each `poll()`
-> but may not persist across `.await` points. For full async chain
-> propagation, combine with `dcontext::with_context()` or
-> `dcontext::named_scope_async()`.
+> **Async guidance:** With `AsyncDcontextLayer`, the scope chain lives in
+> `dcontext::async_ctx`, so it follows the Tokio task across `.await` points.
+> Use `SyncDcontextLayer`/`DcontextLayer` for sync or thread-local code.
+> `force_thread_local()` no longer changes behavior and is kept only for
+> backward compatibility.
 
 ## Related
 

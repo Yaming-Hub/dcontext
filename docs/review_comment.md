@@ -122,9 +122,9 @@ incorrectly (bincode is not self-describing).
 `idea.md` requirement #10 asks for flexible async runtime support, but only
 Tokio is first-class. `async-std` is listed as "future work."
 
-**Recommendation:** Call this out as a known limitation in docs. Consider the
-poll-wrapper (`ContextFuture`) approach discussed earlier as the
-runtime-agnostic fallback.
+**Recommendation:** Call this out as a known limitation in docs and direct
+async users to the Tokio-only path: `AsyncDcontextLayer` with
+`dcontext::async_ctx` task-local storage.
 
 ---
 

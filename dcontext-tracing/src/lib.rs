@@ -106,14 +106,13 @@
 //!
 //! ## Async Behavior
 //!
-//! When used with [`Instrument`](tracing::Instrument), the layer creates and
-//! reverts a scope around each poll of the future. Mapped field values and span
-//! info are re-applied on each enter, so reads via `force_thread_local()` will
-//! see the correct values during each poll. However, **mutations made inside a
-//! span do not persist across `.await` points** — each poll gets a fresh scope.
+//! Tokio async code should use [`AsyncDcontextLayer`], which stores span state
+//! in `dcontext::async_ctx` task-local storage so mapped values, span info, and
+//! scope chain entries persist across `.await` points in the task.
 //!
-//! For full async context propagation across `.await`, use `dcontext::with_context()`
-//! or `dcontext::ContextFuture` directly.
+//! [`SyncDcontextLayer`] (and the legacy [`DcontextLayer`] alias) remain useful
+//! for synchronous or explicitly thread-local code. `dcontext::force_thread_local()`
+//! is preserved only as a deprecated no-op compatibility shim.
 
 mod field_mapping;
 pub(crate) mod guard_stack;
