@@ -4,25 +4,25 @@
 //! Unlike sync tracing, async spans enter/exit on every poll boundary
 //! (due to `Instrumented<F>`). This layer handles that correctly by:
 //!
-//! - Pushing a scope on **first enter** of a span (per task)
+//! - Pushing a scope on **first enter** of a span (tracked via span extensions)
 //! - NOT popping on exit (scope persists across yields)
 //! - Popping on **close** (span fully completes)
 //!
 //! This ensures scopes follow the logical async lifetime, not individual polls.
+//! State is stored in span extensions (not thread-local), so it correctly
+//! handles task migration across threads in multi-threaded runtimes.
 
-use std::cell::RefCell;
-use std::collections::HashSet;
 use std::marker::PhantomData;
 
 use tracing::Subscriber;
 use tracing_core::span;
 use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 
-// Track which span IDs have active scopes in the current task-local context.
-// This prevents double-pushing on re-enter after yield.
-thread_local! {
-    static ACTIVE_ASYNC_SPANS: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
-    static ASYNC_SCOPE_DEPTHS: RefCell<Vec<(u64, usize)>> = RefCell::new(Vec::new());
+/// Per-span state stored in span extensions.
+/// Tracks whether this span has pushed a scope and at what depth.
+struct AsyncScopeState {
+    /// The depth returned by push_scope — needed for pop_scope on close.
+    depth: usize,
 }
 
 /// A tracing layer that manages dcontext scopes on the **task-local** store.
@@ -68,58 +68,56 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        let span_id = id.into_u64();
+        let span = match ctx.span(id) {
+            Some(s) => s,
+            None => return,
+        };
 
-        // Only push a scope on the FIRST enter (not re-enters after yield)
-        let already_active = ACTIVE_ASYNC_SPANS.with(|set| {
-            let mut set = set.borrow_mut();
-            !set.insert(span_id) // returns false if newly inserted (not previously active)
-        });
-
-        if already_active {
-            return; // Re-enter after yield — scope already exists
+        // Check if we've already pushed a scope for this span (re-enter after yield).
+        // State is stored in span extensions — safe across thread migration.
+        {
+            let extensions = span.extensions();
+            if extensions.get::<AsyncScopeState>().is_some() {
+                return; // Already active — skip re-push
+            }
         }
 
-        // Push scope on task-local store
-        let name = ctx
-            .span(id)
-            .map(|s| s.metadata().name())
-            .unwrap_or("unknown");
-
+        // First enter: push scope on task-local store.
+        // If not in an async task (no task-local context), push_scope returns
+        // a noop guard (depth == usize::MAX). In that case, skip storing state
+        // so the layer is completely transparent outside tokio.
+        let name = span.metadata().name();
         let guard = dcontext::async_ctx::push_scope(name);
-
-        // Store the depth for manual pop on close
         let depth = guard.expected_depth();
         std::mem::forget(guard); // We'll manually pop on close
 
-        ASYNC_SCOPE_DEPTHS.with(|depths| {
-            depths.borrow_mut().push((span_id, depth));
-        });
+        if depth == usize::MAX {
+            return; // No task-local context — do nothing
+        }
+
+        // Store depth in span extensions for retrieval on close
+        let mut extensions = span.extensions_mut();
+        extensions.insert(AsyncScopeState { depth });
     }
 
     fn on_exit(&self, _id: &span::Id, _ctx: Context<'_, S>) {
         // Intentionally do nothing — scopes persist across yields for async spans
     }
 
-    fn on_close(&self, id: span::Id, _ctx: Context<'_, S>) {
-        let span_id = id.into_u64();
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        let span = match ctx.span(&id) {
+            Some(s) => s,
+            None => return,
+        };
 
-        // Remove from active set
-        ACTIVE_ASYNC_SPANS.with(|set| {
-            set.borrow_mut().remove(&span_id);
-        });
+        // Retrieve and remove the scope state
+        let state = {
+            let mut extensions = span.extensions_mut();
+            extensions.remove::<AsyncScopeState>()
+        };
 
-        // Pop the scope by depth
-        let depth = ASYNC_SCOPE_DEPTHS.with(|depths| {
-            let mut depths = depths.borrow_mut();
-            depths
-                .iter()
-                .rposition(|(sid, _)| *sid == span_id)
-                .map(|pos| depths.remove(pos).1)
-        });
-
-        if let Some(depth) = depth {
-            dcontext::async_ctx::pop_scope(depth);
+        if let Some(state) = state {
+            dcontext::async_ctx::pop_scope(state.depth);
         }
     }
 }
