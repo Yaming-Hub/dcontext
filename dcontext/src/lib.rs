@@ -47,8 +47,6 @@ mod helpers;
 mod context_key;
 mod config;
 mod fork;
-#[cfg(feature = "context-future")]
-mod context_future;
 #[macro_use]
 mod macros;
 pub mod async_ctx;
@@ -121,11 +119,6 @@ pub use helpers::spawn_with_context;
 // ── Async helpers (feature-gated) ──────────────────────────────
 
 pub use helpers::{with_context, spawn_with_context_async};
-
-// ── Runtime-agnostic async (feature-gated) ─────────────────────
-
-#[cfg(feature = "context-future")]
-pub use context_future::{ContextFuture, with_context_future};
 
 // ── Serialization ──────────────────────────────────────────────
 

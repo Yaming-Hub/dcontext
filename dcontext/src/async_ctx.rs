@@ -40,7 +40,7 @@ pub fn push_scope(name: &str) -> ScopeGuard {
 /// or `None` if not called within an async task (no task-local context).
 pub fn try_push_scope(name: &str) -> Option<ScopeGuard> {
     let name = name.to_string();
-    with_task_store(|store| ScopeGuard::new_async(store.push_scope(Some(name))))
+    try_apply(|store| ScopeGuard::new_async(store.push_scope(Some(name))))
 }
 
 /// Pop the top scope from the task-local store.
@@ -48,7 +48,7 @@ pub fn try_push_scope(name: &str) -> Option<ScopeGuard> {
 /// This is typically done automatically by dropping the [`ScopeGuard`].
 /// Use this only when manual scope management is needed.
 pub fn pop_scope(expected_depth: usize) {
-    let _garbage = with_task_store(|store| store.pop_scope(expected_depth));
+    let _garbage = try_apply(|store| store.pop_scope(expected_depth));
 }
 
 /// Peek at the current scope depth on the task-local store.
@@ -56,14 +56,14 @@ pub fn pop_scope(expected_depth: usize) {
 /// The depth uniquely identifies the active scope within the store.
 /// Returns `None` if not in an async task or the store is busy.
 pub fn current_depth() -> Option<usize> {
-    with_task_store(|store| store.depth)
+    try_apply(|store| store.depth)
 }
 
 /// Get the current scope chain from the task-local store.
 ///
 /// Returns an empty `Vec` if not in an async task or if the store is busy.
 pub fn scope_chain() -> Vec<String> {
-    with_task_store(|store| store.scope_chain()).unwrap_or_default()
+    try_apply(|store| store.scope_chain()).unwrap_or_default()
 }
 
 // ── Value access (typed) ───────────────────────────────────────
@@ -75,7 +75,7 @@ pub fn set_context<T>(key: &'static str, value: T)
 where
     T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    with_task_store(|store| {
+    try_apply(|store| {
         store.set_value(key, Arc::new(value));
     });
 }
@@ -87,7 +87,7 @@ pub fn get_context<T>(key: &str) -> Option<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    with_task_store(|store| {
+    try_apply(|store| {
         store.get_value(key).and_then(|arc| {
             arc.as_any().downcast_ref::<T>().cloned()
         })
@@ -115,7 +115,7 @@ where
 /// Used by extension crates (like dcontext-tracing) for field extraction.
 /// Silently no-ops if not in an async task.
 pub fn set_raw_value(key: &'static str, value: Arc<dyn ContextValue>) {
-    with_task_store(|store| {
+    try_apply(|store| {
         store.set_value(key, value);
     });
 }
@@ -124,7 +124,7 @@ pub fn set_raw_value(key: &'static str, value: Arc<dyn ContextValue>) {
 ///
 /// Returns `None` if the key is not set or not in an async task.
 pub fn get_raw_value(key: &str) -> Option<Arc<dyn ContextValue>> {
-    with_task_store(|store| store.get_value(key)).flatten()
+    try_apply(|store| store.get_value(key)).flatten()
 }
 
 /// Access the current context value for a key as `&dyn Any` via callback.
@@ -144,7 +144,7 @@ pub fn with_context_value<R>(
 /// Used for bridging to sync context or propagating to child tasks.
 /// Returns an empty snapshot if not in an async task.
 pub fn snapshot() -> ContextSnapshot {
-    with_task_store(|store| {
+    try_apply(|store| {
         let values = store.collect_values();
         let scope_chain = store.scope_chain();
         ContextSnapshot {
@@ -200,7 +200,7 @@ where
     F: std::future::Future,
 {
     let name_owned = name.to_string();
-    let depth = with_task_store(|store| store.push_scope(Some(name_owned)));
+    let depth = try_apply(|store| store.push_scope(Some(name_owned)));
 
     match depth {
         None => fut.await,
@@ -224,7 +224,7 @@ where
 
 /// Execute `f` with exclusive access to the task-local context store.
 /// Returns `None` if not in an async task or if the store is busy.
-fn with_task_store<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
+fn try_apply<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
     let found = TASK_CONTEXT.try_with(|cell| {
         let mut store = cell.take()?;
         let r = f(&mut store);
