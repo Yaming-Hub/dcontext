@@ -13,9 +13,16 @@ use std::sync::Arc;
 
 use crate::scope::ScopeGuard;
 use crate::snapshot::ContextSnapshot;
-use crate::async_storage::TASK_CONTEXT;
-use crate::sync_storage::ContextStore;
+use crate::store::ContextStore;
 use crate::value::ContextValue;
+
+// ── Task-local storage ─────────────────────────────────────────
+
+tokio::task_local! {
+    /// Task-local context store. Each async task gets its own isolated store.
+    /// Accessed via `async_ctx` module functions.
+    pub(crate) static TASK_CONTEXT: Cell<Option<ContextStore>>;
+}
 
 // ── Scope management ───────────────────────────────────────────
 

@@ -24,8 +24,8 @@ where
     use std::cell::Cell;
     use std::sync::Arc;
 
-    use crate::sync_storage::ContextStore;
-    use crate::async_storage::TASK_CONTEXT;
+    use crate::store::ContextStore;
+    use crate::async_ctx::TASK_CONTEXT;
 
     let chain = snap.scope_chain.clone();
     let values = snap

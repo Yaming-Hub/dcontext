@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::scope::ScopeNode;
-use crate::async_storage::TASK_CONTEXT;
-use crate::sync_storage::{self as storage, ContextStore};
+use crate::async_ctx::TASK_CONTEXT;
+use crate::sync_ctx::{self as storage};
+use crate::store::ContextStore;
 use crate::value::ContextValue;
 
 /// A lightweight, shareable handle to a parent context.

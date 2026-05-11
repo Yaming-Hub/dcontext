@@ -79,7 +79,7 @@ impl Drop for ScopeGuard {
         if self.is_async {
             crate::async_ctx::pop_scope(self.expected_depth);
         } else {
-            crate::sync_storage::leave_scope(self.expected_depth);
+            crate::sync_ctx::leave_scope(self.expected_depth);
         }
     }
 }

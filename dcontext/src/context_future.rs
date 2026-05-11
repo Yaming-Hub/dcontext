@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::snapshot::ContextSnapshot;
-use crate::sync_storage as storage;
+use crate::sync_ctx as storage;
 
 /// A `Future` wrapper that carries a [`ContextSnapshot`] and installs it into
 /// thread-local storage on every `poll()`. This is the **runtime-agnostic**

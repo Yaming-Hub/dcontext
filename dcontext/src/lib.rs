@@ -39,8 +39,7 @@ pub mod error;
 pub mod value;
 mod registry;
 mod scope;
-pub(crate) mod async_storage;
-pub(crate) mod sync_storage;
+pub(crate) mod store;
 mod snapshot;
 mod wire;
 mod helpers;
@@ -77,14 +76,14 @@ pub(crate) use registry::{register, try_register, register_with, try_register_wi
 
 // ── Scope management ───────────────────────────────────────────
 
-pub use sync_storage::enter_named_scope;
+pub use sync_ctx::enter_named_scope;
 
 /// Push a new scope. Dispatches to task-local if available, else thread-local.
 pub fn enter_scope() -> ScopeGuard {
     if crate::async_ctx::current_depth().is_some() {
         crate::async_ctx::push_scope("")
     } else {
-        sync_storage::enter_scope()
+        sync_ctx::enter_scope()
     }
 }
 
@@ -96,7 +95,7 @@ pub fn scope<R>(f: impl FnOnce() -> R) -> R {
 }
 
 #[allow(deprecated)]
-pub use sync_storage::{force_thread_local, scope_async, named_scope_async};
+pub use sync_ctx::{force_thread_local, scope_async, named_scope_async};
 
 /// Get the current scope chain, dispatching to task-local first, then thread-local.
 pub fn scope_chain() -> Vec<String> {
@@ -104,7 +103,7 @@ pub fn scope_chain() -> Vec<String> {
     if !async_chain.is_empty() {
         return async_chain;
     }
-    sync_storage::scope_chain()
+    sync_ctx::scope_chain()
 }
 
 // ── Snapshot / Clone ───────────────────────────────────────────
@@ -147,7 +146,7 @@ pub use config::{set_max_context_size, max_context_size,
 // `sync_ctx::*` (thread-local only) or `async_ctx::*` (task-local only).
 
 use std::any::TypeId;
-use sync_storage as storage;
+use sync_ctx as storage;
 
 /// Internal helper: get a value, trying task-local first, then thread-local.
 fn dispatched_get_value(key: &str) -> Option<Arc<dyn value::ContextValue>> {
