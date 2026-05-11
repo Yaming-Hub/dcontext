@@ -48,6 +48,9 @@ pub(crate) struct ContextStore {
     /// Name of the active scope (if named).
     pub(crate) current_name: Option<String>,
     /// Current scope depth (1 = root scope).
+    /// Also serves as a unique identifier for each scope: depth increments on
+    /// push and is never reused, so it uniquely identifies the active scope
+    /// within this store instance.
     pub(crate) depth: usize,
     /// Remote scope chain (from cross-process propagation).
     pub(crate) remote_chain: Arc<Vec<String>>,
