@@ -9,6 +9,11 @@ use std::sync::Arc;
 use crate::scope::ScopeNode;
 use crate::value::ContextValue;
 
+/// Maximum number of real scope levels. Beyond this, push_scope creates
+/// "dead" scopes that only bump the depth counter without allocating a
+/// ScopeNode. This prevents runaway recursion from exhausting memory.
+pub(crate) const MAX_SCOPE_DEPTH: usize = 1024;
+
 /// The active context state. Lives in `Cell<Option<ContextStore>>`.
 ///
 /// ## Contention-free design
@@ -76,8 +81,18 @@ impl ContextStore {
     /// pre-populated (their effective values are Arc::cloned in).
     /// Non-cached keys are absent — reads walk the parent chain.
     ///
+    /// If the depth exceeds [`MAX_SCOPE_DEPTH`], creates a "dead" scope
+    /// that only increments the depth counter without allocating a node.
+    ///
     /// Returns the new depth.
     pub(crate) fn push_scope(&mut self, name: Option<String>) -> usize {
+        self.depth += 1;
+
+        // Beyond the limit: dead scope — just bump depth, no real work.
+        if self.depth > MAX_SCOPE_DEPTH + 1 {
+            return self.depth;
+        }
+
         let cached = crate::registry::cached_keys();
         let mut cached_values: Vec<(&'static str, Arc<dyn ContextValue>)> = Vec::new();
         for &key in &cached {
@@ -92,14 +107,13 @@ impl ContextStore {
             name: self.current_name.take(),
             values: frozen_values,
             parent: self.scope_chain.take(),
-            depth: self.depth,
+            depth: self.depth - 1,
             remote_chain: Arc::clone(&self.remote_chain),
             remote_chain_base_depth: self.remote_chain_base_depth,
         });
 
         self.scope_chain = Some(node);
         self.current_name = name;
-        self.depth += 1;
 
         for (key, val) in cached_values {
             self.current_values.insert(key, val);
@@ -110,6 +124,9 @@ impl ContextStore {
 
     /// Pop the current scope, restoring state from the frozen ScopeNode.
     ///
+    /// If the current depth is above [`MAX_SCOPE_DEPTH`] + 1 (a dead scope),
+    /// just decrements the counter without touching the scope chain.
+    ///
     /// Returns the garbage (old current_values) to be dropped OUTSIDE
     /// the Cell window.
     pub(crate) fn pop_scope(
@@ -117,6 +134,12 @@ impl ContextStore {
         expected_depth: usize,
     ) -> Option<crate::scope::ScopeGarbage> {
         if self.depth != expected_depth || self.depth <= 1 {
+            return None;
+        }
+
+        // Dead scope: just decrement the counter.
+        if self.depth > MAX_SCOPE_DEPTH + 1 {
+            self.depth -= 1;
             return None;
         }
 
@@ -235,5 +258,119 @@ impl ContextStore {
         }
 
         chain
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_max_scope_depth_creates_dead_scopes() {
+        let mut store = ContextStore::new();
+
+        // Push up to the limit — all real scopes.
+        for i in 0..MAX_SCOPE_DEPTH {
+            let depth = store.push_scope(Some(format!("scope_{}", i)));
+            assert_eq!(depth, i + 2); // depth starts at 1, first push yields 2
+        }
+        assert_eq!(store.depth, MAX_SCOPE_DEPTH + 1);
+
+        // Count real scope nodes in the chain.
+        let real_node_count = {
+            let mut count = 0usize;
+            let mut node = store.scope_chain.as_ref();
+            while let Some(n) = node {
+                count += 1;
+                node = n.parent.as_ref();
+            }
+            count
+        };
+        assert_eq!(real_node_count, MAX_SCOPE_DEPTH);
+
+        // Push beyond the limit — dead scopes.
+        let dead_depth_1 = store.push_scope(Some("dead_1".to_string()));
+        assert_eq!(dead_depth_1, MAX_SCOPE_DEPTH + 2);
+        let dead_depth_2 = store.push_scope(Some("dead_2".to_string()));
+        assert_eq!(dead_depth_2, MAX_SCOPE_DEPTH + 3);
+
+        // Real node count should NOT grow — dead scopes are not real.
+        let real_node_count_after = {
+            let mut count = 0usize;
+            let mut node = store.scope_chain.as_ref();
+            while let Some(n) = node {
+                count += 1;
+                node = n.parent.as_ref();
+            }
+            count
+        };
+        assert_eq!(real_node_count_after, MAX_SCOPE_DEPTH);
+
+        // Values set in dead scopes still work (they go in current_values).
+        store.set_value("key", Arc::new("dead_val".to_string()));
+        assert!(store.get_value("key").is_some());
+
+        // Pop dead scopes — just decrements counter.
+        let garbage = store.pop_scope(dead_depth_2);
+        assert!(garbage.is_none()); // no real scope to pop
+        assert_eq!(store.depth, MAX_SCOPE_DEPTH + 2);
+
+        let garbage = store.pop_scope(dead_depth_1);
+        assert!(garbage.is_none());
+        assert_eq!(store.depth, MAX_SCOPE_DEPTH + 1);
+
+        // Now at the limit — next pop should be a real pop.
+        let real_depth = store.depth;
+        let garbage = store.pop_scope(real_depth);
+        assert!(garbage.is_some()); // real scope popped
+        assert_eq!(store.depth, MAX_SCOPE_DEPTH);
+    }
+
+    #[test]
+    fn test_max_scope_depth_values_survive_dead_pop() {
+        let mut store = ContextStore::new();
+
+        // Push one real scope and set a value.
+        store.push_scope(None);
+        store.set_value("persistent", Arc::new(42u64));
+
+        // Push up to and beyond the limit.
+        for _ in 0..MAX_SCOPE_DEPTH + 5 {
+            store.push_scope(None);
+        }
+
+        // The value set in the real scope should still be readable.
+        let val = store.get_value("persistent");
+        assert!(val.is_some());
+
+        // Pop all dead scopes.
+        for _ in 0..5 {
+            let d = store.depth;
+            store.pop_scope(d);
+        }
+
+        // Value should still be accessible after dead pops.
+        assert!(store.get_value("persistent").is_some());
+    }
+
+    #[test]
+    fn test_max_scope_depth_full_roundtrip() {
+        let mut store = ContextStore::new();
+        let mut depths = Vec::new();
+
+        // Push well beyond the limit.
+        let total = MAX_SCOPE_DEPTH + 10;
+        for _ in 0..total {
+            let d = store.push_scope(None);
+            depths.push(d);
+        }
+        assert_eq!(store.depth, total + 1);
+
+        // Pop everything in reverse.
+        for &d in depths.iter().rev() {
+            store.pop_scope(d);
+        }
+        assert_eq!(store.depth, 1); // back to root
+        assert!(store.scope_chain.is_none()); // no parent nodes
     }
 }
