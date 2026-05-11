@@ -330,21 +330,10 @@ pub(crate) fn set_remote_chain(chain: Vec<String>) {
 /// The Cell is restored (`set(Some(store))`) before the return value is
 /// dropped, so any user Drop code runs with a valid store in the Cell.
 fn with_context<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
-    let f = std::cell::Cell::new(Some(f));
-    let run = |cell: &Cell<Option<ContextStore>>| -> Option<R> {
+    CONTEXT.try_with(|cell| {
         let mut store = cell.take()?; // None = busy
-        let func = f.take().expect("with_context closure called more than once");
-        let result = func(&mut store);
+        let result = f(&mut store);
         cell.set(Some(store));
         Some(result)
-    };
-    match CONTEXT.try_with(run) {
-        Ok(r) => r,
-        Err(_) => {
-            // Thread-local is being destroyed — provide an empty Cell
-            // so callers see None ("busy") and return defaults.
-            let temp = Cell::new(None);
-            run(&temp)
-        }
-    }
+    }).unwrap_or(None) // Err = thread-local is being destroyed
 }
