@@ -323,12 +323,6 @@ pub(crate) fn leave_scope(expected_depth: usize) {
     let _garbage = with_store(|store| store.pop_scope(expected_depth));
 }
 
-/// Execute `f` in a new scope. Changes revert when `f` returns.
-pub fn scope<R>(f: impl FnOnce() -> R) -> R {
-    let _guard = enter_scope();
-    f()
-}
-
 // ── Deprecated compatibility ───────────────────────────────────
 
 /// No-op compatibility shim. With the dual-context redesign, there is no

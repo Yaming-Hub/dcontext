@@ -20,7 +20,6 @@
 
 use std::collections::HashSet;
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use tracing::Subscriber;
 use tracing_core::span;
