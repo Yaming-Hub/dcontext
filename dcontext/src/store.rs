@@ -83,22 +83,36 @@ impl ContextStore {
         }
     }
 
-    /// Create a new root scope that inherits from a frozen parent scope node.
-    /// Used by fork to start a fresh scope branch while preserving read
-    /// access to the parent's values.
-    pub(crate) fn from_fork(
-        parent: Arc<ScopeNode>,
-        remote_chain: Arc<Vec<String>>,
-        remote_chain_base_depth: usize,
-    ) -> Self {
+    /// Create a child store that inherits from this store via fork.
+    ///
+    /// Freezes the current scope into an immutable `ScopeNode` and creates
+    /// a new root-level store whose `frozen_parent` points to it. Value
+    /// lookups in the child fall through to the frozen parent chain.
+    pub(crate) fn fork_child(&self) -> Self {
+        // Freeze the current scope into a new ScopeNode (Arc-shared with parent).
+        let frozen_values: HashMap<&'static str, Arc<dyn ContextValue>> = self
+            .current_values
+            .iter()
+            .map(|(&k, v)| (k, Arc::clone(v)))
+            .collect();
+
+        let frozen = Arc::new(ScopeNode {
+            name: self.current_name.clone(),
+            values: frozen_values,
+            parent: self.scope_chain.clone(),
+            depth: self.depth,
+            remote_chain: Arc::clone(&self.remote_chain),
+            remote_chain_base_depth: self.remote_chain_base_depth,
+        });
+
         Self {
             scope_chain: None,
             current_values: HashMap::new(),
             current_name: None,
             depth: 1,
-            remote_chain,
-            remote_chain_base_depth,
-            frozen_parent: Some(parent),
+            remote_chain: Arc::clone(&self.remote_chain),
+            remote_chain_base_depth: self.remote_chain_base_depth,
+            frozen_parent: Some(frozen),
         }
     }
 

@@ -222,10 +222,15 @@ where
 
 // ── Internal helpers ───────────────────────────────────────────
 
-/// Create a ForkHandle from the current task-local context state.
-/// Returns None if not in an async task or if the store is busy.
-pub(crate) fn do_fork() -> Option<crate::fork::ForkHandle> {
-    try_apply(|store| crate::fork::create_fork_handle(store))
+/// Create a forked child context from the current task-local state.
+///
+/// Returns a new `ContextStore` whose `frozen_parent` points to the
+/// current scope. Value lookups in the child fall through to the frozen
+/// parent; writes are isolated (copy-on-write).
+///
+/// Returns `None` if not in an async task or if the store is busy.
+pub(crate) fn fork() -> Option<ContextStore> {
+    try_apply(|store| store.fork_child())
 }
 
 /// Execute `f` with exclusive access to the task-local context store.

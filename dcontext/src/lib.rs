@@ -46,7 +46,7 @@ mod helpers;
 #[cfg(feature = "context-key")]
 mod context_key;
 mod config;
-mod fork;
+mod inheritance;
 #[macro_use]
 mod macros;
 pub mod async_ctx;
@@ -108,26 +108,22 @@ pub fn scope_chain() -> Vec<String> {
 
 pub use snapshot::{snapshot, attach, wrap_with_context, wrap_with_context_fn};
 
-// ── Fork (lightweight context inheritance) ────────────────────
+// ── Context inheritance (spawn helpers) ───────────────────────
 
-pub use fork::{
-    ForkHandle,
-    spawn_fork_async_context,
-    spawn_blocking_fork_async_context,
-    spawn_fork_sync_context,
+pub use inheritance::{
+    ContextInheritance,
+    spawn_with_async_context,
+    spawn_blocking_with_async_context,
+    spawn_with_sync_context,
 };
 
-// Deprecated fork APIs
+// ── Deprecated helpers ────────────────────────────────────────
+
 #[allow(deprecated)]
-pub use fork::{fork, with_fork, spawn_with_fork_async};
-
-// ── Thread helpers ─────────────────────────────────────────────
-
-pub use helpers::spawn_with_context;
-
-// ── Async helpers (feature-gated) ──────────────────────────────
-
-pub use helpers::{with_context, spawn_with_context_async};
+pub use helpers::{
+    ForkHandle, fork, with_fork, spawn_with_fork_async,
+    spawn_with_context, with_context, spawn_with_context_async,
+};
 
 // ── Serialization ──────────────────────────────────────────────
 

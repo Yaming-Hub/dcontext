@@ -282,10 +282,15 @@ impl Drop for ScopeCleanup {
 
 // ── Fork support ───────────────────────────────────────────────
 
-/// Create a ForkHandle from the current context state.
-/// Returns None if the store is busy.
-pub(crate) fn do_fork() -> Option<crate::fork::ForkHandle> {
-    try_apply(|store| crate::fork::create_fork_handle(store))
+/// Create a forked child context from the current thread-local state.
+///
+/// Returns a new `ContextStore` whose `frozen_parent` points to the
+/// current scope. Value lookups in the child fall through to the frozen
+/// parent; writes are isolated (copy-on-write).
+///
+/// Returns `None` if the store is busy (re-entrant access).
+pub(crate) fn fork() -> Option<crate::store::ContextStore> {
+    try_apply(|store| store.fork_child())
 }
 
 // ── Value access (internal, used by lib.rs dispatch) ───────────

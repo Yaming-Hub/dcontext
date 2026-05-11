@@ -36,16 +36,14 @@ impl Default for ContextSnapshot {
 
 /// Capture a snapshot of the current effective context.
 /// Dispatches to task-local if available, else thread-local.
+///
+/// **Prefer** [`async_ctx::snapshot()`](crate::async_ctx::snapshot) or
+/// [`sync_ctx::snapshot()`](crate::sync_ctx::snapshot) for explicit control.
 pub fn snapshot() -> ContextSnapshot {
     if crate::async_ctx::current_depth().is_some() {
         return crate::async_ctx::snapshot();
     }
-    let values = storage::collect_values();
-    let scope_chain = storage::collect_scope_chain();
-    ContextSnapshot {
-        values: Arc::new(values),
-        scope_chain,
-    }
+    crate::sync_ctx::snapshot()
 }
 
 /// Restore a snapshot by pushing a new scope with its values.
