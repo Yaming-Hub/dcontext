@@ -36,7 +36,7 @@
 //! call path (including remote prefix from cross-process propagation).
 
 pub mod error;
-mod value;
+pub mod value;
 mod registry;
 mod scope;
 pub(crate) mod async_storage;

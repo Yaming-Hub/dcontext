@@ -18,7 +18,9 @@
 //! 4. **Span recording**: Auto-record context values into pre-declared Empty
 //!    span fields.
 
+use std::collections::HashSet;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use tracing::Subscriber;
 use tracing_core::span;
@@ -27,6 +29,8 @@ use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 use crate::field_mapping::ExtractedFields;
 use crate::guard_stack;
 use crate::layer_common;
+use crate::span_info::{SpanInfo, SPAN_INFO_KEY};
+use crate::tracing_field::get_tracing_fields;
 
 /// Marker stored in span extensions to record whether async context was
 /// available when the span was first entered. This ensures consistent
@@ -55,18 +59,12 @@ struct SyncSkipMarker {
 pub struct SyncDcontextLayer<S> {
     include_span_info: bool,
     /// When true, skip all work if an async task-local context is available.
-    /// This allows mounting both AsyncDcontextLayer and SyncDcontextLayer
-    /// without duplicating work — the async layer handles async tasks,
-    /// and the sync layer only activates for pure sync code paths.
     async_aware: bool,
     _subscriber: PhantomData<fn(S)>,
 }
 
 impl<S> SyncDcontextLayer<S> {
     /// Create a new `SyncDcontextLayer` with default settings (auto-scoping only).
-    ///
-    /// Field extraction is auto-discovered from [`TracingField`](crate::TracingField)
-    /// metadata in the registry. No explicit field configuration is needed.
     pub fn new() -> Self {
         Self {
             include_span_info: false,
@@ -99,14 +97,12 @@ impl<S> SyncDcontextLayer<S> {
             None => return false,
         };
 
-        // Check if we already recorded the decision for this span
         let extensions = span.extensions();
         if let Some(marker) = extensions.get::<SyncSkipMarker>() {
             return marker.skip;
         }
         drop(extensions);
 
-        // First time: probe whether async context is available and store the result
         let skip = dcontext::async_ctx::current_depth().is_some();
         let mut extensions = span.extensions_mut();
         extensions.insert(SyncSkipMarker { skip });
@@ -129,18 +125,12 @@ pub struct SyncDcontextLayerBuilder<S> {
 
 impl<S> SyncDcontextLayerBuilder<S> {
     /// Include span metadata (name, target, level) as a [`SpanInfo`](crate::SpanInfo) context value.
-    ///
-    /// When enabled, each span enter will set a [`SpanInfo`] value under
-    /// the key `"dcontext.span"`.
     pub fn include_span_info(mut self) -> Self {
         self.include_span_info = true;
         self
     }
 
-    /// Make this layer async-aware: when an async task-local context is
-    /// available, the sync layer becomes a no-op, deferring all work to
-    /// the `AsyncDcontextLayer`. This allows mounting both layers together
-    /// so that async code uses the async layer and sync code uses this layer.
+    /// Make this layer async-aware: skip when task-local context is available.
     pub fn async_aware(mut self) -> Self {
         self.async_aware = true;
         self
@@ -155,6 +145,107 @@ impl<S> SyncDcontextLayerBuilder<S> {
         }
     }
 }
+
+// ── Store-specific helpers (sync_ctx) ──────────────────────────
+
+use tracing_subscriber::registry::SpanRef;
+
+/// Apply field extraction from span extensions into the thread-local context.
+fn apply_field_extraction<S>(span: &SpanRef<'_, S>)
+where
+    S: for<'a> LookupSpan<'a>,
+{
+    let metadata_fields = get_tracing_fields();
+    if !metadata_fields.iter().any(|e| e.extract.is_some()) {
+        return;
+    }
+
+    let extensions = span.extensions();
+    let fields = match extensions.get::<ExtractedFields>() {
+        Some(f) => f,
+        None => return,
+    };
+
+    for entry in metadata_fields {
+        if let Some(ref extract) = entry.extract {
+            let value = if let Some(v) = fields.string_values.get(entry.span_field) {
+                extract.from_str.as_ref().and_then(|f| f(v))
+            } else if let Some(&v) = fields.u64_values.get(entry.span_field) {
+                extract.from_u64.as_ref().and_then(|f| f(v))
+            } else if let Some(&v) = fields.i64_values.get(entry.span_field) {
+                extract.from_i64.as_ref().and_then(|f| f(v))
+            } else if let Some(&v) = fields.bool_values.get(entry.span_field) {
+                extract.from_bool.as_ref().and_then(|f| f(v))
+            } else {
+                None
+            };
+
+            if let Some(val) = value {
+                dcontext::sync_ctx::set_raw_value(entry.context_key, val);
+            }
+        }
+    }
+}
+
+/// Set span info in the thread-local context.
+fn set_span_info<S>(span: &SpanRef<'_, S>)
+where
+    S: for<'a> LookupSpan<'a>,
+{
+    let metadata = span.metadata();
+    let info = SpanInfo {
+        name: metadata.name().to_string(),
+        target: metadata.target().to_string(),
+        level: metadata.level().to_string(),
+    };
+    dcontext::sync_ctx::set_context(SPAN_INFO_KEY, info);
+}
+
+/// Record context values from thread-local store into span fields.
+fn record_context_to_span<S>(span: &SpanRef<'_, S>)
+where
+    S: for<'a> LookupSpan<'a>,
+{
+    let metadata_fields = get_tracing_fields();
+    if !metadata_fields.iter().any(|e| e.span_fmt_fn.is_some()) {
+        return;
+    }
+
+    let user_set: HashSet<&str> = {
+        let extensions = span.extensions();
+        extensions
+            .get::<ExtractedFields>()
+            .map(|ef| ef.user_set_fields.iter().copied().collect())
+            .unwrap_or_default()
+    };
+
+    let to_record: Vec<(&'static str, String)> = metadata_fields
+        .iter()
+        .filter_map(|entry| {
+            let fmt_fn = entry.span_fmt_fn.as_ref()?;
+            if user_set.contains(entry.record_field) {
+                return None;
+            }
+            let formatted = dcontext::sync_ctx::with_context_value(
+                entry.context_key,
+                |any_val| fmt_fn(any_val),
+            )
+            .flatten()?;
+            Some((entry.record_field, formatted))
+        })
+        .collect();
+
+    if !to_record.is_empty() {
+        let current = tracing::Span::current();
+        layer_common::SELF_RECORDING.with(|f| f.set(true));
+        for (field_name, value) in &to_record {
+            current.record(*field_name, value.as_str());
+        }
+        layer_common::SELF_RECORDING.with(|f| f.set(false));
+    }
+}
+
+// ── Layer implementation ───────────────────────────────────────
 
 impl<S> Layer<S> for SyncDcontextLayer<S>
 where
@@ -183,43 +274,39 @@ where
     }
 
     fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        // If async-aware and async context is available, skip — async layer handles it.
         if self.should_skip_for_span(id, &ctx) {
             return;
         }
 
-        dcontext::force_thread_local(|| {
-            // Level 1: Create a new named dcontext scope
-            let guard = if let Some(span) = ctx.span(id) {
-                let name = span.metadata().name();
-                dcontext::enter_named_scope(name)
-            } else {
-                dcontext::enter_scope()
-            };
+        // Level 1: Create a new named dcontext scope
+        let guard = if let Some(span) = ctx.span(id) {
+            let name = span.metadata().name();
+            dcontext::sync_ctx::push_scope(name)
+        } else {
+            dcontext::sync_ctx::push_scope("")
+        };
 
-            // Level 2: Apply metadata-driven extraction
+        // Level 2: Apply field extraction
+        if let Some(span) = ctx.span(id) {
+            apply_field_extraction(&span);
+        }
+
+        // Level 3: Set span info
+        if self.include_span_info {
             if let Some(span) = ctx.span(id) {
-                layer_common::apply_field_extraction(&span);
+                set_span_info(&span);
             }
+        }
 
-            // Level 3: Set span info
-            if self.include_span_info {
-                if let Some(span) = ctx.span(id) {
-                    layer_common::set_span_info(&span);
-                }
-            }
+        // Level 4: Record context values into span fields
+        if let Some(span) = ctx.span(id) {
+            record_context_to_span(&span);
+        }
 
-            // Level 4: Record context values into span fields
-            if let Some(span) = ctx.span(id) {
-                layer_common::record_context_to_span(&span);
-            }
-
-            guard_stack::push_guard(id, guard);
-        });
+        guard_stack::push_guard(id, guard);
     }
 
     fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        // Check the stored marker — if async context was active, skip.
         if let Some(span) = ctx.span(id) {
             let extensions = span.extensions();
             if let Some(marker) = extensions.get::<SyncSkipMarker>() {
@@ -229,13 +316,10 @@ where
             }
         }
 
-        dcontext::force_thread_local(|| {
-            guard_stack::pop_guard(id);
-        });
+        guard_stack::pop_guard(id);
     }
 
     fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
-        // Check the stored marker — if async context was active, skip.
         if let Some(span) = ctx.span(&id) {
             let extensions = span.extensions();
             if let Some(marker) = extensions.get::<SyncSkipMarker>() {
@@ -245,9 +329,7 @@ where
             }
         }
 
-        dcontext::force_thread_local(|| {
-            guard_stack::pop_guard(&id);
-        });
+        guard_stack::pop_guard(&id);
 
         if let Some(span) = ctx.span(&id) {
             let mut extensions = span.extensions_mut();

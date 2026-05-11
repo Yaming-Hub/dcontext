@@ -25,7 +25,9 @@
 //! 4. **Span recording**: Auto-record context values into pre-declared Empty
 //!    span fields.
 
+use std::collections::HashSet;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use tracing::Subscriber;
 use tracing_core::span;
@@ -33,6 +35,8 @@ use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 
 use crate::field_mapping::ExtractedFields;
 use crate::layer_common;
+use crate::span_info::{SpanInfo, SPAN_INFO_KEY};
+use crate::tracing_field::get_tracing_fields;
 
 /// Per-span state stored in span extensions.
 /// Tracks whether this span has pushed a scope and at what depth.
@@ -118,6 +122,107 @@ impl<S> AsyncDcontextLayerBuilder<S> {
     }
 }
 
+// ── Store-specific helpers (async_ctx) ─────────────────────────
+
+use tracing_subscriber::registry::SpanRef;
+
+/// Apply field extraction from span extensions into the task-local context.
+fn apply_field_extraction<S>(span: &SpanRef<'_, S>)
+where
+    S: for<'a> LookupSpan<'a>,
+{
+    let metadata_fields = get_tracing_fields();
+    if !metadata_fields.iter().any(|e| e.extract.is_some()) {
+        return;
+    }
+
+    let extensions = span.extensions();
+    let fields = match extensions.get::<ExtractedFields>() {
+        Some(f) => f,
+        None => return,
+    };
+
+    for entry in metadata_fields {
+        if let Some(ref extract) = entry.extract {
+            let value = if let Some(v) = fields.string_values.get(entry.span_field) {
+                extract.from_str.as_ref().and_then(|f| f(v))
+            } else if let Some(&v) = fields.u64_values.get(entry.span_field) {
+                extract.from_u64.as_ref().and_then(|f| f(v))
+            } else if let Some(&v) = fields.i64_values.get(entry.span_field) {
+                extract.from_i64.as_ref().and_then(|f| f(v))
+            } else if let Some(&v) = fields.bool_values.get(entry.span_field) {
+                extract.from_bool.as_ref().and_then(|f| f(v))
+            } else {
+                None
+            };
+
+            if let Some(val) = value {
+                dcontext::async_ctx::set_raw_value(entry.context_key, val);
+            }
+        }
+    }
+}
+
+/// Set span info in the task-local context.
+fn set_span_info<S>(span: &SpanRef<'_, S>)
+where
+    S: for<'a> LookupSpan<'a>,
+{
+    let metadata = span.metadata();
+    let info = SpanInfo {
+        name: metadata.name().to_string(),
+        target: metadata.target().to_string(),
+        level: metadata.level().to_string(),
+    };
+    dcontext::async_ctx::set_context(SPAN_INFO_KEY, info);
+}
+
+/// Record context values from task-local store into span fields.
+fn record_context_to_span<S>(span: &SpanRef<'_, S>)
+where
+    S: for<'a> LookupSpan<'a>,
+{
+    let metadata_fields = get_tracing_fields();
+    if !metadata_fields.iter().any(|e| e.span_fmt_fn.is_some()) {
+        return;
+    }
+
+    let user_set: HashSet<&str> = {
+        let extensions = span.extensions();
+        extensions
+            .get::<ExtractedFields>()
+            .map(|ef| ef.user_set_fields.iter().copied().collect())
+            .unwrap_or_default()
+    };
+
+    let to_record: Vec<(&'static str, String)> = metadata_fields
+        .iter()
+        .filter_map(|entry| {
+            let fmt_fn = entry.span_fmt_fn.as_ref()?;
+            if user_set.contains(entry.record_field) {
+                return None;
+            }
+            let formatted = dcontext::async_ctx::with_context_value(
+                entry.context_key,
+                |any_val| fmt_fn(any_val),
+            )
+            .flatten()?;
+            Some((entry.record_field, formatted))
+        })
+        .collect();
+
+    if !to_record.is_empty() {
+        let current = tracing::Span::current();
+        layer_common::SELF_RECORDING.with(|f| f.set(true));
+        for (field_name, value) in &to_record {
+            current.record(*field_name, value.as_str());
+        }
+        layer_common::SELF_RECORDING.with(|f| f.set(false));
+    }
+}
+
+// ── Layer implementation ───────────────────────────────────────
+
 impl<S> Layer<S> for AsyncDcontextLayer<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
@@ -151,43 +256,40 @@ where
         };
 
         // Check if we've already pushed a scope for this span (re-enter after yield).
-        // State is stored in span extensions — safe across thread migration.
         {
             let extensions = span.extensions();
             if extensions.get::<AsyncScopeState>().is_some() {
-                return; // Already active — skip re-push
+                return;
             }
         }
 
         // First enter: push scope on task-local store.
-        // If not in an async task (no task-local context), try_push_scope returns
-        // None and the layer is completely transparent outside tokio.
         let name = span.metadata().name();
         let guard = match dcontext::async_ctx::try_push_scope(name) {
             Some(guard) => guard,
-            None => return, // No task-local context — do nothing
+            None => return,
         };
         let depth = guard.expected_depth();
-        std::mem::forget(guard); // We'll manually pop on close
+        std::mem::forget(guard);
 
-        // Level 2: Apply metadata-driven extraction into task-local context
-        layer_common::apply_field_extraction(&span);
+        // Level 2: Apply field extraction into task-local context
+        apply_field_extraction(&span);
 
-        // Level 3: Set span info in task-local context
+        // Level 3: Set span info
         if self.include_span_info {
-            layer_common::set_span_info(&span);
+            set_span_info(&span);
         }
 
         // Level 4: Record context values into span fields
-        layer_common::record_context_to_span(&span);
+        record_context_to_span(&span);
 
-        // Store depth (scope ID) in span extensions for verification on close
+        // Store depth in span extensions for verification on close
         let mut extensions = span.extensions_mut();
         extensions.insert(AsyncScopeState { depth });
     }
 
     fn on_exit(&self, _id: &span::Id, _ctx: Context<'_, S>) {
-        // Intentionally do nothing — scopes persist across yields for async spans
+        // Intentionally do nothing — scopes persist across yields
     }
 
     fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
@@ -196,23 +298,18 @@ where
             None => return,
         };
 
-        // Retrieve and remove the scope state
         let state = {
             let mut extensions = span.extensions_mut();
             extensions.remove::<AsyncScopeState>()
         };
 
         if let Some(state) = state {
-            // Only pop if the current scope depth matches what we pushed.
-            // Depth is a unique scope ID — this guards against mismatched pops
-            // if scopes were manipulated externally between enter and close.
             let current = dcontext::async_ctx::current_depth();
             if current == Some(state.depth) {
                 dcontext::async_ctx::pop_scope(state.depth);
             }
         }
 
-        // Clean up extracted fields
         {
             let mut extensions = span.extensions_mut();
             extensions.remove::<ExtractedFields>();

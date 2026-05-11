@@ -55,13 +55,14 @@ pub struct TracingField {
 
 /// Closures for extracting tracing field values into context.
 ///
-/// Each closure takes (field_value, context_key) and calls `set_context`
-/// internally, capturing the concrete type T.
+/// Each closure takes a field value and returns `Some(Arc<dyn ContextValue>)`
+/// if conversion succeeds. The layer is responsible for storing the result
+/// in the appropriate context store (sync or async).
 pub(crate) struct ExtractFns {
-    pub from_str: Option<Arc<dyn Fn(&str, &'static str) + Send + Sync>>,
-    pub from_u64: Option<Arc<dyn Fn(u64, &'static str) + Send + Sync>>,
-    pub from_i64: Option<Arc<dyn Fn(i64, &'static str) + Send + Sync>>,
-    pub from_bool: Option<Arc<dyn Fn(bool, &'static str) + Send + Sync>>,
+    pub from_str: Option<Arc<dyn Fn(&str) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    pub from_u64: Option<Arc<dyn Fn(u64) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    pub from_i64: Option<Arc<dyn Fn(i64) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    pub from_bool: Option<Arc<dyn Fn(bool) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
 }
 
 impl TracingField {
@@ -139,10 +140,10 @@ pub struct TracingFieldBuilder {
     log_name: &'static str,
     span_field: Option<&'static str>,
     record_field: Option<&'static str>,
-    from_str: Option<Arc<dyn Fn(&str, &'static str) + Send + Sync>>,
-    from_u64: Option<Arc<dyn Fn(u64, &'static str) + Send + Sync>>,
-    from_i64: Option<Arc<dyn Fn(i64, &'static str) + Send + Sync>>,
-    from_bool: Option<Arc<dyn Fn(bool, &'static str) + Send + Sync>>,
+    from_str: Option<Arc<dyn Fn(&str) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    from_u64: Option<Arc<dyn Fn(u64) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    from_i64: Option<Arc<dyn Fn(i64) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    from_bool: Option<Arc<dyn Fn(bool) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
     log_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
     span_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
 }
@@ -172,15 +173,13 @@ impl TracingFieldBuilder {
     /// Extract from string span field values.
     ///
     /// The closure receives the string value and returns `Some(T)` if
-    /// conversion succeeds. `set_context` is called automatically.
+    /// conversion succeeds. The layer stores the result in the appropriate context.
     pub fn extract_from_str<T>(mut self, f: impl Fn(&str) -> Option<T> + Send + Sync + 'static) -> Self
     where
         T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        self.from_str = Some(Arc::new(move |value, key| {
-            if let Some(v) = f(value) {
-                dcontext::set_context(key, v);
-            }
+        self.from_str = Some(Arc::new(move |value| {
+            f(value).map(|v| Arc::new(v) as Arc<dyn dcontext::value::ContextValue>)
         }));
         self
     }
@@ -190,10 +189,8 @@ impl TracingFieldBuilder {
     where
         T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        self.from_u64 = Some(Arc::new(move |value, key| {
-            if let Some(v) = f(value) {
-                dcontext::set_context(key, v);
-            }
+        self.from_u64 = Some(Arc::new(move |value| {
+            f(value).map(|v| Arc::new(v) as Arc<dyn dcontext::value::ContextValue>)
         }));
         self
     }
@@ -203,10 +200,8 @@ impl TracingFieldBuilder {
     where
         T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        self.from_i64 = Some(Arc::new(move |value, key| {
-            if let Some(v) = f(value) {
-                dcontext::set_context(key, v);
-            }
+        self.from_i64 = Some(Arc::new(move |value| {
+            f(value).map(|v| Arc::new(v) as Arc<dyn dcontext::value::ContextValue>)
         }));
         self
     }
@@ -216,10 +211,8 @@ impl TracingFieldBuilder {
     where
         T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        self.from_bool = Some(Arc::new(move |value, key| {
-            if let Some(v) = f(value) {
-                dcontext::set_context(key, v);
-            }
+        self.from_bool = Some(Arc::new(move |value| {
+            f(value).map(|v| Arc::new(v) as Arc<dyn dcontext::value::ContextValue>)
         }));
         self
     }
@@ -427,11 +420,19 @@ pub fn collect_log_fields() -> Vec<(&'static str, String)> {
     let mut result = Vec::new();
     for entry in entries {
         if let Some(ref fmt_fn) = entry.log_fmt_fn {
-            if let Some(formatted) = dcontext::with_context_value(entry.context_key, |any_val| {
+            // Try async context first, then sync context
+            let formatted = dcontext::async_ctx::with_context_value(entry.context_key, |any_val| {
                 fmt_fn(any_val)
             })
             .flatten()
-            {
+            .or_else(|| {
+                dcontext::sync_ctx::with_context_value(entry.context_key, |any_val| {
+                    fmt_fn(any_val)
+                })
+                .flatten()
+            });
+
+            if let Some(formatted) = formatted {
                 result.push((entry.log_name, formatted));
             }
         }
@@ -494,10 +495,15 @@ where
         let entries = get_tracing_fields();
         for entry in entries {
             if let Some(ref fmt_fn) = entry.log_fmt_fn {
-                if let Some(formatted) =
-                    dcontext::with_context_value(entry.context_key, |any_val| fmt_fn(any_val))
-                        .flatten()
-                {
+                // Try async context first, then sync context
+                let formatted = dcontext::async_ctx::with_context_value(entry.context_key, |any_val| fmt_fn(any_val))
+                    .flatten()
+                    .or_else(|| {
+                        dcontext::sync_ctx::with_context_value(entry.context_key, |any_val| fmt_fn(any_val))
+                            .flatten()
+                    });
+
+                if let Some(formatted) = formatted {
                     write!(writer, "{}={} ", entry.log_name, formatted)?;
                 }
             }

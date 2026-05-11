@@ -15,6 +15,9 @@ use crate::scope::ScopeGuard;
 use crate::snapshot::ContextSnapshot;
 use crate::async_storage::TASK_CONTEXT;
 use crate::sync_storage::ContextStore;
+use crate::value::ContextValue;
+
+// ── Scope management ───────────────────────────────────────────
 
 /// Push a named scope onto the task-local store.
 ///
@@ -56,6 +59,8 @@ pub fn scope_chain() -> Vec<String> {
     with_task_store(|store| store.scope_chain()).unwrap_or_default()
 }
 
+// ── Value access (typed) ───────────────────────────────────────
+
 /// Set a context value in the task-local store.
 ///
 /// Silently no-ops if not in an async task.
@@ -82,6 +87,50 @@ where
     })
     .flatten()
 }
+
+/// Update a context value using a callback (read-modify-write).
+///
+/// Reads the current value (or default), applies `f`, and writes back.
+/// Silently no-ops if not in an async task.
+pub fn update_context<T>(key: &'static str, f: impl FnOnce(T) -> T)
+where
+    T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    let old = get_context::<T>(key).unwrap_or_default();
+    let new = f(old);
+    set_context(key, new);
+}
+
+// ── Value access (type-erased, for extension crates) ───────────
+
+/// Set a raw type-erased value in the task-local store.
+///
+/// Used by extension crates (like dcontext-tracing) for field extraction.
+/// Silently no-ops if not in an async task.
+pub fn set_raw_value(key: &'static str, value: Arc<dyn ContextValue>) {
+    with_task_store(|store| {
+        store.set_value(key, value);
+    });
+}
+
+/// Get a raw type-erased value from the task-local store.
+///
+/// Returns `None` if the key is not set or not in an async task.
+pub fn get_raw_value(key: &str) -> Option<Arc<dyn ContextValue>> {
+    with_task_store(|store| store.get_value(key)).flatten()
+}
+
+/// Access the current context value for a key as `&dyn Any` via callback.
+///
+/// Returns `None` if the key has no value or not in an async task.
+pub fn with_context_value<R>(
+    key: &str,
+    f: impl FnOnce(&dyn std::any::Any) -> R,
+) -> Option<R> {
+    get_raw_value(key).map(|arc_val| f(arc_val.as_any()))
+}
+
+// ── Snapshot / Propagation ─────────────────────────────────────
 
 /// Take a snapshot of the current task-local context.
 ///
