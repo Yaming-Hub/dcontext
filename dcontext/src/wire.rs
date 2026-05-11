@@ -94,7 +94,11 @@ pub fn serialize_context_string() -> Result<String, ContextError> {
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
-/// Restore context from bytes. Pushes a new scope with deserialized values.
+/// Restore context from bytes. Pushes a new scope with deserialized values
+/// and activates a scope barrier that hides all parent scopes. Value lookups
+/// will only see the restored remote context. When the returned guard is
+/// dropped, the scope is popped and the barrier is cleared, making parent
+/// scopes visible again.
 pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
     // Parse version prefix to decide format.
     let (entries, scope_chain) = deserialize_wire(bytes)?;
@@ -106,12 +110,22 @@ pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
         storage::enter_scope()
     };
 
+    // Activate scope barrier — hides all parent scopes from lookups.
+    // The barrier is saved into the ScopeNode on push_scope and restored
+    // on pop_scope, so dropping `guard` automatically clears it.
+    if use_async {
+        crate::async_ctx::set_scope_barrier();
+    } else {
+        storage::set_scope_barrier();
+    }
+
     // Restore remote scope chain.
     if !scope_chain.is_empty() {
-        if !use_async {
+        if use_async {
+            crate::async_ctx::set_remote_chain(scope_chain);
+        } else {
             storage::set_remote_chain(scope_chain);
         }
-        // TODO: async_ctx doesn't have set_remote_chain yet — skip for now
     }
 
     for entry in &entries {

@@ -50,6 +50,12 @@ pub(crate) struct ContextStore {
     /// not found in the local scope chain. This allows forked contexts to
     /// start a fresh root scope while still seeing parent values.
     pub(crate) frozen_parent: Option<Arc<ScopeNode>>,
+    /// When set, value lookups and scope_chain() stop at scopes with
+    /// depth <= this value. Used by `deserialize_context` to hide the
+    /// local scope tree behind a restored remote context. The barrier
+    /// is saved into `ScopeNode` on push and restored on pop, so dropping
+    /// the deserialize guard automatically makes parent scopes visible.
+    pub(crate) scope_barrier: Option<usize>,
 }
 
 impl ContextStore {
@@ -63,6 +69,7 @@ impl ContextStore {
             remote_chain: Arc::new(Vec::new()),
             remote_chain_base_depth: 0,
             frozen_parent: None,
+            scope_barrier: None,
         }
     }
 
@@ -80,6 +87,7 @@ impl ContextStore {
             remote_chain: Arc::new(remote_chain),
             remote_chain_base_depth: 1,
             frozen_parent: None,
+            scope_barrier: None,
         }
     }
 
@@ -103,6 +111,7 @@ impl ContextStore {
             depth: self.depth,
             remote_chain: Arc::clone(&self.remote_chain),
             remote_chain_base_depth: self.remote_chain_base_depth,
+            saved_scope_barrier: self.scope_barrier,
         });
 
         Self {
@@ -113,6 +122,7 @@ impl ContextStore {
             remote_chain: Arc::clone(&self.remote_chain),
             remote_chain_base_depth: self.remote_chain_base_depth,
             frozen_parent: Some(frozen),
+            scope_barrier: None,
         }
     }
 
@@ -150,6 +160,7 @@ impl ContextStore {
             depth: self.depth - 1,
             remote_chain: Arc::clone(&self.remote_chain),
             remote_chain_base_depth: self.remote_chain_base_depth,
+            saved_scope_barrier: self.scope_barrier,
         });
 
         self.scope_chain = Some(node);
@@ -195,6 +206,7 @@ impl ContextStore {
                 self.depth = owned.depth;
                 self.remote_chain = owned.remote_chain;
                 self.remote_chain_base_depth = owned.remote_chain_base_depth;
+                self.scope_barrier = owned.saved_scope_barrier;
             }
             Err(shared) => {
                 self.scope_chain = shared.parent.clone();
@@ -205,6 +217,7 @@ impl ContextStore {
                 self.depth = shared.depth;
                 self.remote_chain = Arc::clone(&shared.remote_chain);
                 self.remote_chain_base_depth = shared.remote_chain_base_depth;
+                self.scope_barrier = shared.saved_scope_barrier;
             }
         }
 
@@ -223,35 +236,42 @@ impl ContextStore {
     }
 
     /// Look up the effective value for a key.
-    /// Checks current_values first, then walks the parent scope chain,
-    /// then falls through to the frozen parent (if forked).
+    /// Checks current_values first, then walks the parent scope chain
+    /// (stopping at the scope_barrier), then falls through to the frozen
+    /// parent (if forked and no barrier is active).
     /// For cached keys, the value is always in current_values (O(1)).
     /// For non-cached keys, this is O(depth).
     pub(crate) fn get_value(&self, key: &str) -> Option<Arc<dyn ContextValue>> {
         if let Some(v) = self.current_values.get(key) {
             return Some(Arc::clone(v));
         }
+        let barrier = self.scope_barrier.unwrap_or(0);
         let mut node = self.scope_chain.as_ref();
         while let Some(n) = node {
+            if n.depth <= barrier {
+                break;
+            }
             if let Some(v) = n.values.get(key) {
                 return Some(Arc::clone(v));
             }
             node = n.parent.as_ref();
         }
-        // Fall through to frozen parent from fork
-        let mut node = self.frozen_parent.as_ref();
-        while let Some(n) = node {
-            if let Some(v) = n.values.get(key) {
-                return Some(Arc::clone(v));
+        // Fall through to frozen parent from fork (only if no barrier is active)
+        if self.scope_barrier.is_none() {
+            let mut node = self.frozen_parent.as_ref();
+            while let Some(n) = node {
+                if let Some(v) = n.values.get(key) {
+                    return Some(Arc::clone(v));
+                }
+                node = n.parent.as_ref();
             }
-            node = n.parent.as_ref();
         }
         None
     }
 
     /// Collect all effective values for snapshot/serialization.
-    /// Walks the full scope chain (including frozen parent) to build a
-    /// merged view (topmost wins).
+    /// Walks the scope chain down to the barrier (or bottom), then
+    /// includes frozen parent values only if no barrier is active.
     pub(crate) fn collect_values(&self) -> HashMap<&'static str, Arc<dyn ContextValue>> {
         let mut result: HashMap<&'static str, Arc<dyn ContextValue>> = HashMap::new();
 
@@ -259,21 +279,27 @@ impl ContextStore {
             result.insert(k, Arc::clone(v));
         }
 
+        let barrier = self.scope_barrier.unwrap_or(0);
         let mut node = self.scope_chain.as_ref();
         while let Some(n) = node {
+            if n.depth <= barrier {
+                break;
+            }
             for (&k, v) in &n.values {
                 result.entry(k).or_insert_with(|| Arc::clone(v));
             }
             node = n.parent.as_ref();
         }
 
-        // Include frozen parent values (lowest priority)
-        let mut node = self.frozen_parent.as_ref();
-        while let Some(n) = node {
-            for (&k, v) in &n.values {
-                result.entry(k).or_insert_with(|| Arc::clone(v));
+        // Include frozen parent values only if no barrier is active
+        if self.scope_barrier.is_none() {
+            let mut node = self.frozen_parent.as_ref();
+            while let Some(n) = node {
+                for (&k, v) in &n.values {
+                    result.entry(k).or_insert_with(|| Arc::clone(v));
+                }
+                node = n.parent.as_ref();
             }
-            node = n.parent.as_ref();
         }
 
         result
@@ -285,7 +311,21 @@ impl ContextStore {
         self.remote_chain_base_depth = self.depth;
     }
 
+    /// Activate a scope barrier at the current depth.
+    ///
+    /// All scopes with depth <= the barrier depth become invisible to
+    /// value lookups, `collect_values`, and `scope_chain`. The barrier
+    /// is automatically saved/restored by `push_scope`/`pop_scope`, so
+    /// dropping the guard that owns this scope clears the barrier.
+    pub(crate) fn set_scope_barrier(&mut self) {
+        // Block everything below the current scope. The current scope's
+        // parent chain starts at depth - 1, so barrier = depth - 1
+        // hides all ancestors.
+        self.scope_barrier = Some(self.depth - 1);
+    }
+
     /// Build the full scope chain: frozen parent names + remote prefix + local named scope names.
+    /// Stops at the scope_barrier — hidden scopes are excluded.
     pub(crate) fn scope_chain(&self) -> Vec<String> {
         let mut local_names = Vec::new();
 
@@ -295,8 +335,12 @@ impl ContextStore {
             }
         }
 
+        let barrier = self.scope_barrier.unwrap_or(0);
         let mut node = self.scope_chain.as_ref();
         while let Some(n) = node {
+            if n.depth <= barrier {
+                break;
+            }
             if n.depth > self.remote_chain_base_depth {
                 if let Some(name) = &n.name {
                     local_names.push(name.clone());
@@ -307,16 +351,18 @@ impl ContextStore {
 
         local_names.reverse();
 
-        // Include frozen parent scope names as a prefix
+        // Include frozen parent scope names only if no barrier is active
         let mut parent_names = Vec::new();
-        let mut node = self.frozen_parent.as_ref();
-        while let Some(n) = node {
-            if let Some(name) = &n.name {
-                parent_names.push(name.clone());
+        if self.scope_barrier.is_none() {
+            let mut node = self.frozen_parent.as_ref();
+            while let Some(n) = node {
+                if let Some(name) = &n.name {
+                    parent_names.push(name.clone());
+                }
+                node = n.parent.as_ref();
             }
-            node = n.parent.as_ref();
+            parent_names.reverse();
         }
-        parent_names.reverse();
 
         let max_len = crate::config::max_scope_chain_len();
         let mut chain: Vec<String> = (*self.remote_chain).clone();

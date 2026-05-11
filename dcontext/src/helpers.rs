@@ -24,6 +24,7 @@ impl Clone for ForkHandle {
             remote_chain: Arc::clone(&s.remote_chain),
             remote_chain_base_depth: s.remote_chain_base_depth,
             frozen_parent: s.frozen_parent.clone(),
+            scope_barrier: s.scope_barrier,
         }))
     }
 }

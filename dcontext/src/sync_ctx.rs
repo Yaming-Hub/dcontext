@@ -55,6 +55,15 @@ pub fn pop_scope(expected_depth: usize) {
     let _garbage = try_apply(|store| store.pop_scope(expected_depth));
 }
 
+/// Activate a scope barrier that hides all parent scopes from lookups.
+///
+/// Used by `deserialize_context` so the restored remote context fully
+/// replaces the visible values. The barrier is saved/restored by
+/// push_scope/pop_scope, so dropping the scope guard clears it.
+pub(crate) fn set_scope_barrier() {
+    try_apply(|store| store.set_scope_barrier());
+}
+
 /// Get the current scope chain from the thread-local store.
 pub fn scope_chain() -> Vec<String> {
     try_apply(|store| store.scope_chain()).unwrap_or_default()

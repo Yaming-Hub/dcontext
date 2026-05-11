@@ -19,6 +19,9 @@ pub(crate) struct ScopeNode {
     /// Remote chain state saved at scope entry.
     pub(crate) remote_chain: Arc<Vec<String>>,
     pub(crate) remote_chain_base_depth: usize,
+    /// Saved scope_barrier from the store at the time this scope was frozen.
+    /// Restored when this scope is popped.
+    pub(crate) saved_scope_barrier: Option<usize>,
 }
 
 // ── Garbage bag ────────────────────────────────────────────────

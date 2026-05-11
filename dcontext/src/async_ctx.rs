@@ -51,6 +51,15 @@ pub fn pop_scope(expected_depth: usize) {
     let _garbage = try_apply(|store| store.pop_scope(expected_depth));
 }
 
+/// Activate a scope barrier that hides all parent scopes from lookups.
+///
+/// Used by `deserialize_context` so the restored remote context fully
+/// replaces the visible values. The barrier is saved/restored by
+/// push_scope/pop_scope, so dropping the scope guard clears it.
+pub(crate) fn set_scope_barrier() {
+    try_apply(|store| store.set_scope_barrier());
+}
+
 /// Peek at the current scope depth on the task-local store.
 ///
 /// The depth uniquely identifies the active scope within the store.
@@ -118,6 +127,13 @@ pub fn set_raw_value(key: &'static str, value: Arc<dyn ContextValue>) {
     try_apply(|store| {
         store.set_value(key, value);
     });
+}
+
+/// Set the remote scope chain on the task-local store.
+///
+/// Used by `deserialize_context` when restoring a cross-process context.
+pub(crate) fn set_remote_chain(chain: Vec<String>) {
+    try_apply(|store| store.set_remote_chain(chain));
 }
 
 /// Get a raw type-erased value from the task-local store.
