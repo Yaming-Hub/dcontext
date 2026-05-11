@@ -16,12 +16,13 @@ deserialization, and scope restoration automatically.
 
 ```toml
 [dependencies]
-dcontext = "0.3"
-dcontext-dactor = "0.3"
+dcontext = "0.8"
+dcontext-dactor = "0.8"
 dactor = "0.3.1"
 ```
 
 ```rust
+use dcontext::async_ctx;
 use dcontext_dactor::{ContextInboundInterceptor, ContextOutboundInterceptor};
 
 // Register interceptors with your dactor runtime
@@ -29,8 +30,8 @@ runtime.add_outbound_interceptor(Box::new(ContextOutboundInterceptor::default())
 runtime.add_inbound_interceptor(Box::new(ContextInboundInterceptor::default()));
 
 // That's it! Context now flows automatically between actors.
-// Inside any actor handler:
-let rid: RequestId = dcontext::get_context("request_id");
+// Inside any async actor handler:
+let rid = async_ctx::get_context::<RequestId>("request_id").unwrap();
 ```
 
 ## How It Works
@@ -49,7 +50,7 @@ OutboundInterceptor                 InboundInterceptor
   └─ remote target?                     └─ normalize to ContextSnapshotHeader
       └─ serialize → ContextHeader    Stage 2: wrap_handler()
          (includes scope chain)          ├─ enter named scope "remote:<actor_name>"
-                                         └─ wrap future with dcontext::with_context()
+                                         └─ wrap future with dcontext::async_ctx::with_context()
 ```
 
 **Outbound** — The `ContextOutboundInterceptor` captures the current context
@@ -59,8 +60,8 @@ serializes to wire bytes.
 
 **Inbound** — The `ContextInboundInterceptor` works in two stages:
 1. `on_receive` normalizes incoming headers (deserializes wire bytes into a snapshot)
-2. `wrap_handler` wraps the handler future with `dcontext::with_context()`, so context
-   is automatically available inside the handler — no manual restoration needed.
+2. `wrap_handler` runs the handler future inside `dcontext::async_ctx::with_context()`,
+   so context is automatically available inside the handler — no manual restoration needed.
 
 ### Local vs Remote Propagation
 
@@ -105,15 +106,16 @@ If you need the propagated context snapshot for spawning sub-tasks or other
 manual use, use `extract_context`:
 
 ```rust
+use dcontext::async_ctx;
 use dcontext_dactor::extract_context;
 
 async fn my_handler(ctx: &ActorContext, msg: MyMessage) {
-    // Get the propagated snapshot (if any)
     if let Some(snapshot) = extract_context(ctx) {
-        // Use it to propagate context to a spawned task
-        dcontext::spawn_with_context_async(snapshot, async {
-            // sub-task has the same context
-        }).await;
+        tokio::spawn(async move {
+            async_ctx::with_context(snapshot, async {
+                // sub-task has the same context
+            }).await;
+        });
     }
 }
 ```
@@ -130,12 +132,12 @@ The inbound interceptor's `wrap_handler` automatically creates a named scope
 boundaries visible in the scope chain:
 
 ```rust
-// Caller (e.g., API gateway) sets up context and sends a message:
-let _guard = dcontext::enter_named_scope("api-gateway");
+// Caller (sync code shown here) sets up context and sends a message:
+let _guard = dcontext::sync_ctx::enter_named_scope("api-gateway");
 actor_ref.send(MyMessage { ... }).await;
 
-// Inside the receiving actor handler ("OrderActor"):
-let chain = dcontext::scope_chain();
+// Inside the receiving actor handler (async):
+let chain = dcontext::async_ctx::scope_chain();
 // chain == ["api-gateway", "remote:OrderActor"]
 ```
 

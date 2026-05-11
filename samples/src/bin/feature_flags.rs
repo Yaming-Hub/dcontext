@@ -6,8 +6,8 @@
 //!
 //! Usage: `cargo run --bin feature_flags`
 
-use dcontext::{RegistryBuilder, initialize, set_context, get_context, scope};
-use serde::{Serialize, Deserialize};
+use dcontext::{initialize, sync_ctx, RegistryBuilder};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FeatureFlags {
@@ -32,23 +32,27 @@ fn main() {
     initialize(builder);
 
     // Simulate per-request feature flag resolution.
-    set_context("features", FeatureFlags {
-        dark_mode: true,
-        new_pricing: false,
-        beta_search: true,
-    });
+    sync_ctx::set_context(
+        "features",
+        FeatureFlags {
+            dark_mode: true,
+            new_pricing: false,
+            beta_search: true,
+        },
+    );
 
     render_page();
 
     // A/B test: override one flag for a sub-request.
-    scope(|| {
-        let mut flags = get_context::<FeatureFlags>("features");
+    {
+        let _guard = sync_ctx::enter_scope();
+        let mut flags = sync_ctx::get_context::<FeatureFlags>("features").unwrap();
         flags.new_pricing = true;
-        set_context("features", flags);
+        sync_ctx::set_context("features", flags);
 
         println!("\n--- A/B test scope ---");
         render_pricing();
-    });
+    }
 
     // After scope: new_pricing is back to false.
     println!("\n--- After A/B scope ---");
@@ -56,7 +60,7 @@ fn main() {
 }
 
 fn render_page() {
-    let flags = get_context::<FeatureFlags>("features");
+    let flags = sync_ctx::get_context::<FeatureFlags>("features").unwrap();
     println!("Rendering page:");
     println!("  dark_mode   = {}", flags.dark_mode);
     println!("  beta_search = {}", flags.beta_search);
@@ -64,7 +68,7 @@ fn render_page() {
 }
 
 fn render_pricing() {
-    let flags = get_context::<FeatureFlags>("features");
+    let flags = sync_ctx::get_context::<FeatureFlags>("features").unwrap();
     if flags.new_pricing {
         println!("  pricing: showing NEW pricing model");
     } else {

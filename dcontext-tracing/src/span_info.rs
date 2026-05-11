@@ -9,7 +9,7 @@
 /// ```ignore
 /// use dcontext_tracing::SpanInfo;
 ///
-/// let info: SpanInfo = dcontext::get_context("dcontext.span");
+/// let info: SpanInfo = dcontext::sync_ctx::get_context("dcontext.span").unwrap_or_default();
 /// println!("current span: {} ({})", info.name, info.target);
 /// ```
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]

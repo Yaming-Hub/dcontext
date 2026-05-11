@@ -13,7 +13,7 @@ GPT-5.1 and Gemini 3 Pro. This document consolidates their findings.
 The dual-storage dispatch silently falls back to thread-local when no
 task-local is established. In async code this is dangerous:
 
-- If a user forgets `spawn_with_context_async` / `with_context`, writes go
+- If a user forgets `spawn_with_context_async` / `async_ctx::with_context`, writes go
   to the **worker thread's** thread-local — lost on task migration, and
   potentially **leaked to unrelated tasks** on the same thread.
 - GPT: "This is a correctness landmine for async-heavy code."
@@ -122,9 +122,9 @@ incorrectly (bincode is not self-describing).
 `idea.md` requirement #10 asks for flexible async runtime support, but only
 Tokio is first-class. `async-std` is listed as "future work."
 
-**Recommendation:** Call this out as a known limitation in docs. Consider the
-poll-wrapper (`ContextFuture`) approach discussed earlier as the
-runtime-agnostic fallback.
+**Recommendation:** Call this out as a known limitation in docs and direct
+async users to the Tokio-only path: `AsyncDcontextLayer` with
+`dcontext::async_ctx` task-local storage.
 
 ---
 
@@ -160,11 +160,11 @@ would eliminate key typos and mismatched `T` at compile time.
 
 ---
 
-### S2. Closure-Based Scope API
+### S2. Safer Scope Entry API
 **Raised by: Gemini** | §4.1, §8.2
 
-`let _ = enter_scope();` is a footgun (immediate drop). Promote
-`dcontext::scope(|| ...)` as a primary function alongside the guard API.
+`let _ = enter_scope();` is a footgun (immediate drop). Promote the explicit
+`dcontext::sync_ctx::enter_scope()` guard pattern as the primary API.
 
 ---
 

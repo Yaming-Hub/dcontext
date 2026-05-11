@@ -14,19 +14,19 @@ async integration, and actor framework support.
 4. [Reading and Writing Context](#4-reading-and-writing-context)
 5. [Snapshots and Cross-Thread Propagation](#5-snapshots-and-cross-thread-propagation)
 6. [Async Integration (Tokio)](#6-async-integration-tokio)
-7. [Runtime-Agnostic Async](#7-runtime-agnostic-async)
-8. [Cross-Process Serialization](#8-cross-process-serialization)
-9. [Local-Only Entries](#9-local-only-entries)
-10. [Typed Keys (ContextKey)](#10-typed-keys-contextkey)
-11. [Custom Codecs](#11-custom-codecs)
-12. [Version Migration](#12-version-migration)
-13. [Configuration](#13-configuration)
-14. [Scope Chain](#14-scope-chain)
-15. [Convenience Macros](#15-convenience-macros)
-16. [Error Handling](#16-error-handling)
-17. [Integration with dactor](#17-integration-with-dactor)
-18. [Cargo Features](#18-cargo-features)
-19. [Log Enrichment](#19-log-enrichment)
+7. [Cross-Process Serialization](#7-cross-process-serialization)
+8. [Local-Only Entries](#8-local-only-entries)
+9. [Typed Keys (ContextKey)](#9-typed-keys-contextkey)
+10. [Custom Codecs](#10-custom-codecs)
+11. [Version Migration](#11-version-migration)
+12. [Configuration](#12-configuration)
+13. [Scope Chain](#13-scope-chain)
+14. [Macros](#14-macros)
+15. [Error Handling](#15-error-handling)
+16. [Integration with dactor](#16-integration-with-dactor)
+17. [Cargo Features](#17-cargo-features)
+18. [Log Enrichment](#18-log-enrichment)
+19. [Dual-Context Model (v0.8)](#19-dual-context-model-v08)
 
 ---
 
@@ -36,40 +36,47 @@ Add `dcontext` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-dcontext = "0.3"
+dcontext = "0.8"
 ```
 
-Define a context type, register it, and use it:
+Define a context type, register it once at startup, and then pick the module
+that matches your execution model:
 
 ```rust
-use dcontext::{RegistryBuilder, initialize, enter_scope, get_context, set_context};
-use serde::{Serialize, Deserialize};
+use dcontext::{initialize, async_ctx, sync_ctx, RegistryBuilder};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct RequestId(String);
 
-fn main() {
-    // 1. Register context types (once, at startup)
+#[tokio::main]
+async fn main() {
     let mut builder = RegistryBuilder::new();
     builder.register::<RequestId>("request_id");
     initialize(builder);
 
-    // 2. Enter a scope and set values
-    let _guard = enter_scope();
-    set_context("request_id", RequestId("req-123".into()));
+    let snap = {
+        let _guard = sync_ctx::enter_scope();
+        sync_ctx::set_context("request_id", RequestId("req-123".into()));
 
-    // 3. Read values anywhere in the call stack
-    let rid: RequestId = get_context("request_id");
-    assert_eq!(rid.0, "req-123");
+        let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
+        assert_eq!(rid.0, "req-123");
 
-    // 4. When _guard drops, values revert to previous scope
+        sync_ctx::snapshot()
+    };
+
+    async_ctx::with_context(snap, async {
+        let rid = async_ctx::get_context::<RequestId>("request_id").unwrap();
+        assert_eq!(rid.0, "req-123");
+    })
+    .await;
 }
 ```
 
-**Key principle:** Register once at startup → set values in scopes → read
-anywhere in the call stack. Scopes automatically revert on exit.
-
----
+**Key principle:** register once at startup, then use `sync_ctx::*` in
+thread-local code and `async_ctx::*` in Tokio task-local code. `get_context`
+now returns `Option<T>`, so examples should `unwrap()`, `unwrap_or_default()`,
+or otherwise handle missing values explicitly.
 
 ## 2. Registration
 
@@ -133,26 +140,31 @@ for details.
 Scopes are stack frames for context values. Each scope overlays the parent;
 changes revert automatically when the scope exits.
 
-### RAII guard
+### Sync scopes with RAII guards
 
 ```rust
+use dcontext::sync_ctx;
+
 {
-    let _guard = enter_scope();
-    set_context("request_id", RequestId("child-scope".into()));
+    let _guard = sync_ctx::enter_scope();
+    sync_ctx::set_context("request_id", RequestId("child-scope".into()));
     // "child-scope" is visible here
 }
 // _guard dropped → value reverts to parent scope
 ```
 
-### Closure-based scope
+### Replacing the removed `dcontext::scope(...)`
+
+The old root-level closure helper was removed. Create an explicit guard instead:
 
 ```rust
-use dcontext::scope;
+use dcontext::sync_ctx;
 
-scope(|| {
-    set_context("request_id", RequestId("in-scope".into()));
-    process_request(); // sees "in-scope"
-});
+{
+    let _guard = sync_ctx::enter_scope();
+    sync_ctx::set_context("request_id", RequestId("in-scope".into()));
+    process_request();
+}
 // reverted here
 ```
 
@@ -161,119 +173,117 @@ scope(|| {
 Scopes nest naturally. Inner scopes shadow outer values:
 
 ```rust
-let _outer = enter_scope();
-set_context("user", UserId(1));
+use dcontext::sync_ctx;
+
+let _outer = sync_ctx::enter_scope();
+sync_ctx::set_context("user", UserId(1));
 
 {
-    let _inner = enter_scope();
-    set_context("user", UserId(2));
-    assert_eq!(get_context::<UserId>("user").0, 2); // inner wins
+    let _inner = sync_ctx::enter_scope();
+    sync_ctx::set_context("user", UserId(2));
+    assert_eq!(sync_ctx::get_context::<UserId>("user").unwrap().0, 2);
 }
-assert_eq!(get_context::<UserId>("user").0, 1); // reverted to outer
+assert_eq!(sync_ctx::get_context::<UserId>("user").unwrap().0, 1);
 ```
 
-### Async scope
+### Async scopes
 
-For async code, use `scope_async` (requires `tokio` feature):
+For async code, use `async_ctx::scope` with Tokio task-local context:
 
 ```rust
-use dcontext::scope_async;
+use dcontext::async_ctx;
 
-scope_async(async {
-    set_context("request_id", RequestId("async-scope".into()));
+async_ctx::scope("request", async {
+    async_ctx::set_context("request_id", RequestId("async-scope".into()));
     do_async_work().await;
-}).await;
+})
+.await;
 // reverted after future completes
 ```
-
----
 
 ## 4. Reading and Writing Context
 
 ### Setting values
 
 ```rust
-set_context("request_id", RequestId("req-123".into()));
+use dcontext::sync_ctx;
+
+sync_ctx::set_context("request_id", RequestId("req-123".into()));
 ```
 
-Values are set in the **current topmost scope**. If no scope is active,
-the root scope is used.
+Values are written into the current topmost scope. If no scope is active, the
+root scope is used.
 
 ### Getting values
 
 ```rust
-let rid: RequestId = get_context("request_id");
+use dcontext::sync_ctx;
+
+let rid = sync_ctx::get_context::<RequestId>("request_id");
 ```
 
-Returns `T::default()` if the key is registered but no value has been set.
-The type is inferred from the return type or can be specified with turbofish:
+`get_context` returns `Option<T>` in both `sync_ctx` and `async_ctx`:
+
+- `Some(value)` if the key currently has a value
+- `None` if the key is unset in the active context
+
+Use whichever handling style fits the call site:
 
 ```rust
-let rid = get_context::<RequestId>("request_id");
-```
-
-### Fallible variants
-
-Use `try_get_context` and `try_set_context` when you need error handling:
-
-```rust
-match dcontext::try_get_context::<RequestId>("request_id") {
-    Ok(Some(rid)) => println!("found: {:?}", rid),
-    Ok(None)      => println!("registered but not set"),
-    Err(e)        => println!("error: {}", e),
-}
+let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
+let maybe_user = sync_ctx::get_context::<UserId>("user_id");
+let counter = sync_ctx::get_context::<Counter>("counter").unwrap_or_default();
 ```
 
 ### Updating values (read-modify-write)
 
-Use `update_context` to read the current value, transform it, and write back:
+Use the module-specific `update_context` helper to read the current value,
+transform it, and write it back:
 
 ```rust
-update_context::<Counter>("counter", |c| Counter(c.0 + 1));
+use dcontext::sync_ctx;
+
+sync_ctx::update_context::<Counter>("counter", |c| Counter(c.0 + 1));
 ```
 
-This is a convenience over separate `get_context` + `set_context` calls. The
-callback runs with the store fully available — re-entrant reads from tracing
-callbacks work normally during the callback.
-
-> **Note:** `update_context` is **not atomic** — another write may interleave
-> between the read and the write. Last writer wins. This is by design for
-> contention-free access.
-
----
+There is an equivalent `async_ctx::update_context` for task-local code.
 
 ## 5. Snapshots and Cross-Thread Propagation
 
 A `ContextSnapshot` is an immutable, `Clone + Send + Sync` capture of the
-current context. Use it to propagate context across thread boundaries.
+current context. Use it to propagate context across thread boundaries or to
+bridge sync code into async code.
 
 ### Capture and restore
 
 ```rust
-use dcontext::{snapshot, attach};
+use dcontext::sync_ctx;
 
-let _guard = enter_scope();
-set_context("request_id", RequestId("req-123".into()));
+let _guard = sync_ctx::enter_scope();
+sync_ctx::set_context("request_id", RequestId("req-123".into()));
 
-let snap = snapshot(); // capture current context
+let snap = sync_ctx::snapshot();
 
-// Later, in another thread or scope:
-let _restore = attach(snap); // push snapshot values as a new scope
-let rid: RequestId = get_context("request_id"); // "req-123"
-// _restore drops → reverts
+let _restore = sync_ctx::attach(snap);
+let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
+assert_eq!(rid.0, "req-123");
 ```
 
 ### Spawning threads with context
 
-```rust
-use dcontext::spawn_with_context;
+Root-level thread helpers are still available. Capture happens from the sync
+store, so thread code should read from `sync_ctx`:
 
-set_context("request_id", RequestId("req-001".into()));
+```rust
+use dcontext::{spawn_with_context, sync_ctx};
+
+sync_ctx::set_context("request_id", RequestId("req-001".into()));
 
 let handle = spawn_with_context("worker-thread", || {
-    let rid: RequestId = get_context("request_id");
-    assert_eq!(rid.0, "req-001"); // inherited from parent
-}).unwrap();
+    let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
+    assert_eq!(rid.0, "req-001");
+})
+.unwrap();
 
 handle.join().unwrap();
 ```
@@ -283,233 +293,148 @@ handle.join().unwrap();
 For thread pools or callbacks where you need a callable that carries context:
 
 ```rust
-use dcontext::{wrap_with_context, wrap_with_context_fn};
+use dcontext::{wrap_with_context, wrap_with_context_fn, sync_ctx};
 
-// FnOnce — consumed on first call
 let task = wrap_with_context(|| {
-    let rid: RequestId = get_context("request_id");
+    let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
     process(rid);
 });
 thread_pool.execute(task);
 
-// Fn — reusable, context restored on each call
 let handler = wrap_with_context_fn(|| {
-    get_context::<RequestId>("request_id")
+    sync_ctx::get_context::<RequestId>("request_id").unwrap()
 });
 for _ in 0..10 {
-    handler(); // same context each time
+    handler();
 }
 ```
 
----
-
 ## 6. Async Integration (Tokio)
 
-When running inside a Tokio runtime, dcontext uses `tokio::task_local!`
-for context storage. This requires explicit setup.
+`dcontext` is Tokio-only for async propagation. Use `dcontext::async_ctx` for
+async/task-local context and `dcontext::sync_ctx` for synchronous/thread-local
+context.
 
 ### Establishing task-local context
 
 ```rust
-use dcontext::{with_context, snapshot, force_thread_local};
+use dcontext::{async_ctx, sync_ctx};
 
 #[tokio::main]
 async fn main() {
-    // Set up registry...
+    let snap = {
+        let _guard = sync_ctx::enter_scope();
+        sync_ctx::set_context("request_id", RequestId("req-001".into()));
+        sync_ctx::snapshot()
+    };
 
-    // Create initial context in thread-local (we're at top level)
-    let snap = force_thread_local(|| {
-        let _guard = dcontext::enter_scope();
-        dcontext::set_context("request_id", RequestId("req-001".into()));
-        dcontext::snapshot()
-    });
-
-    // Establish task-local context for async code
-    with_context(snap, async {
-        // All async code here sees the context
-        let rid: RequestId = dcontext::get_context("request_id");
+    async_ctx::with_context(snap, async {
+        let rid = async_ctx::get_context::<RequestId>("request_id").unwrap();
         assert_eq!(rid.0, "req-001");
 
-        do_async_work().await; // context visible through .await points
-    }).await;
+        async_ctx::scope("request", async {
+            do_async_work().await;
+        })
+        .await;
+    })
+    .await;
 }
 ```
 
-### Why `force_thread_local`?
+### No `force_thread_local` shim in normal code
 
-Inside a Tokio runtime, dcontext's storage dispatcher detects the runtime and
-requires task-local context (to prevent accidental thread-local use that would
-break across `.await` points). Use `force_thread_local` as an escape hatch
-when you need to set up initial context before any task-local scope exists.
+The old `force_thread_local` escape hatch is gone from the recommended API
+surface. In the dual-context model there is no runtime dispatch to override —
+use `sync_ctx::*` when you want thread-local behavior and `async_ctx::*` when
+you want task-local behavior.
 
 ### Spawning async tasks with context
 
 ```rust
-use dcontext::spawn_with_context_async;
+use dcontext::{async_ctx, spawn_with_context_async};
 
-with_context(snap, async {
-    // Spawn a child task that inherits context
+async_ctx::with_context(snap, async {
     let handle = spawn_with_context_async(async {
-        let rid: RequestId = dcontext::get_context("request_id");
-        // context inherited from parent task
+        let rid = async_ctx::get_context::<RequestId>("request_id").unwrap();
+        assert_eq!(rid.0, "req-001");
     });
+
     handle.await.unwrap();
-}).await;
+})
+.await;
 ```
 
-### Storage dispatch rules
+### Storage model
 
-| Situation | Storage used |
-|-----------|-------------|
-| No Tokio runtime | Thread-local |
-| Inside `with_context(...)` | Task-local |
-| Inside Tokio but no `with_context` | **Panics** (safety check) |
-| Inside `force_thread_local(...)` | Thread-local (forced) |
+| Code path | Storage used |
+|-----------|--------------|
+| `async_ctx::*` | Tokio task-local |
+| `sync_ctx::*` | Thread-local |
+| `spawn_with_context_async(...)` | Captures context and re-establishes task-local state |
 
----
+## 7. Cross-Process Serialization
 
-## 7. Runtime-Agnostic Async
-
-For executors other than Tokio (async-std, smol, etc.), enable the
-`context-future` feature:
-
-```toml
-[dependencies]
-dcontext = { version = "0.4", features = ["context-future"] }
-```
-
-### ContextFuture
-
-`ContextFuture` wraps any future with context propagation using thread-local
-storage instead of task-local. It installs/removes context on each `poll()`.
-
-```rust
-use dcontext::with_context_future;
-
-// Set up context in thread-local
-force_thread_local(|| {
-    let _guard = enter_scope();
-    set_context("trace_id", TraceId("abc".into()));
-});
-
-let fut = with_context_future(async {
-    // Context is available — no force_thread_local needed inside
-    let tid: TraceId = get_context("trace_id");
-    assert_eq!(tid.0, "abc");
-});
-
-// Run with any executor
-smol::block_on(fut);
-```
-
-### Comparison with `with_context`
-
-| | `with_context` (Tokio) | `with_context_future` (any runtime) |
-|---|---|---|
-| **Runtime** | Tokio only | Any executor |
-| **Mechanism** | `tokio::task_local!` | Thread-local per `poll()` |
-| **Overhead** | O(1) per poll | O(N) per poll (N = context keys) |
-| **Feature** | `tokio` (default) | `context-future` |
-
-Use `with_context` when you're on Tokio (zero overhead). Use
-`with_context_future` when you need runtime portability.
-
----
-
-## 8. Cross-Process Serialization
-
-Context can be serialized to bytes for transport across process boundaries
-(RPC, message queues, HTTP headers).
+Context can be serialized for transport across process boundaries such as RPC,
+message queues, or HTTP metadata.
 
 ### Binary serialization
 
 ```rust
-use dcontext::{serialize_context, deserialize_context};
+use dcontext::sync_ctx;
 
-// Sender side
-let _guard = enter_scope();
-set_context("request_id", RequestId("req-123".into()));
-let bytes: Vec<u8> = serialize_context().unwrap();
+let _guard = sync_ctx::enter_scope();
+sync_ctx::set_context("request_id", RequestId("req-123".into()));
+let bytes = sync_ctx::serialize_context().unwrap();
 
-// ... send bytes over the wire ...
-
-// Receiver side
-let _guard = deserialize_context(&bytes).unwrap();
-let rid: RequestId = get_context("request_id");
+let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
+let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
 assert_eq!(rid.0, "req-123");
-// _guard drops → deserialized values revert
-```
-
-### Base64 string serialization
-
-For HTTP headers, gRPC metadata, or environment variables (requires `base64`
-feature, enabled by default):
-
-```rust
-use dcontext::{serialize_context_string, deserialize_context_string};
-
-let encoded: String = serialize_context_string().unwrap();
-// e.g., set as HTTP header: X-Context: <encoded>
-
-// Receiver:
-let _guard = deserialize_context_string(&encoded).unwrap();
 ```
 
 ### What gets serialized?
 
-- **Included:** All registered keys with values set in the current context
-- **Excluded:** Local-only entries (registered with `register_local` or set
-  with `set_context_local`)
-- **Format:** Bincode by default, or custom codec per key
+- **Included:** registered keys with values set in the current effective context
+- **Excluded:** local-only entries
+- **Also included:** the current scope chain (wire format v2)
 
 ### Unknown keys
 
-Unknown keys in received bytes are **silently skipped**. This allows partial
-receivers — a service only needs to register the keys it cares about.
+Unknown keys in received bytes are skipped. A receiver only needs to register
+the keys it cares about.
 
----
+## 8. Local-Only Entries
 
-## 9. Local-Only Entries
-
-For values that should propagate within a process (via snapshots) but never
-be serialized for cross-process transport.
+For values that should propagate within a process (via snapshots) but never be
+serialized for cross-process transport.
 
 ### Registration
 
 ```rust
-// Dedicated method (no Serialize/DeserializeOwned required)
 builder.register_local::<DbConnection>("db_conn");
-
-// Or via options
 builder.register_with::<CacheHandle>("cache", |opts| opts.local_only());
 ```
 
-**Type constraint:** `T: Clone + Default + Send + Sync + 'static` (no
-`Serialize` needed)
-
 ### Usage
 
-```rust
-// Use set_context_local (not set_context) for local-only keys
-set_context_local("db_conn", db_pool.clone());
+Set the value using the local-only setter, then read it from the appropriate
+context module:
 
-// Reading works the same way
-let db: DbConnection = get_context("db_conn");
+```rust
+set_context_local("db_conn", db_pool.clone());
+let db = dcontext::sync_ctx::get_context::<DbConnection>("db_conn").unwrap();
 ```
 
 ### Propagation behavior
 
 | Operation | Local-only entries? |
 |-----------|---|
-| `snapshot()` / `attach()` | ✅ Included |
+| `sync_ctx::snapshot()` / `sync_ctx::attach()` | ✅ Included |
 | `spawn_with_context()` | ✅ Included |
-| `with_context()` | ✅ Included |
-| `serialize_context()` | ❌ Excluded |
+| `async_ctx::with_context()` | ✅ Included |
+| `sync_ctx::serialize_context()` | ❌ Excluded |
 | Cross-process transport | ❌ Not available |
 
----
-
-## 10. Typed Keys (ContextKey)
+## 9. Typed Keys (ContextKey)
 
 The `context-key` feature (enabled by default) provides compile-time
 type-safe access without string literals at call sites.
@@ -545,7 +470,7 @@ let rid = REQUEST_ID.get(); // type inferred from ContextKey<RequestId>
 
 ---
 
-## 11. Custom Codecs
+## 10. Custom Codecs
 
 Replace the default bincode serialization with a custom format per key.
 
@@ -571,7 +496,7 @@ bincode (fast, compact, Rust-native).
 
 ---
 
-## 12. Version Migration
+## 11. Version Migration
 
 Support rolling upgrades where different nodes may run different schema
 versions.
@@ -637,7 +562,7 @@ assert_eq!(tc.span_id, ""); // migrated default
 
 ---
 
-## 13. Configuration
+## 12. Configuration
 
 ### Size limits
 
@@ -662,124 +587,91 @@ Default is `0` (no limit). Set this early in application startup.
 
 ---
 
-## 14. Scope Chain
+## 13. Scope Chain
 
 The scope chain gives you a queryable call path that spans both local scopes
-and remote process boundaries. Named scopes form the chain; unnamed scopes
-(from plain `enter_scope()`) do not appear.
+and remote process boundaries. Named scopes form the chain; unnamed scopes do
+not appear.
 
 ### Named scopes
 
-Create named scopes with `enter_named_scope` (sync) or `named_scope_async`
-(async):
+Create named scopes with `sync_ctx::enter_named_scope` (sync) or
+`async_ctx::scope` (async):
 
 ```rust
-use dcontext::{enter_named_scope, scope_chain};
+use dcontext::sync_ctx;
 
-let _guard = enter_named_scope("api-gateway");
+let _guard = sync_ctx::enter_named_scope("api-gateway");
 {
-    let _inner = enter_named_scope("auth-check");
-    let chain = scope_chain();
+    let _inner = sync_ctx::enter_named_scope("auth-check");
+    let chain = sync_ctx::scope_chain();
     // chain == vec!["api-gateway", "auth-check"]
 }
 ```
 
-For async code (requires `tokio` feature):
+For async code:
 
 ```rust
-use dcontext::named_scope_async;
+use dcontext::async_ctx;
 
-named_scope_async("process-order", async {
-    // scope chain includes "process-order" across .await points
+async_ctx::scope("process-order", async {
     do_async_work().await;
-}).await;
+})
+.await;
 ```
 
 ### Querying the chain
 
-`scope_chain()` returns `Vec<String>` with the full chain — remote prefix
-entries (from deserialized context) followed by local named scopes:
+Use the module that owns the active context store:
 
 ```rust
-let chain: Vec<String> = dcontext::scope_chain();
-// e.g. ["remote:service-a", "api-handler", "db-query"]
+let sync_chain = dcontext::sync_ctx::scope_chain();
+let async_chain = dcontext::async_ctx::scope_chain();
 ```
 
 ### Cross-process propagation
 
-When context is serialized (wire format v2), the current scope chain is
-included in the wire bytes. On the receiving side, `deserialize_context`
-restores the remote chain as a prefix. New local named scopes are appended:
+When context is serialized, the current scope chain is included in the wire
+bytes. On the receiving side, `sync_ctx::deserialize_context` restores the
+remote chain as a prefix:
 
 ```rust
-// Process A
-let _guard = enter_named_scope("service-a");
-let bytes = dcontext::serialize_context().unwrap();
+let _guard = dcontext::sync_ctx::enter_named_scope("service-a");
+let bytes = dcontext::sync_ctx::serialize_context().unwrap();
 
-// Process B (after deserialize_context)
-let _guard = enter_named_scope("service-b");
-let chain = scope_chain();
+let _guard = dcontext::sync_ctx::deserialize_context(&bytes).unwrap();
+let _local = dcontext::sync_ctx::enter_named_scope("service-b");
+let chain = dcontext::sync_ctx::scope_chain();
 // chain == ["service-a", "service-b"]
 ```
 
-Wire format v1 payloads (from older senders) are still readable — the scope
-chain will simply be empty for the remote prefix.
-
 ### Configuring max chain length
-
-Prevent unbounded chain growth in deep call graphs:
 
 ```rust
 use dcontext::{set_max_scope_chain_len, max_scope_chain_len};
 
-set_max_scope_chain_len(32); // cap at 32 entries
-
-let current = max_scope_chain_len(); // read current limit
+set_max_scope_chain_len(32);
+let current = max_scope_chain_len();
 ```
-
-Default is `64`. Set to `0` for unlimited. When the limit is reached, new
-named scopes still create context scopes, but their names are not appended
-to the chain.
 
 ### Snapshots carry the scope chain
 
-`ContextSnapshot` includes the scope chain at capture time. Access it via:
-
 ```rust
-let snap = dcontext::snapshot();
+let snap = dcontext::sync_ctx::snapshot();
 let chain: &[String] = snap.scope_chain();
 ```
 
 ### Integration with tracing spans
 
-When using `dcontext-tracing`, span names automatically become scope names.
-Each span enter pushes the span name onto the chain:
-
-```rust
-let _span = tracing::info_span!("handle_request").entered();
-let chain = dcontext::scope_chain();
-// chain includes "handle_request"
-```
-
-> **Note:** `dcontext-tracing` uses `force_thread_local()`, so the chain
-> reflects thread-local state. For full async propagation, combine with
-> `dcontext::with_context()`.
+`SyncDcontextLayer` appends span names to `sync_ctx::scope_chain()`. For async
+services, `AsyncDcontextLayer` appends to `async_ctx::scope_chain()`.
 
 ### Integration with dactor
 
-When using `dcontext-dactor`, the inbound interceptor's `wrap_handler`
-automatically creates a named scope `remote:<actor_name>` for each inbound
-message. This makes the distributed call boundary visible in the chain:
+`dcontext-dactor` restores inbound actor context into `async_ctx`, so actor
+handlers should read the chain with `dcontext::async_ctx::scope_chain()`.
 
-```rust
-// Inside an actor handler for "OrderActor":
-let chain = dcontext::scope_chain();
-// e.g. ["api-gateway", "remote:OrderActor"]
-```
-
----
-
-## 15. Convenience Macros
+## 14. Macros
 
 ### `register_contexts!`
 
@@ -797,26 +689,16 @@ register_contexts!(builder, {
 initialize(builder);
 ```
 
-### `with_scope!`
-
-Enter a scope, set multiple values, and execute a block:
+`with_scope!` was removed in the dual-context redesign. Replace it with an
+explicit guard in `sync_ctx`:
 
 ```rust
-use dcontext::with_scope;
-
-with_scope! {
-    "request_id" => RequestId("req-001".into()),
-    "user_id" => UserId(42),
-    => {
-        do_work(); // both values are set
-    }
-}
-// both values auto-reverted
+let _guard = dcontext::sync_ctx::enter_scope();
+dcontext::sync_ctx::set_context("request_id", RequestId("req-001".into()));
+do_work();
 ```
 
----
-
-## 16. Error Handling
+## 15. Error Handling
 
 All errors are represented by `dcontext::ContextError`:
 
@@ -840,7 +722,7 @@ All errors are represented by `dcontext::ContextError`:
 
 ---
 
-## 17. Integration with dactor
+## 16. Integration with dactor
 
 The `dcontext-dactor` crate provides automatic context propagation through
 [dactor](https://github.com/microsoft/dactor) actor messages.
@@ -849,26 +731,22 @@ The `dcontext-dactor` crate provides automatic context propagation through
 
 ```toml
 [dependencies]
-dcontext = "0.3"
-dcontext-dactor = "0.3"
+dcontext = "0.8"
+dcontext-dactor = "0.8"
 ```
 
 ```rust
-use dcontext_dactor::{ContextOutboundInterceptor, ContextInboundInterceptor};
+use dcontext_dactor::{ContextInboundInterceptor, ContextOutboundInterceptor};
 
-// Register interceptors on your runtime — that's it!
 runtime.add_outbound_interceptor(Box::new(ContextOutboundInterceptor::default()));
 runtime.add_inbound_interceptor(Box::new(ContextInboundInterceptor::default()));
 ```
 
 ### How it works
 
-1. **Outbound interceptor** — captures context when sending a message
-   - Local targets: snapshot (no serialization)
-   - Remote targets: serialized wire bytes
-2. **Inbound interceptor** — restores context automatically via `wrap_handler`
-   - `on_receive`: normalizes wire bytes → snapshot
-   - `wrap_handler`: wraps handler future with `dcontext::with_context`
+1. **Outbound interceptor** captures context when sending a message.
+2. **Inbound interceptor** restores context before the handler runs.
+3. Actor handlers then read values from `dcontext::async_ctx`.
 
 ### Handlers get context automatically
 
@@ -876,15 +754,13 @@ runtime.add_inbound_interceptor(Box::new(ContextInboundInterceptor::default()));
 #[async_trait]
 impl Handler<MyMessage> for MyActor {
     async fn handle(&mut self, msg: MyMessage, ctx: &mut ActorContext) -> () {
-        // Context is automatically restored — no boilerplate needed
-        let rid: RequestId = dcontext::get_context("request_id");
+        let rid = dcontext::async_ctx::get_context::<RequestId>("request_id").unwrap();
+        println!("request_id = {}", rid.0);
     }
 }
 ```
 
 ### Remote transport
-
-For cross-node propagation, register the wire header deserializer:
 
 ```rust
 use dcontext_dactor::register_context_headers;
@@ -892,55 +768,44 @@ use dactor::HeaderRegistry;
 
 let mut registry = HeaderRegistry::new();
 register_context_headers(&mut registry);
-// Pass registry to your transport
 ```
 
 ### Error policy
 
-Configure behavior when serialization/deserialization fails:
-
 ```rust
 use dcontext_dactor::{ContextInboundInterceptor, ErrorPolicy};
 
-// Default: log warning, deliver message without context
 ContextInboundInterceptor::default();
-
-// Strict: reject messages with corrupt context
 ContextInboundInterceptor::new(ErrorPolicy::Reject);
 ```
 
----
-
-## 18. Cargo Features
+## 17. Cargo Features
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `tokio` | ✅ | Task-local storage, `with_context`, `spawn_with_context_async`, `scope_async` |
-| `base64` | ✅ | Base64 string serialization for HTTP headers |
+| `base64` | ✅ | Base64 string serialization helpers for text transports |
 | `context-key` | ✅ | `ContextKey<T>` compile-time type-safe wrapper |
-| `context-future` | ❌ | `ContextFuture` for non-Tokio executors |
+| `tokio` | ✅ | Enables `async_ctx` and Tokio task-local propagation |
 
-### Minimal (no async)
-
-```toml
-dcontext = { version = "0.4", default-features = false }
-```
-
-### Full (all features)
+### Minimal
 
 ```toml
-dcontext = { version = "0.4", features = ["context-future"] }
+dcontext = { version = "0.8", default-features = false }
 ```
 
----
+### Default (recommended)
 
-## 19. Log Enrichment
+```toml
+dcontext = "0.8"
+```
+
+## 18. Log Enrichment
 
 The `dcontext-tracing` crate provides **log enrichment** — automatic injection
 of context values into every log event. This is powered by the extensible
 **per-key metadata** system in the core `dcontext` crate.
 
-### 19.1 Extensible Metadata
+### 18.1 Extensible Metadata
 
 Any typed metadata can be attached to a registration. Metadata is keyed by
 `TypeId`, so different extension crates can each register their own metadata
@@ -983,7 +848,7 @@ dcontext::initialize(builder);
 Each `with_metadata::<M>(value)` call stores under `TypeId::of::<M>()`.
 Different metadata types coexist independently — one value per type per key.
 
-### 19.2 TracingField Builder
+### 18.2 TracingField Builder
 
 `TracingField` is built with a fluent builder that controls three directions:
 
@@ -1059,7 +924,7 @@ output. Use `.span_field("other_name")` if the extraction span field name
 differs from the context key, and `.record_as("field")` if the span field to
 record into differs from `log_name`.
 
-### 19.3 WithContextFields Formatter
+### 18.3 WithContextFields Formatter
 
 `WithContextFields` wraps any `FormatEvent` implementation to prepend
 context fields to every log line:
@@ -1088,7 +953,7 @@ rid=req-123 tenant=acme  INFO query complete, rows=42
 Only keys that have a `TracingField` with an enrich function **and** a value
 set in the current context appear. Unset keys are silently skipped.
 
-### 19.4 collect_log_fields()
+### 18.4 collect_log_fields()
 
 For custom formatters or non-tracing logging, use `collect_log_fields()` to
 get the current context fields as `(name, formatted_value)` pairs:
@@ -1102,7 +967,7 @@ for (name, value) in &fields {
 }
 ```
 
-### 19.5 Querying Metadata
+### 18.5 Querying Metadata
 
 The core `dcontext` crate exposes general-purpose metadata queries that any
 extension crate can use:
@@ -1119,7 +984,7 @@ if let Some(name) = dcontext::with_metadata::<TracingField, _>("request_id", |tf
 let field_names: Vec<&str> = dcontext::keys_with_metadata::<TracingField, _>(|_key, tf| tf.log_name());
 ```
 
-### 19.6 Writing Your Own Metadata
+### 18.6 Writing Your Own Metadata
 
 Extension crates define their own metadata struct and use the same registration API:
 
@@ -1147,3 +1012,100 @@ let headers = dcontext::keys_with_metadata::<PropagationHeader, _>(|key, ph| {
     (key, ph.header_name)
 });
 ```
+
+---
+
+## 19. Dual-Context Model (v0.8)
+
+Starting with v0.8, `dcontext` uses two explicit context stores:
+
+- `dcontext::sync_ctx` — thread-local storage for synchronous code
+- `dcontext::async_ctx` — Tokio task-local storage for asynchronous code
+
+This removes the old root-level dispatch layer. Choose the module that matches
+your execution model instead of relying on runtime detection.
+
+### `async_ctx` — Task-Local Context
+
+```rust
+use dcontext::async_ctx;
+
+let snap = dcontext::ContextSnapshot::empty();
+async_ctx::with_context(snap, async {
+    async_ctx::scope("handle_request", async {
+        async_ctx::set_context("request_id", "req-123".to_string());
+        let rid = async_ctx::get_context::<String>("request_id");
+        assert_eq!(rid.as_deref(), Some("req-123"));
+    })
+    .await;
+
+    assert!(async_ctx::scope_chain().is_empty());
+})
+.await;
+```
+
+### `sync_ctx` — Thread-Local Context
+
+```rust
+use dcontext::sync_ctx;
+
+let _guard = sync_ctx::enter_named_scope("worker");
+sync_ctx::set_context("task_id", "task-42".to_string());
+let chain = sync_ctx::scope_chain();
+assert_eq!(chain, vec!["worker"]);
+```
+
+### Bridging: Async → Sync
+
+```rust
+use dcontext::{async_ctx, sync_ctx};
+
+let snap = async_ctx::snapshot();
+tokio::task::spawn_blocking(move || {
+    sync_ctx::restore(snap);
+    do_blocking_work();
+})
+.await
+.unwrap();
+```
+
+### Propagating to Child Tasks
+
+```rust
+use dcontext::{async_ctx, spawn_with_context_async};
+
+async_ctx::with_context(dcontext::ContextSnapshot::empty(), async {
+    let handle = spawn_with_context_async(async {
+        do_child_work().await;
+    });
+    handle.await.unwrap();
+})
+.await;
+```
+
+### New Tracing Layers
+
+| Layer | Store | Behavior |
+|-------|-------|----------|
+| `AsyncDcontextLayer` | Task-local | Persists across `.await` points |
+| `SyncDcontextLayer` | Thread-local | Standard sync span lifecycle |
+| `DcontextLayer` | Legacy alias | Kept only for compatibility |
+
+### Migration from Pre-v0.8
+
+| Old API | New API |
+|---------|---------|
+| `dcontext::set_context(val)` | `dcontext::sync_ctx::set_context(val)` |
+| `dcontext::get_context::<T>()` | `dcontext::sync_ctx::get_context::<T>()` |
+| `dcontext::enter_scope()` | `dcontext::sync_ctx::enter_scope()` |
+| `dcontext::enter_named_scope(name)` | `dcontext::sync_ctx::enter_named_scope(name)` |
+| `dcontext::scope(|| { ... })` | `let _guard = dcontext::sync_ctx::enter_scope();` |
+| `dcontext::snapshot()` | `dcontext::sync_ctx::snapshot()` |
+| `dcontext::attach(snap)` | `dcontext::sync_ctx::attach(snap)` |
+| `dcontext::scope_chain()` | `dcontext::sync_ctx::scope_chain()` or `dcontext::async_ctx::scope_chain()` |
+| `dcontext::serialize_context()` | `dcontext::sync_ctx::serialize_context()` |
+| `dcontext::deserialize_context(bytes)` | `dcontext::sync_ctx::deserialize_context(bytes)` |
+| `dcontext::with_context(snap, fut)` | `dcontext::async_ctx::with_context(snap, fut)` |
+| `dcontext::scope_async(fut)` | `dcontext::async_ctx::scope("", fut)` |
+| `dcontext::named_scope_async(name, fut)` | `dcontext::async_ctx::scope(name, fut)` |
+| `with_scope! { ... }` | Removed; use `let _guard = dcontext::sync_ctx::enter_scope();` |

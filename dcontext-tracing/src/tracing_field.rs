@@ -38,6 +38,7 @@ use std::sync::{Arc, OnceLock};
 ///     )
 /// });
 /// ```
+#[allow(clippy::type_complexity)]
 pub struct TracingField {
     /// Field name for log output and span recording.
     log_name: &'static str,
@@ -45,7 +46,7 @@ pub struct TracingField {
     span_field: Option<&'static str>,
     /// Span field name to record into. If `None`, uses `log_name`.
     record_field: Option<&'static str>,
-    /// Extract closures: each calls `dcontext::set_context` internally.
+    /// Extract closures: each calls `dcontext::sync_ctx::set_context` internally.
     extract: Option<ExtractFns>,
     /// Format function for log enrichment (context → log event).
     log_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
@@ -55,13 +56,19 @@ pub struct TracingField {
 
 /// Closures for extracting tracing field values into context.
 ///
-/// Each closure takes (field_value, context_key) and calls `set_context`
-/// internally, capturing the concrete type T.
+/// Each closure takes a field value and returns `Some(Arc<dyn ContextValue>)`
+/// if conversion succeeds. The layer is responsible for storing the result
+/// in the appropriate context store (sync or async).
+#[allow(clippy::type_complexity)]
 pub(crate) struct ExtractFns {
-    pub from_str: Option<Arc<dyn Fn(&str, &'static str) + Send + Sync>>,
-    pub from_u64: Option<Arc<dyn Fn(u64, &'static str) + Send + Sync>>,
-    pub from_i64: Option<Arc<dyn Fn(i64, &'static str) + Send + Sync>>,
-    pub from_bool: Option<Arc<dyn Fn(bool, &'static str) + Send + Sync>>,
+    pub from_str:
+        Option<Arc<dyn Fn(&str) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    pub from_u64:
+        Option<Arc<dyn Fn(u64) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    pub from_i64:
+        Option<Arc<dyn Fn(i64) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    pub from_bool:
+        Option<Arc<dyn Fn(bool) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
 }
 
 impl TracingField {
@@ -135,18 +142,24 @@ impl TracingField {
 // ── TracingFieldBuilder ────────────────────────────────────────
 
 /// Builder for [`TracingField`] metadata.
+#[allow(clippy::type_complexity)]
 pub struct TracingFieldBuilder {
     log_name: &'static str,
     span_field: Option<&'static str>,
     record_field: Option<&'static str>,
-    from_str: Option<Arc<dyn Fn(&str, &'static str) + Send + Sync>>,
-    from_u64: Option<Arc<dyn Fn(u64, &'static str) + Send + Sync>>,
-    from_i64: Option<Arc<dyn Fn(i64, &'static str) + Send + Sync>>,
-    from_bool: Option<Arc<dyn Fn(bool, &'static str) + Send + Sync>>,
+    from_str:
+        Option<Arc<dyn Fn(&str) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    from_u64:
+        Option<Arc<dyn Fn(u64) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    from_i64:
+        Option<Arc<dyn Fn(i64) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
+    from_bool:
+        Option<Arc<dyn Fn(bool) -> Option<Arc<dyn dcontext::value::ContextValue>> + Send + Sync>>,
     log_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
     span_fmt_fn: Option<Arc<dyn Fn(&dyn Any) -> Option<String> + Send + Sync>>,
 }
 
+#[allow(clippy::type_complexity)]
 impl TracingFieldBuilder {
     /// Set the span field name to extract from.
     ///
@@ -172,54 +185,58 @@ impl TracingFieldBuilder {
     /// Extract from string span field values.
     ///
     /// The closure receives the string value and returns `Some(T)` if
-    /// conversion succeeds. `set_context` is called automatically.
-    pub fn extract_from_str<T>(mut self, f: impl Fn(&str) -> Option<T> + Send + Sync + 'static) -> Self
+    /// conversion succeeds. The layer stores the result in the appropriate context.
+    pub fn extract_from_str<T>(
+        mut self,
+        f: impl Fn(&str) -> Option<T> + Send + Sync + 'static,
+    ) -> Self
     where
         T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        self.from_str = Some(Arc::new(move |value, key| {
-            if let Some(v) = f(value) {
-                dcontext::set_context(key, v);
-            }
+        self.from_str = Some(Arc::new(move |value| {
+            f(value).map(|v| Arc::new(v) as Arc<dyn dcontext::value::ContextValue>)
         }));
         self
     }
 
     /// Extract from u64 span field values.
-    pub fn extract_from_u64<T>(mut self, f: impl Fn(u64) -> Option<T> + Send + Sync + 'static) -> Self
+    pub fn extract_from_u64<T>(
+        mut self,
+        f: impl Fn(u64) -> Option<T> + Send + Sync + 'static,
+    ) -> Self
     where
         T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        self.from_u64 = Some(Arc::new(move |value, key| {
-            if let Some(v) = f(value) {
-                dcontext::set_context(key, v);
-            }
+        self.from_u64 = Some(Arc::new(move |value| {
+            f(value).map(|v| Arc::new(v) as Arc<dyn dcontext::value::ContextValue>)
         }));
         self
     }
 
     /// Extract from i64 span field values.
-    pub fn extract_from_i64<T>(mut self, f: impl Fn(i64) -> Option<T> + Send + Sync + 'static) -> Self
+    pub fn extract_from_i64<T>(
+        mut self,
+        f: impl Fn(i64) -> Option<T> + Send + Sync + 'static,
+    ) -> Self
     where
         T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        self.from_i64 = Some(Arc::new(move |value, key| {
-            if let Some(v) = f(value) {
-                dcontext::set_context(key, v);
-            }
+        self.from_i64 = Some(Arc::new(move |value| {
+            f(value).map(|v| Arc::new(v) as Arc<dyn dcontext::value::ContextValue>)
         }));
         self
     }
 
     /// Extract from bool span field values.
-    pub fn extract_from_bool<T>(mut self, f: impl Fn(bool) -> Option<T> + Send + Sync + 'static) -> Self
+    pub fn extract_from_bool<T>(
+        mut self,
+        f: impl Fn(bool) -> Option<T> + Send + Sync + 'static,
+    ) -> Self
     where
         T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        self.from_bool = Some(Arc::new(move |value, key| {
-            if let Some(v) = f(value) {
-                dcontext::set_context(key, v);
-            }
+        self.from_bool = Some(Arc::new(move |value| {
+            f(value).map(|v| Arc::new(v) as Arc<dyn dcontext::value::ContextValue>)
         }));
         self
     }
@@ -297,9 +314,7 @@ impl TracingFieldBuilder {
         mut self,
         f: impl Fn(&T) -> String + Send + Sync + 'static,
     ) -> Self {
-        self.log_fmt_fn = Some(Arc::new(move |any_val| {
-            any_val.downcast_ref::<T>().map(&f)
-        }));
+        self.log_fmt_fn = Some(Arc::new(move |any_val| any_val.downcast_ref::<T>().map(&f)));
         self
     }
 
@@ -333,9 +348,7 @@ impl TracingFieldBuilder {
         mut self,
         f: impl Fn(&T) -> String + Send + Sync + 'static,
     ) -> Self {
-        self.span_fmt_fn = Some(Arc::new(move |any_val| {
-            any_val.downcast_ref::<T>().map(&f)
-        }));
+        self.span_fmt_fn = Some(Arc::new(move |any_val| any_val.downcast_ref::<T>().map(&f)));
         self
     }
 
@@ -370,6 +383,7 @@ impl TracingFieldBuilder {
 // ── Discovery cache ────────────────────────────────────────────
 
 /// Cached info about a single TracingField entry, resolved from registry.
+#[allow(clippy::type_complexity)]
 pub(crate) struct TracingFieldEntry {
     pub context_key: &'static str,
     /// Span field name for extraction (may differ from context_key).
@@ -427,11 +441,17 @@ pub fn collect_log_fields() -> Vec<(&'static str, String)> {
     let mut result = Vec::new();
     for entry in entries {
         if let Some(ref fmt_fn) = entry.log_fmt_fn {
-            if let Some(formatted) = dcontext::with_context_value(entry.context_key, |any_val| {
+            // Try async context first, then sync context
+            let formatted = dcontext::async_ctx::with_context_value(entry.context_key, |any_val| {
                 fmt_fn(any_val)
             })
             .flatten()
-            {
+            .or_else(|| {
+                dcontext::sync_ctx::with_context_value(entry.context_key, |any_val| fmt_fn(any_val))
+                    .flatten()
+            });
+
+            if let Some(formatted) = formatted {
                 result.push((entry.log_name, formatted));
             }
         }
@@ -494,10 +514,20 @@ where
         let entries = get_tracing_fields();
         for entry in entries {
             if let Some(ref fmt_fn) = entry.log_fmt_fn {
-                if let Some(formatted) =
-                    dcontext::with_context_value(entry.context_key, |any_val| fmt_fn(any_val))
+                // Try async context first, then sync context
+                let formatted =
+                    dcontext::async_ctx::with_context_value(entry.context_key, |any_val| {
+                        fmt_fn(any_val)
+                    })
+                    .flatten()
+                    .or_else(|| {
+                        dcontext::sync_ctx::with_context_value(entry.context_key, |any_val| {
+                            fmt_fn(any_val)
+                        })
                         .flatten()
-                {
+                    });
+
+                if let Some(formatted) = formatted {
                     write!(writer, "{}={} ", entry.log_name, formatted)?;
                 }
             }

@@ -1,6 +1,6 @@
 [package]
 name = "dcontext"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 description = "Distributed context propagation for Rust — scoped, type-safe, serializable"
 license = "MIT"
@@ -20,7 +20,6 @@ tokio = { version = "1", features = ["rt", "sync"] }
 default = ["base64", "context-key"]
 base64 = ["dep:base64"]
 context-key = []
-context-future = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

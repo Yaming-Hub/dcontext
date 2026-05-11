@@ -1,16 +1,13 @@
 //! # Sample 3: Async Task Propagation
 //!
 //! Demonstrates propagating context across Tokio async tasks using:
-//! - `with_context` — establishes task-local context for a future
-//! - `spawn_with_context_async` — spawns a task with inherited context
+//! - `async_ctx::with_context` — establishes task-local context for a future
+//! - `async_ctx::snapshot` + `tokio::spawn` — inherits context into child tasks
 //!
 //! Usage: `cargo run --bin async_tasks`
 
-use dcontext::{
-    RegistryBuilder, initialize, set_context, get_context, scope, snapshot,
-    with_context, spawn_with_context_async, force_thread_local,
-};
-use serde::{Serialize, Deserialize};
+use dcontext::{async_ctx, initialize, sync_ctx, RegistryBuilder};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct RequestId(String);
@@ -25,37 +22,56 @@ async fn main() {
     builder.register::<SpanId>("span_id");
     initialize(builder);
 
-    // Set up initial context (using force_thread_local since we're
-    // at the top level of main, before any with_context wrapper).
-    let initial_snap = force_thread_local(|| {
-        set_context("request_id", RequestId("req-async-001".into()));
-        set_context("span_id", SpanId(1));
-        snapshot()
-    });
+    // Set up initial sync context, then bridge it into task-local storage.
+    let initial_snap = {
+        sync_ctx::set_context("request_id", RequestId("req-async-001".into()));
+        sync_ctx::set_context("span_id", SpanId(1));
+        sync_ctx::snapshot()
+    };
 
     // Wrap the main logic in with_context to establish task-local storage.
-    with_context(initial_snap, async {
-        println!("[main task] request_id = {:?}", get_context::<RequestId>("request_id"));
-        println!("[main task] span_id    = {:?}", get_context::<SpanId>("span_id"));
+    async_ctx::with_context(initial_snap, async {
+        println!(
+            "[main task] request_id = {:?}",
+            async_ctx::get_context::<RequestId>("request_id").unwrap()
+        );
+        println!(
+            "[main task] span_id    = {:?}",
+            async_ctx::get_context::<SpanId>("span_id").unwrap()
+        );
 
         // Spawn a child task — context is automatically inherited.
-        let handle = spawn_with_context_async(async {
-            println!("[child task] request_id = {:?}", get_context::<RequestId>("request_id"));
+        let child_snap = async_ctx::snapshot();
+        let handle = tokio::spawn(async_ctx::with_context(child_snap, async {
+            println!(
+                "[child task] request_id = {:?}",
+                async_ctx::get_context::<RequestId>("request_id").unwrap()
+            );
 
-            // Child task can create its own scopes.
-            scope(|| {
-                set_context("span_id", SpanId(2));
-                println!("[child scope] span_id = {:?}", get_context::<SpanId>("span_id"));
-            });
+            // Child task can create its own async-safe scopes.
+            async_ctx::scope("", async {
+                async_ctx::set_context("span_id", SpanId(2));
+                println!(
+                    "[child scope] span_id = {:?}",
+                    async_ctx::get_context::<SpanId>("span_id").unwrap()
+                );
+            })
+            .await;
 
             // After scope exits, span_id reverts.
-            println!("[child task] span_id after scope = {:?}", get_context::<SpanId>("span_id"));
-        });
+            println!(
+                "[child task] span_id after scope = {:?}",
+                async_ctx::get_context::<SpanId>("span_id").unwrap()
+            );
+        }));
 
         handle.await.unwrap();
 
         // Main task is unaffected by child's scopes.
-        println!("[main task] span_id still = {:?}", get_context::<SpanId>("span_id"));
+        println!(
+            "[main task] span_id still = {:?}",
+            async_ctx::get_context::<SpanId>("span_id").unwrap()
+        );
     })
     .await;
 }

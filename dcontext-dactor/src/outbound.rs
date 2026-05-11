@@ -1,8 +1,6 @@
 use std::any::Any;
 
-use dactor::{
-    Disposition, Headers, OutboundContext, OutboundInterceptor, Outcome, RuntimeHeaders,
-};
+use dactor::{Disposition, Headers, OutboundContext, OutboundInterceptor, Outcome, RuntimeHeaders};
 
 use crate::header::{ContextHeader, ContextSnapshotHeader};
 use crate::ErrorPolicy;
@@ -68,7 +66,7 @@ impl OutboundInterceptor for ContextOutboundInterceptor {
     ) -> Disposition {
         if ctx.remote {
             // Remote target: serialize context to wire bytes.
-            match dcontext::serialize_context() {
+            match dcontext::async_ctx::serialize_context() {
                 Ok(bytes) => {
                     headers.insert(ContextHeader { bytes });
                 }
@@ -80,15 +78,13 @@ impl OutboundInterceptor for ContextOutboundInterceptor {
                         "failed to serialize dcontext for outbound message"
                     );
                     if self.error_policy == ErrorPolicy::Reject {
-                        return Disposition::Reject(format!(
-                            "dcontext serialization failed: {e}"
-                        ));
+                        return Disposition::Reject(format!("dcontext serialization failed: {e}"));
                     }
                 }
             }
         } else {
             // Local target: snapshot only — no serialization needed.
-            let snap = dcontext::snapshot();
+            let snap = dcontext::async_ctx::snapshot();
             headers.insert(ContextSnapshotHeader { snapshot: snap });
         }
 

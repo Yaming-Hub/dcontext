@@ -6,7 +6,8 @@ use crate::error::ContextError;
 use crate::value::ContextValue;
 
 /// Type alias for versioned deserializer functions.
-type DeserializeFn = Box<dyn Fn(&[u8]) -> Result<Box<dyn ContextValue>, ContextError> + Send + Sync>;
+type DeserializeFn =
+    Box<dyn Fn(&[u8]) -> Result<Box<dyn ContextValue>, ContextError> + Send + Sync>;
 
 /// Type alias for custom serializer functions (Arc so it can be cloned without a lock).
 type SerializeFn = Arc<dyn Fn(&dyn ContextValue) -> Result<Vec<u8>, ContextError> + Send + Sync>;
@@ -54,7 +55,9 @@ static BUILD: std::sync::LazyLock<Mutex<Option<RegistryMap>>> =
     std::sync::LazyLock::new(|| Mutex::new(Some(HashMap::new())));
 
 fn lock_build() -> std::sync::MutexGuard<'static, Option<RegistryMap>> {
-    BUILD.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    BUILD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // ── Registration options ───────────────────────────────────────
@@ -74,6 +77,7 @@ fn lock_build() -> std::sync::MutexGuard<'static, Option<RegistryMap>> {
 ///     )
 /// );
 /// ```
+#[allow(clippy::type_complexity)]
 pub struct RegistrationOptions<T: 'static> {
     version: u32,
     local_only: bool,
@@ -194,20 +198,24 @@ where
         if let Some(decode) = opts.decode {
             deserializers.insert(
                 opts.version,
-                Box::new(move |bytes: &[u8]| -> Result<Box<dyn ContextValue>, ContextError> {
-                    decode(bytes)
-                        .map(|v| Box::new(v) as Box<dyn ContextValue>)
-                        .map_err(ContextError::DeserializationFailed)
-                }),
+                Box::new(
+                    move |bytes: &[u8]| -> Result<Box<dyn ContextValue>, ContextError> {
+                        decode(bytes)
+                            .map(|v| Box::new(v) as Box<dyn ContextValue>)
+                            .map_err(ContextError::DeserializationFailed)
+                    },
+                ),
             );
         } else {
             deserializers.insert(
                 opts.version,
-                Box::new(|bytes: &[u8]| -> Result<Box<dyn ContextValue>, ContextError> {
-                    bincode::deserialize::<T>(bytes)
-                        .map(|v| Box::new(v) as Box<dyn ContextValue>)
-                        .map_err(|e| ContextError::DeserializationFailed(e.to_string()))
-                }),
+                Box::new(
+                    |bytes: &[u8]| -> Result<Box<dyn ContextValue>, ContextError> {
+                        bincode::deserialize::<T>(bytes)
+                            .map(|v| Box::new(v) as Box<dyn ContextValue>)
+                            .map_err(|e| ContextError::DeserializationFailed(e.to_string()))
+                    },
+                ),
             );
         }
     }
@@ -240,10 +248,7 @@ where
     Ok(())
 }
 
-fn do_register_local<T>(
-    registry: &mut RegistryMap,
-    key: &'static str,
-) -> Result<(), ContextError>
+fn do_register_local<T>(registry: &mut RegistryMap, key: &'static str) -> Result<(), ContextError>
 where
     T: Clone + Default + Send + Sync + 'static,
 {
@@ -283,9 +288,9 @@ where
     TOld: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     TCurrent: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    let reg = registry.get_mut(key).ok_or_else(|| {
-        ContextError::NotRegistered(key.to_string())
-    })?;
+    let reg = registry
+        .get_mut(key)
+        .ok_or_else(|| ContextError::NotRegistered(key.to_string()))?;
 
     if reg.type_id != TypeId::of::<TCurrent>() {
         return Err(ContextError::TypeMismatch(
@@ -297,7 +302,8 @@ where
 
     if reg.local_only {
         return Err(ContextError::SerializationFailed(format!(
-            "cannot register migration for local-only key '{}'", key
+            "cannot register migration for local-only key '{}'",
+            key
         )));
     }
 
@@ -311,12 +317,14 @@ where
 
     reg.deserializers.insert(
         old_version,
-        Box::new(move |bytes: &[u8]| -> Result<Box<dyn ContextValue>, ContextError> {
-            let old_val = bincode::deserialize::<TOld>(bytes)
-                .map_err(|e| ContextError::DeserializationFailed(e.to_string()))?;
-            let current_val = migrate(old_val);
-            Ok(Box::new(current_val) as Box<dyn ContextValue>)
-        }),
+        Box::new(
+            move |bytes: &[u8]| -> Result<Box<dyn ContextValue>, ContextError> {
+                let old_val = bincode::deserialize::<TOld>(bytes)
+                    .map_err(|e| ContextError::DeserializationFailed(e.to_string()))?;
+                let current_val = migrate(old_val);
+                Ok(Box::new(current_val) as Box<dyn ContextValue>)
+            },
+        ),
     );
 
     Ok(())
@@ -348,15 +356,23 @@ pub struct RegistryBuilder {
 impl RegistryBuilder {
     /// Create an empty builder.
     pub fn new() -> Self {
-        Self { map: HashMap::new() }
+        Self {
+            map: HashMap::new(),
+        }
     }
 
     /// Register a context type with default options (version 1, bincode codec).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the key is already registered. Use [`try_register`](Self::try_register)
+    /// for a non-panicking alternative.
     pub fn register<T>(&mut self, key: &'static str)
     where
         T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        self.try_register::<T>(key).expect("RegistryBuilder::register failed");
+        self.try_register::<T>(key)
+            .expect("RegistryBuilder::register failed");
     }
 
     /// Register a context type. Returns Err on conflict.
@@ -368,12 +384,16 @@ impl RegistryBuilder {
     }
 
     /// Register with custom options via builder callback.
+    ///
+    /// # Panics
+    ///
+    /// Panics on conflict. Use [`try_register_with`](Self::try_register_with)
+    /// for a non-panicking alternative.
     pub fn register_with<T>(
         &mut self,
         key: &'static str,
         configure: impl FnOnce(RegistrationOptions<T>) -> RegistrationOptions<T>,
-    )
-    where
+    ) where
         T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
         self.try_register_with::<T>(key, configure)
@@ -393,6 +413,11 @@ impl RegistryBuilder {
     }
 
     /// Register a local-only context type (no Serialize/DeserializeOwned needed).
+    ///
+    /// # Panics
+    ///
+    /// Panics on conflict. Use [`try_register_local`](Self::try_register_local)
+    /// for a non-panicking alternative.
     pub fn register_local<T>(&mut self, key: &'static str)
     where
         T: Clone + Default + Send + Sync + 'static,
@@ -410,13 +435,18 @@ impl RegistryBuilder {
     }
 
     /// Register a migration deserializer for an older wire version.
+    ///
+    /// # Panics
+    ///
+    /// Panics on conflict or if the key is not registered.
+    /// Use [`try_register_migration`](Self::try_register_migration)
+    /// for a non-panicking alternative.
     pub fn register_migration<TOld, TCurrent>(
         &mut self,
         key: &'static str,
         old_version: u32,
         migrate: impl Fn(TOld) -> TCurrent + Send + Sync + 'static,
-    )
-    where
+    ) where
         TOld: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
         TCurrent: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
@@ -451,6 +481,11 @@ impl Default for RegistryBuilder {
 ///
 /// Call this once after all registrations, before any context operations.
 ///
+/// # Panics
+///
+/// Panics if called more than once. Use [`try_initialize`] for a
+/// non-panicking alternative.
+///
 /// ```rust,ignore
 /// let mut builder = dcontext::RegistryBuilder::new();
 /// builder.register::<RequestId>("request_id");
@@ -465,7 +500,9 @@ pub fn initialize(builder: RegistryBuilder) {
 
 /// Try to freeze the registry. Returns `Err` if already initialized.
 pub fn try_initialize(builder: RegistryBuilder) -> Result<(), ContextError> {
-    FROZEN.set(builder.map).map_err(|_| ContextError::RegistryFrozen)
+    FROZEN
+        .set(builder.map)
+        .map_err(|_| ContextError::RegistryFrozen)
 }
 
 // ── Free-standing registration functions (for tests) ───────────
@@ -507,8 +544,7 @@ where
 pub(crate) fn register_with<T>(
     key: &'static str,
     configure: impl FnOnce(RegistrationOptions<T>) -> RegistrationOptions<T>,
-)
-where
+) where
     T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
     try_register_with::<T>(key, configure).expect("dcontext::register_with failed");
@@ -552,8 +588,7 @@ pub(crate) fn register_migration<TOld, TCurrent>(
     key: &'static str,
     old_version: u32,
     migrate: impl Fn(TOld) -> TCurrent + Send + Sync + 'static,
-)
-where
+) where
     TOld: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     TCurrent: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
@@ -567,10 +602,7 @@ where
 ///
 /// After [`initialize`]: lock-free (OnceLock deref + HashMap lookup).
 /// Before [`initialize`]: acquires Mutex (correct, but slower — for tests).
-pub(crate) fn with_registration<R>(
-    key: &str,
-    f: impl FnOnce(&Registration) -> R,
-) -> Option<R> {
+pub(crate) fn with_registration<R>(key: &str, f: impl FnOnce(&Registration) -> R) -> Option<R> {
     if let Some(frozen) = FROZEN.get() {
         return frozen.get(key).map(f);
     }
@@ -623,10 +655,7 @@ pub(crate) fn cached_keys() -> Vec<&'static str> {
 ///
 /// Returns `None` if the key is not registered or has no metadata of type `M`.
 /// After [`initialize`]: lock-free. Before: acquires Mutex.
-pub fn with_metadata<M: 'static, R>(
-    key: &str,
-    f: impl FnOnce(&M) -> R,
-) -> Option<R> {
+pub fn with_metadata<M: 'static, R>(key: &str, f: impl FnOnce(&M) -> R) -> Option<R> {
     with_registration(key, |r| {
         r.metadata
             .get(&TypeId::of::<M>())
@@ -640,9 +669,7 @@ pub fn with_metadata<M: 'static, R>(
 ///
 /// Calls `f(key, metadata)` for each matching key and collects the results.
 /// After [`initialize`]: lock-free. Before: acquires Mutex.
-pub fn keys_with_metadata<M: 'static, R>(
-    f: impl Fn(&'static str, &M) -> R,
-) -> Vec<R> {
+pub fn keys_with_metadata<M: 'static, R>(f: impl Fn(&'static str, &M) -> R) -> Vec<R> {
     let collect = |map: &RegistryMap| -> Vec<R> {
         map.iter()
             .filter_map(|(&key, reg)| {

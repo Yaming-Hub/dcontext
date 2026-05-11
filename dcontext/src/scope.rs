@@ -19,6 +19,9 @@ pub(crate) struct ScopeNode {
     /// Remote chain state saved at scope entry.
     pub(crate) remote_chain: Arc<Vec<String>>,
     pub(crate) remote_chain_base_depth: usize,
+    /// Saved scope_barrier from the store at the time this scope was frozen.
+    /// Restored when this scope is popped.
+    pub(crate) saved_scope_barrier: Option<usize>,
 }
 
 // ── Garbage bag ────────────────────────────────────────────────
@@ -36,6 +39,7 @@ pub(crate) struct ScopeGarbage {
 /// Not Send/Sync — scopes are bound to their storage context.
 pub struct ScopeGuard {
     expected_depth: usize,
+    is_async: bool,
     _not_send: std::marker::PhantomData<*const ()>,
 }
 
@@ -43,6 +47,15 @@ impl ScopeGuard {
     pub(crate) fn new(expected_depth: usize) -> Self {
         Self {
             expected_depth,
+            is_async: false,
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn new_async(expected_depth: usize) -> Self {
+        Self {
+            expected_depth,
+            is_async: true,
             _not_send: std::marker::PhantomData,
         }
     }
@@ -52,13 +65,24 @@ impl ScopeGuard {
     pub(crate) fn noop() -> Self {
         Self {
             expected_depth: usize::MAX,
+            is_async: false,
             _not_send: std::marker::PhantomData,
         }
+    }
+
+    /// Return the expected depth for this guard.
+    /// Used by layers that need to manually manage scope lifetimes.
+    pub fn expected_depth(&self) -> usize {
+        self.expected_depth
     }
 }
 
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
-        crate::storage::leave_scope(self.expected_depth);
+        if self.is_async {
+            crate::async_ctx::pop_scope(self.expected_depth);
+        } else {
+            crate::sync_ctx::leave_scope(self.expected_depth);
+        }
     }
 }

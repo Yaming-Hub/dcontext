@@ -22,12 +22,12 @@
 //!    - `on_receive`: normalizes headers — deserializes wire bytes into a
 //!      [`ContextSnapshotHeader`] if needed.
 //!    - `wrap_handler`: wraps the handler future with
-//!      [`dcontext::with_context`], restoring the propagated snapshot into
-//!      the async task-local scope automatically.
+//!      [`dcontext::async_ctx::with_context`], restoring the propagated
+//!      snapshot into the async task-local scope automatically.
 //!
 //! This uses dactor 0.3's `wrap_handler` feature to wrap the handler future
-//! with a task-local context scope. `dcontext::get_context` /
-//! `dcontext::set_context` work transparently inside the handler.
+//! with a task-local context scope. `dcontext::async_ctx::get_context` /
+//! `dcontext::async_ctx::set_context` work transparently inside the handler.
 //!
 //! ## Error Handling
 //!
@@ -46,7 +46,8 @@
 //!   values that cannot be serialized. **No serialization is performed.**
 //!
 //! - **Remote** (cross-process): Context is serialized to bytes via
-//!   [`dcontext::serialize_context`] and transmitted as a wire header.
+//!   [`dcontext::async_ctx::serialize_context`] and transmitted as a wire
+//!   header.
 //!   Local-only values are excluded.
 //!
 //! ## Quick Start
@@ -63,7 +64,7 @@
 //! impl Handler<MyMessage> for MyActor {
 //!     async fn handle(&mut self, msg: MyMessage, ctx: &mut ActorContext) -> () {
 //!         // dcontext is automatically restored by the interceptor's wrap_handler
-//!         let rid: RequestId = dcontext::get_context("request_id");
+//!         let rid: RequestId = dcontext::async_ctx::get_context("request_id").unwrap();
 //!         // ... handle message with context available ...
 //!     }
 //! }

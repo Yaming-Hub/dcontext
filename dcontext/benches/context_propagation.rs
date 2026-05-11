@@ -28,8 +28,16 @@ static INIT: Once = Once::new();
 
 // Pre-leaked static keys to avoid Box::leak in hot loops
 static KEYS: &[&str] = &[
-    "bench_key_0", "bench_key_1", "bench_key_2", "bench_key_3", "bench_key_4",
-    "bench_key_5", "bench_key_6", "bench_key_7", "bench_key_8", "bench_key_9",
+    "bench_key_0",
+    "bench_key_1",
+    "bench_key_2",
+    "bench_key_3",
+    "bench_key_4",
+    "bench_key_5",
+    "bench_key_6",
+    "bench_key_7",
+    "bench_key_8",
+    "bench_key_9",
 ];
 
 fn ensure_registered() {
@@ -71,19 +79,15 @@ fn bench_snapshot_vs_fork(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("fork", num_keys),
-            &num_keys,
-            |b, &n| {
-                force_thread_local(|| {
-                    let _scope = enter_scope();
-                    populate_context(n);
-                    b.iter(|| {
-                        let _handle = fork();
-                    });
+        group.bench_with_input(BenchmarkId::new("fork", num_keys), &num_keys, |b, &n| {
+            force_thread_local(|| {
+                let _scope = enter_scope();
+                populate_context(n);
+                b.iter(|| {
+                    let _handle = fork();
                 });
-            },
-        );
+            });
+        });
     }
 
     group.finish();
@@ -173,32 +177,28 @@ fn bench_concurrent_spawn(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("fork", num_tasks),
-            &num_tasks,
-            |b, &n| {
-                b.to_async(&rt).iter(|| async {
-                    let handle = force_thread_local(|| {
-                        let _scope = enter_scope();
-                        populate_context(5);
-                        fork()
-                    });
-
-                    let mut handles = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        let h = handle.clone();
-                        handles.push(tokio::spawn(with_fork(h, async {
-                            let _v: BenchValue = get_context(KEYS[0]);
-                            let _v: BenchValue = get_context(KEYS[2]);
-                            let _v: BenchValue = get_context(KEYS[4]);
-                        })));
-                    }
-                    for h in handles {
-                        let _ = h.await;
-                    }
+        group.bench_with_input(BenchmarkId::new("fork", num_tasks), &num_tasks, |b, &n| {
+            b.to_async(&rt).iter(|| async {
+                let handle = force_thread_local(|| {
+                    let _scope = enter_scope();
+                    populate_context(5);
+                    fork()
                 });
-            },
-        );
+
+                let mut handles = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let h = handle.clone();
+                    handles.push(tokio::spawn(with_fork(h, async {
+                        let _v: BenchValue = get_context(KEYS[0]);
+                        let _v: BenchValue = get_context(KEYS[2]);
+                        let _v: BenchValue = get_context(KEYS[4]);
+                    })));
+                }
+                for h in handles {
+                    let _ = h.await;
+                }
+            });
+        });
     }
 
     group.finish();
@@ -270,23 +270,19 @@ fn bench_deep_scope(c: &mut Criterion) {
     let mut group = c.benchmark_group("deep_scope_cost");
 
     for depth in [1, 5, 10] {
-        group.bench_with_input(
-            BenchmarkId::new("fork_depth", depth),
-            &depth,
-            |b, &d| {
-                b.iter(|| {
-                    force_thread_local(|| {
-                        let mut guards = Vec::new();
-                        for _ in 0..d {
-                            guards.push(enter_scope());
-                        }
-                        populate_context(5);
-                        let _handle = fork();
-                        drop(guards);
-                    });
+        group.bench_with_input(BenchmarkId::new("fork_depth", depth), &depth, |b, &d| {
+            b.iter(|| {
+                force_thread_local(|| {
+                    let mut guards = Vec::new();
+                    for _ in 0..d {
+                        guards.push(enter_scope());
+                    }
+                    populate_context(5);
+                    let _handle = fork();
+                    drop(guards);
                 });
-            },
-        );
+            });
+        });
 
         group.bench_with_input(
             BenchmarkId::new("snapshot_depth", depth),
@@ -356,34 +352,30 @@ fn bench_high_contention(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("fork", num_tasks),
-            &num_tasks,
-            |b, &n| {
-                b.to_async(&rt).iter(|| async {
-                    let handle = force_thread_local(|| {
-                        let _scope = enter_scope();
-                        populate_context(10);
-                        fork()
-                    });
-
-                    let mut handles = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        let h = handle.clone();
-                        handles.push(tokio::spawn(with_fork(h, async {
-                            let _v: BenchValue = get_context(KEYS[0]);
-                            let _v: BenchValue = get_context(KEYS[4]);
-                            let _v: BenchValue = get_context(KEYS[9]);
-                            tokio::task::yield_now().await;
-                            let _v: BenchValue = get_context(KEYS[2]);
-                        })));
-                    }
-                    for h in handles {
-                        let _ = h.await;
-                    }
+        group.bench_with_input(BenchmarkId::new("fork", num_tasks), &num_tasks, |b, &n| {
+            b.to_async(&rt).iter(|| async {
+                let handle = force_thread_local(|| {
+                    let _scope = enter_scope();
+                    populate_context(10);
+                    fork()
                 });
-            },
-        );
+
+                let mut handles = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let h = handle.clone();
+                    handles.push(tokio::spawn(with_fork(h, async {
+                        let _v: BenchValue = get_context(KEYS[0]);
+                        let _v: BenchValue = get_context(KEYS[4]);
+                        let _v: BenchValue = get_context(KEYS[9]);
+                        tokio::task::yield_now().await;
+                        let _v: BenchValue = get_context(KEYS[2]);
+                    })));
+                }
+                for h in handles {
+                    let _ = h.await;
+                }
+            });
+        });
     }
 
     group.finish();

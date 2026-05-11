@@ -56,7 +56,10 @@ impl<'a> FieldExtractor<'a> {
     }
 
     fn is_target(&self, field: &Field) -> Option<&'static str> {
-        self.target_fields.iter().find(|&&f| f == field.name()).copied()
+        self.target_fields
+            .iter()
+            .find(|&&f| f == field.name())
+            .copied()
     }
 }
 

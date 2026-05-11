@@ -19,9 +19,10 @@ use crate::ErrorPolicy;
 ///    [`ContextSnapshotHeader`]. Local snapshots are left as-is.
 ///
 /// 2. **`wrap_handler`** — Wraps the handler future with
-///    [`dcontext::with_context`], restoring the propagated context into the
-///    async task-local scope. This makes `dcontext::get_context` /
-///    `dcontext::set_context` work automatically inside the handler — **no
+///    [`dcontext::async_ctx::with_context`], restoring the propagated context
+///    into the async task-local scope. This makes
+///    `dcontext::async_ctx::get_context` / `dcontext::async_ctx::set_context`
+///    work automatically inside the handler — **no
 ///    manual `with_propagated_context()` call needed**.
 ///
 /// ## Error Handling
@@ -44,7 +45,7 @@ use crate::ErrorPolicy;
 /// #[async_trait]
 /// impl Handler<MyMessage> for MyActor {
 ///     async fn handle(&mut self, msg: MyMessage, ctx: &mut ActorContext) -> () {
-///         let rid: RequestId = dcontext::get_context("request_id");
+///         let rid: RequestId = dcontext::async_ctx::get_context("request_id").unwrap();
 ///         // ... context is automatically restored by the interceptor
 ///     }
 /// }
@@ -120,9 +121,10 @@ impl InboundInterceptor for ContextInboundInterceptor {
         let scope_name = format!("remote:{}", ctx.actor_name);
         Some(Box::new(move |next| {
             Box::pin(async move {
-                let result = dcontext::with_context(snapshot, async move {
-                    dcontext::named_scope_async(scope_name, next).await
-                }).await;
+                let result = dcontext::async_ctx::with_context(snapshot, async move {
+                    dcontext::async_ctx::scope(&scope_name, next).await
+                })
+                .await;
                 result
             })
         }))

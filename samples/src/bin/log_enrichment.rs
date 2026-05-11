@@ -105,12 +105,12 @@ fn init() -> tracing::subscriber::DefaultGuard {
 fn demo_basic_enrichment() {
     println!("\n=== Basic Log Enrichment ===\n");
 
-    let _scope = dcontext::enter_scope();
+    let _scope = dcontext::sync_ctx::enter_scope();
 
     // Set context values — only those with TracingField enrich metadata appear in logs
-    dcontext::set_context("request_id", RequestId("req-abc-123".into()));
-    dcontext::set_context("tenant_id", TenantId("acme-corp".into()));
-    dcontext::set_context("internal_buffer", "secret-stuff".to_string());
+    dcontext::sync_ctx::set_context("request_id", RequestId("req-abc-123".into()));
+    dcontext::sync_ctx::set_context("tenant_id", TenantId("acme-corp".into()));
+    dcontext::sync_ctx::set_context("internal_buffer", "secret-stuff".to_string());
 
     // These log lines will be prefixed with: rid=req-abc-123 tenant=acme-corp
     tracing::info!("handling incoming request");
@@ -120,16 +120,16 @@ fn demo_basic_enrichment() {
 fn demo_nested_scopes() {
     println!("\n=== Nested Scopes ===\n");
 
-    let _outer = dcontext::enter_scope();
-    dcontext::set_context("request_id", RequestId("req-outer".into()));
-    dcontext::set_context("environment", "production".to_string());
+    let _outer = dcontext::sync_ctx::enter_scope();
+    dcontext::sync_ctx::set_context("request_id", RequestId("req-outer".into()));
+    dcontext::sync_ctx::set_context("environment", "production".to_string());
 
     tracing::info!("outer scope");
 
     {
-        let _inner = dcontext::enter_scope();
-        dcontext::set_context("request_id", RequestId("req-inner".into()));
-        dcontext::set_context("retry_count", RetryCount(3));
+        let _inner = dcontext::sync_ctx::enter_scope();
+        dcontext::sync_ctx::set_context("request_id", RequestId("req-inner".into()));
+        dcontext::sync_ctx::set_context("retry_count", RetryCount(3));
 
         // Shows: rid=req-inner env=PRODUCTION retry=RetryCount(3)
         tracing::warn!("retrying operation");
@@ -146,7 +146,7 @@ fn demo_span_extraction() {
     // TracingField with extract_from_str auto-populates context from span fields
     {
         let _span = tracing::info_span!("handle_request", request_id = "req-from-span").entered();
-        let rid: RequestId = dcontext::get_context("request_id");
+        let rid: RequestId = dcontext::sync_ctx::get_context("request_id").unwrap();
         println!("  Extracted from span: request_id = {:?}", rid.0);
 
         // The enriched log also shows the extracted value
@@ -157,9 +157,9 @@ fn demo_span_extraction() {
 fn demo_collect_log_fields() {
     println!("\n=== Manual Field Collection ===\n");
 
-    let _scope = dcontext::enter_scope();
-    dcontext::set_context("request_id", RequestId("req-manual".into()));
-    dcontext::set_context("tenant_id", TenantId("manual-tenant".into()));
+    let _scope = dcontext::sync_ctx::enter_scope();
+    dcontext::sync_ctx::set_context("request_id", RequestId("req-manual".into()));
+    dcontext::sync_ctx::set_context("tenant_id", TenantId("manual-tenant".into()));
 
     // collect_log_fields() returns (name, formatted_value) pairs
     let fields = dcontext_tracing::collect_log_fields();
@@ -183,7 +183,8 @@ fn demo_metadata_queries() {
     }
 
     // Query a specific key's metadata
-    if let Some(name) = dcontext::with_metadata::<TracingField, _>("request_id", |tf| tf.log_name()) {
+    if let Some(name) = dcontext::with_metadata::<TracingField, _>("request_id", |tf| tf.log_name())
+    {
         println!("  request_id log field name: {:?}", name);
     }
 }
@@ -191,9 +192,9 @@ fn demo_metadata_queries() {
 fn demo_span_recording() {
     println!("\n=== Auto-Record into Span Fields ===\n");
 
-    let _scope = dcontext::enter_scope();
-    dcontext::set_context("request_id", RequestId("req-auto-record".into()));
-    dcontext::set_context("tenant_id", TenantId("acme-auto".into()));
+    let _scope = dcontext::sync_ctx::enter_scope();
+    dcontext::sync_ctx::set_context("request_id", RequestId("req-auto-record".into()));
+    dcontext::sync_ctx::set_context("tenant_id", TenantId("acme-auto".into()));
 
     // Span declares fields as Empty — DcontextLayer auto-fills them on enter.
     // This makes the values visible to ALL subscribers (OTel, fmt, custom layers).

@@ -5,8 +5,8 @@
 //!
 //! Usage: `cargo run --bin typed_keys`
 
-use dcontext::{ContextKey, RegistryBuilder};
-use serde::{Serialize, Deserialize};
+use dcontext::{sync_ctx, ContextKey, RegistryBuilder};
+use serde::{Deserialize, Serialize};
 
 // Define typed keys as statics — the string is only for serialization/diagnostics.
 static REQUEST_ID: ContextKey<RequestId> = ContextKey::new("request_id");
@@ -42,27 +42,36 @@ fn main() {
 
     // Set values — no turbofish, no string key at call site.
     REQUEST_ID.set(RequestId("req-typed-001".into()));
-    USER_INFO.set(UserInfo { id: 42, name: "Alice".into() });
+    USER_INFO.set(UserInfo {
+        id: 42,
+        name: "Alice".into(),
+    });
     FEATURE_FLAGS.set(Flags { dark_mode: true });
 
     // Get values — fully type-safe.
-    println!("request_id = {:?}", REQUEST_ID.get());
-    println!("user_info  = {:?}", USER_INFO.get());
-    println!("dark_mode  = {}", FEATURE_FLAGS.get().dark_mode);
+    println!("request_id = {:?}", REQUEST_ID.get().unwrap());
+    println!("user_info  = {:?}", USER_INFO.get().unwrap());
+    println!("dark_mode  = {}", FEATURE_FLAGS.get().unwrap().dark_mode);
 
     // Scoped override.
-    dcontext::scope(|| {
+    {
+        let _guard = sync_ctx::enter_scope();
         REQUEST_ID.set(RequestId("req-typed-002-child".into()));
-        println!("\n[child scope] request_id = {:?}", REQUEST_ID.get());
-        println!("[child scope] user_info  = {:?}", USER_INFO.get()); // inherited
-    });
+        println!(
+            "\n[child scope] request_id = {:?}",
+            REQUEST_ID.get().unwrap()
+        );
+        println!("[child scope] user_info  = {:?}", USER_INFO.get().unwrap()); // inherited
+    }
 
-    println!("\n[after scope] request_id = {:?}", REQUEST_ID.get()); // reverted
+    println!(
+        "\n[after scope] request_id = {:?}",
+        REQUEST_ID.get().unwrap()
+    ); // reverted
 
-    // try_get returns Ok(None) for registered-but-unset keys.
-    match another.try_get() {
-        Ok(None) => println!("\n'another_key' is registered but not set"),
-        Ok(Some(v)) => println!("\n'another_key' = {:?}", v),
-        Err(e) => println!("\nerror: {}", e),
+    // get() returns None for registered-but-unset keys.
+    match another.get() {
+        None => println!("\n'another_key' is registered but not set"),
+        Some(v) => println!("\n'another_key' = {:?}", v),
     }
 }
