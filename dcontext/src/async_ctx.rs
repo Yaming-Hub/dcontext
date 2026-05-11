@@ -20,9 +20,16 @@ use crate::storage::{ContextStore, TASK_CONTEXT};
 /// Returns a [`ScopeGuard`] that pops the scope on drop.
 /// Returns a no-op guard if not called within an async task.
 pub fn push_scope(name: &str) -> ScopeGuard {
+    try_push_scope(name).unwrap_or_else(ScopeGuard::noop)
+}
+
+/// Try to push a named scope onto the task-local store.
+///
+/// Returns `Some(ScopeGuard)` if a task-local context is active,
+/// or `None` if not called within an async task (no task-local context).
+pub fn try_push_scope(name: &str) -> Option<ScopeGuard> {
     let name = name.to_string();
     with_task_store(|store| ScopeGuard::new(store.push_scope(Some(name))))
-        .unwrap_or_else(ScopeGuard::noop)
 }
 
 /// Pop the top scope from the task-local store.
@@ -30,9 +37,6 @@ pub fn push_scope(name: &str) -> ScopeGuard {
 /// This is typically done automatically by dropping the [`ScopeGuard`].
 /// Use this only when manual scope management is needed.
 pub fn pop_scope(expected_depth: usize) {
-    if expected_depth == usize::MAX {
-        return;
-    }
     let _garbage = with_task_store(|store| store.pop_scope(expected_depth));
 }
 

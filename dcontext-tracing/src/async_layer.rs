@@ -83,17 +83,15 @@ where
         }
 
         // First enter: push scope on task-local store.
-        // If not in an async task (no task-local context), push_scope returns
-        // a noop guard (depth == usize::MAX). In that case, skip storing state
-        // so the layer is completely transparent outside tokio.
+        // If not in an async task (no task-local context), try_push_scope returns
+        // None and the layer is completely transparent outside tokio.
         let name = span.metadata().name();
-        let guard = dcontext::async_ctx::push_scope(name);
+        let guard = match dcontext::async_ctx::try_push_scope(name) {
+            Some(guard) => guard,
+            None => return, // No task-local context — do nothing
+        };
         let depth = guard.expected_depth();
         std::mem::forget(guard); // We'll manually pop on close
-
-        if depth == usize::MAX {
-            return; // No task-local context — do nothing
-        }
 
         // Store depth in span extensions for retrieval on close
         let mut extensions = span.extensions_mut();
