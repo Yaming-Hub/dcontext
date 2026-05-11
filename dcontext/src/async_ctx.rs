@@ -222,6 +222,12 @@ where
 
 // ── Internal helpers ───────────────────────────────────────────
 
+/// Create a ForkHandle from the current task-local context state.
+/// Returns None if not in an async task or if the store is busy.
+pub(crate) fn do_fork() -> Option<crate::fork::ForkHandle> {
+    try_apply(|store| crate::fork::create_fork_handle(store))
+}
+
 /// Execute `f` with exclusive access to the task-local context store.
 /// Returns `None` if not in an async task or if the store is busy.
 fn try_apply<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {

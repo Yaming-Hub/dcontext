@@ -329,7 +329,7 @@ pub(crate) fn set_remote_chain(chain: Vec<String>) {
 ///
 /// The Cell is restored (`set(Some(store))`) before the return value is
 /// dropped, so any user Drop code runs with a valid store in the Cell.
-fn try_apply<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
+pub(crate) fn try_apply<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
     CONTEXT.try_with(|cell| {
         let mut store = cell.take()?; // None = busy
         let result = f(&mut store);

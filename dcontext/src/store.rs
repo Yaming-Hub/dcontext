@@ -45,6 +45,11 @@ pub(crate) struct ContextStore {
     /// Scope depth at which remote_chain was installed.
     /// Local names at depth > this value are included in scope_chain().
     pub(crate) remote_chain_base_depth: usize,
+    /// Frozen parent from a fork — a read-only ancestor scope that this
+    /// store inherits from. Value lookups fall through to this parent if
+    /// not found in the local scope chain. This allows forked contexts to
+    /// start a fresh root scope while still seeing parent values.
+    pub(crate) frozen_parent: Option<Arc<ScopeNode>>,
 }
 
 impl ContextStore {
@@ -57,6 +62,7 @@ impl ContextStore {
             depth: 1,
             remote_chain: Arc::new(Vec::new()),
             remote_chain_base_depth: 0,
+            frozen_parent: None,
         }
     }
 
@@ -73,6 +79,26 @@ impl ContextStore {
             depth: 1,
             remote_chain: Arc::new(remote_chain),
             remote_chain_base_depth: 1,
+            frozen_parent: None,
+        }
+    }
+
+    /// Create a new root scope that inherits from a frozen parent scope node.
+    /// Used by fork to start a fresh scope branch while preserving read
+    /// access to the parent's values.
+    pub(crate) fn from_fork(
+        parent: Arc<ScopeNode>,
+        remote_chain: Arc<Vec<String>>,
+        remote_chain_base_depth: usize,
+    ) -> Self {
+        Self {
+            scope_chain: None,
+            current_values: HashMap::new(),
+            current_name: None,
+            depth: 1,
+            remote_chain,
+            remote_chain_base_depth,
+            frozen_parent: Some(parent),
         }
     }
 
@@ -183,7 +209,8 @@ impl ContextStore {
     }
 
     /// Look up the effective value for a key.
-    /// Checks current_values first, then walks the parent scope chain.
+    /// Checks current_values first, then walks the parent scope chain,
+    /// then falls through to the frozen parent (if forked).
     /// For cached keys, the value is always in current_values (O(1)).
     /// For non-cached keys, this is O(depth).
     pub(crate) fn get_value(&self, key: &str) -> Option<Arc<dyn ContextValue>> {
@@ -197,11 +224,20 @@ impl ContextStore {
             }
             node = n.parent.as_ref();
         }
+        // Fall through to frozen parent from fork
+        let mut node = self.frozen_parent.as_ref();
+        while let Some(n) = node {
+            if let Some(v) = n.values.get(key) {
+                return Some(Arc::clone(v));
+            }
+            node = n.parent.as_ref();
+        }
         None
     }
 
     /// Collect all effective values for snapshot/serialization.
-    /// Walks the full scope chain to build a merged view (topmost wins).
+    /// Walks the full scope chain (including frozen parent) to build a
+    /// merged view (topmost wins).
     pub(crate) fn collect_values(&self) -> HashMap<&'static str, Arc<dyn ContextValue>> {
         let mut result: HashMap<&'static str, Arc<dyn ContextValue>> = HashMap::new();
 
@@ -210,6 +246,15 @@ impl ContextStore {
         }
 
         let mut node = self.scope_chain.as_ref();
+        while let Some(n) = node {
+            for (&k, v) in &n.values {
+                result.entry(k).or_insert_with(|| Arc::clone(v));
+            }
+            node = n.parent.as_ref();
+        }
+
+        // Include frozen parent values (lowest priority)
+        let mut node = self.frozen_parent.as_ref();
         while let Some(n) = node {
             for (&k, v) in &n.values {
                 result.entry(k).or_insert_with(|| Arc::clone(v));
@@ -226,7 +271,7 @@ impl ContextStore {
         self.remote_chain_base_depth = self.depth;
     }
 
-    /// Build the full scope chain: remote prefix + local named scope names.
+    /// Build the full scope chain: frozen parent names + remote prefix + local named scope names.
     pub(crate) fn scope_chain(&self) -> Vec<String> {
         let mut local_names = Vec::new();
 
@@ -248,8 +293,20 @@ impl ContextStore {
 
         local_names.reverse();
 
+        // Include frozen parent scope names as a prefix
+        let mut parent_names = Vec::new();
+        let mut node = self.frozen_parent.as_ref();
+        while let Some(n) = node {
+            if let Some(name) = &n.name {
+                parent_names.push(name.clone());
+            }
+            node = n.parent.as_ref();
+        }
+        parent_names.reverse();
+
         let max_len = crate::config::max_scope_chain_len();
         let mut chain: Vec<String> = (*self.remote_chain).clone();
+        chain.extend(parent_names);
         chain.extend(local_names);
 
         if max_len > 0 && chain.len() > max_len {

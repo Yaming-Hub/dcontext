@@ -108,9 +108,18 @@ pub fn scope_chain() -> Vec<String> {
 
 pub use snapshot::{snapshot, attach, wrap_with_context, wrap_with_context_fn};
 
-// ── Fork (lightweight local spawn) ────────────────────────────
+// ── Fork (lightweight context inheritance) ────────────────────
 
-pub use fork::{ForkHandle, fork, with_fork, spawn_with_fork_async};
+pub use fork::{
+    ForkHandle,
+    spawn_fork_async_context,
+    spawn_blocking_fork_async_context,
+    spawn_fork_sync_context,
+};
+
+// Deprecated fork APIs
+#[allow(deprecated)]
+pub use fork::{fork, with_fork, spawn_with_fork_async};
 
 // ── Thread helpers ─────────────────────────────────────────────
 
