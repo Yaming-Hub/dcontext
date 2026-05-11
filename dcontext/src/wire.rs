@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ContextError;
 use crate::registry;
 use crate::scope::ScopeGuard;
-use crate::storage;
+use crate::sync_storage as storage;
 
 const WIRE_VERSION: u32 = 2;
 

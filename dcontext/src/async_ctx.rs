@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use crate::scope::ScopeGuard;
 use crate::snapshot::ContextSnapshot;
-use crate::storage::{ContextStore, TASK_CONTEXT};
+use crate::async_storage::TASK_CONTEXT;
+use crate::sync_storage::ContextStore;
 
 /// Push a named scope onto the task-local store.
 ///

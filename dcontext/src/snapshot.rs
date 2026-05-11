@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::scope::ScopeGuard;
-use crate::storage;
+use crate::sync_storage as storage;
 use crate::value::ContextValue;
 
 /// An immutable snapshot of the current context. Clone + Send + Sync.

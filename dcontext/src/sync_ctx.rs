@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::scope::ScopeGuard;
 use crate::snapshot::ContextSnapshot;
-use crate::storage::{ContextStore, CONTEXT};
+use crate::sync_storage::{ContextStore, CONTEXT};
 use crate::value::ContextValue;
 
 /// Push a named scope onto the thread-local store.

@@ -65,6 +65,6 @@ impl ScopeGuard {
 
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
-        crate::storage::leave_scope(self.expected_depth);
+        crate::sync_storage::leave_scope(self.expected_depth);
     }
 }

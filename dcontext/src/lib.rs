@@ -41,7 +41,6 @@ mod registry;
 mod scope;
 pub(crate) mod async_storage;
 pub(crate) mod sync_storage;
-pub(crate) mod storage;
 mod snapshot;
 mod wire;
 mod helpers;
@@ -78,9 +77,9 @@ pub(crate) use registry::{register, try_register, register_with, try_register_wi
 
 // ── Scope management ───────────────────────────────────────────
 
-pub use storage::{enter_scope, enter_named_scope, scope, scope_chain, force_thread_local};
+pub use sync_storage::{enter_scope, enter_named_scope, scope, scope_chain, force_thread_local};
 
-pub use storage::{scope_async, named_scope_async};
+pub use sync_storage::{scope_async, named_scope_async};
 
 // ── Snapshot / Clone ───────────────────────────────────────────
 
@@ -118,6 +117,7 @@ pub use config::{set_max_context_size, max_context_size,
 // ── Core get/set API ───────────────────────────────────────────
 
 use std::any::TypeId;
+use sync_storage as storage;
 
 /// Get a context value. Returns `T::default()` if not set.
 /// Panics if the key is not registered.
