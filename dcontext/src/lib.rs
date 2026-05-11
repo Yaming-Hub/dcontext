@@ -77,9 +77,35 @@ pub(crate) use registry::{register, try_register, register_with, try_register_wi
 
 // ── Scope management ───────────────────────────────────────────
 
-pub use sync_storage::{enter_scope, enter_named_scope, scope, scope_chain, force_thread_local};
+pub use sync_storage::enter_named_scope;
 
-pub use sync_storage::{scope_async, named_scope_async};
+/// Push a new scope. Dispatches to task-local if available, else thread-local.
+pub fn enter_scope() -> ScopeGuard {
+    if crate::async_ctx::current_depth().is_some() {
+        crate::async_ctx::push_scope("")
+    } else {
+        sync_storage::enter_scope()
+    }
+}
+
+/// Execute `f` in a new scope. Changes revert when `f` returns.
+/// Dispatches to task-local if available, else thread-local.
+pub fn scope<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = enter_scope();
+    f()
+}
+
+#[allow(deprecated)]
+pub use sync_storage::{force_thread_local, scope_async, named_scope_async};
+
+/// Get the current scope chain, dispatching to task-local first, then thread-local.
+pub fn scope_chain() -> Vec<String> {
+    let async_chain = crate::async_ctx::scope_chain();
+    if !async_chain.is_empty() {
+        return async_chain;
+    }
+    sync_storage::scope_chain()
+}
 
 // ── Snapshot / Clone ───────────────────────────────────────────
 
@@ -115,9 +141,35 @@ pub use config::{set_max_context_size, max_context_size,
                  set_max_scope_chain_len, max_scope_chain_len};
 
 // ── Core get/set API ───────────────────────────────────────────
+//
+// The top-level API dispatches: tries task-local first, then thread-local.
+// This provides backward compatibility. For explicit control, use
+// `sync_ctx::*` (thread-local only) or `async_ctx::*` (task-local only).
 
 use std::any::TypeId;
 use sync_storage as storage;
+
+/// Internal helper: get a value, trying task-local first, then thread-local.
+fn dispatched_get_value(key: &str) -> Option<Arc<dyn value::ContextValue>> {
+    // Try task-local first
+    if let Some(val) = crate::async_ctx::get_raw_value(key) {
+        return Some(val);
+    }
+    // Fall back to thread-local
+    storage::get_value(key)
+}
+
+/// Internal helper: set a value, trying task-local first, then thread-local.
+fn dispatched_set_value(key: &'static str, value: Arc<dyn value::ContextValue>) {
+    // If task-local is available, write there
+    if crate::async_ctx::current_depth().is_some() {
+        crate::async_ctx::set_raw_value(key, value);
+    } else {
+        storage::set_value(key, value);
+    }
+}
+
+use std::sync::Arc;
 
 /// Get a context value. Returns `T::default()` if not set.
 /// Panics if the key is not registered.
@@ -147,7 +199,7 @@ where
     T: Clone + Default + Send + Sync + 'static,
 {
     // Hot path: try to get the value from storage first (no registry lock).
-    let arc = storage::get_value(key);
+    let arc = dispatched_get_value(key);
     match arc {
         Some(val) => {
             let any_ref = val.as_any();
@@ -213,7 +265,7 @@ where
         Some(_) => {}
     }
 
-    storage::set_value(key, std::sync::Arc::new(value));
+    dispatched_set_value(key, std::sync::Arc::new(value));
     Ok(())
 }
 
@@ -243,7 +295,7 @@ where
         Some(_) => {}
     }
 
-    storage::set_value(key, std::sync::Arc::new(crate::value::LocalValue(value)));
+    dispatched_set_value(key, std::sync::Arc::new(crate::value::LocalValue(value)));
     Ok(())
 }
 
@@ -261,7 +313,7 @@ pub fn with_context_value<R>(
     key: &str,
     f: impl FnOnce(&dyn std::any::Any) -> R,
 ) -> Option<R> {
-    storage::get_value(key).map(|arc_val| f(arc_val.as_any()))
+    dispatched_get_value(key).map(|arc_val| f(arc_val.as_any()))
 }
 
 // ── Update API (read-modify-write) ─────────────────────────────

@@ -35,7 +35,11 @@ impl Default for ContextSnapshot {
 }
 
 /// Capture a snapshot of the current effective context.
+/// Dispatches to task-local if available, else thread-local.
 pub fn snapshot() -> ContextSnapshot {
+    if crate::async_ctx::current_depth().is_some() {
+        return crate::async_ctx::snapshot();
+    }
     let values = storage::collect_values();
     let scope_chain = storage::collect_scope_chain();
     ContextSnapshot {
@@ -45,15 +49,25 @@ pub fn snapshot() -> ContextSnapshot {
 }
 
 /// Restore a snapshot by pushing a new scope with its values.
+/// Dispatches to task-local if available, else thread-local.
 pub fn attach(snap: ContextSnapshot) -> ScopeGuard {
-    let guard = storage::enter_scope();
+    let use_async = crate::async_ctx::current_depth().is_some();
+    let guard = if use_async {
+        crate::async_ctx::push_scope("")
+    } else {
+        storage::enter_scope()
+    };
     // Restore the scope chain from the snapshot as the remote prefix.
-    if !snap.scope_chain.is_empty() {
+    if !snap.scope_chain.is_empty() && !use_async {
         storage::set_remote_chain(snap.scope_chain.clone());
     }
     // Clone each Arc value from the snapshot into the new scope.
     for (key, val) in snap.values.iter() {
-        storage::set_value(key, Arc::clone(val));
+        if use_async {
+            crate::async_ctx::set_raw_value(key, Arc::clone(val));
+        } else {
+            storage::set_value(key, Arc::clone(val));
+        }
     }
     guard
 }

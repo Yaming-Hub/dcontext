@@ -1,18 +1,16 @@
-//! Sync (thread-local) storage and dispatch logic for dcontext.
+//! Sync (thread-local) storage for dcontext.
 //!
 //! Contains `ContextStore` (the shared store type), the thread-local `CONTEXT`,
-//! the `force_thread_local` escape hatch, and all dispatch-based public API
-//! functions (scope management, value access, etc.).
+//! and all thread-local-based public API functions (scope management, value access, etc.).
 //!
-//! The dispatch logic (`with_current_cell`) tries the task-local store first
-//! (if available), falling back to the thread-local store. This provides
-//! transparent async/sync behavior for the legacy `dcontext::set_context` API.
+//! With the dual-context redesign, there is no dispatch logic — this module
+//! always uses the thread-local store. For async (task-local) context, use
+//! `async_ctx` / `async_storage` directly.
 
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::async_storage::TASK_CONTEXT;
 use crate::scope::{ScopeGarbage, ScopeGuard, ScopeNode};
 use crate::value::ContextValue;
 
@@ -28,7 +26,6 @@ use crate::value::ContextValue;
 thread_local! {
     pub(crate) static CONTEXT: Cell<Option<ContextStore>> =
         Cell::new(Some(ContextStore::new()));
-    pub(crate) static FORCE_THREAD_LOCAL_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 // ── Mutable context store ──────────────────────────────────────
@@ -262,35 +259,16 @@ impl ContextStore {
     }
 }
 
-// ── Cell dispatch ──────────────────────────────────────────────
+// ── Cell access ────────────────────────────────────────────────
 
-/// Dispatch to the appropriate Cell (task-local or thread-local).
-fn with_current_cell<R>(mut f: impl FnMut(&Cell<Option<ContextStore>>) -> R) -> R {
-    {
-        let force = FORCE_THREAD_LOCAL_DEPTH
-            .try_with(|c| c.get())
-            .unwrap_or(0)
-            > 0;
-        if !force {
-            let result: Cell<Option<R>> = Cell::new(None);
-            let found = TASK_CONTEXT.try_with(|cell| {
-                result.set(Some(f(cell)));
-            });
-            if found.is_ok() {
-                return result.into_inner()
-                    .expect("invariant: closure set the result when try_with succeeded");
-            }
-            // No task-local — fall through to thread-local.
-        }
-    }
-
-    // Use try_with to handle thread shutdown gracefully: if CONTEXT is
-    // already being destroyed (e.g. a value's Drop impl reads context
-    // during teardown), provide an empty Cell so callers see None ("busy")
-    // and return defaults.
+/// Access the thread-local Cell directly.
+/// Uses try_with to handle thread shutdown gracefully.
+fn with_thread_cell<R>(mut f: impl FnMut(&Cell<Option<ContextStore>>) -> R) -> R {
     match CONTEXT.try_with(|cell| f(cell)) {
         Ok(r) => r,
         Err(_) => {
+            // Thread-local is being destroyed — provide an empty Cell
+            // so callers see None ("busy") and return defaults.
             let temp = Cell::new(None);
             f(&temp)
         }
@@ -304,7 +282,7 @@ fn with_current_cell<R>(mut f: impl FnMut(&Cell<Option<ContextStore>>) -> R) -> 
 /// dropped, so any user Drop code runs with a valid store in the Cell.
 fn with_store<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
     let f = std::cell::Cell::new(Some(f));
-    with_current_cell(|cell| {
+    with_thread_cell(|cell| {
         let mut store = cell.take()?; // None = busy
         let func = f.take().expect("with_store closure called more than once");
         let result = func(&mut store);
@@ -351,6 +329,67 @@ pub fn scope<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+// ── Deprecated compatibility ───────────────────────────────────
+
+/// No-op compatibility shim. With the dual-context redesign, there is no
+/// dispatch logic to override — all access in this module is already
+/// thread-local. This function simply calls `f()` and returns the result.
+#[deprecated(note = "No longer needed: sync_storage always uses thread-local. Will be removed in a future release.")]
+pub fn force_thread_local<R>(f: impl FnOnce() -> R) -> R {
+    f()
+}
+
+/// Deprecated: use `async_ctx::scope()` instead.
+/// For backward compatibility, dispatches to task-local if available.
+#[deprecated(note = "Use async_ctx::scope() for task-local scoping.")]
+pub async fn scope_async<F, R>(f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    // If task-local is available, use it (old dispatch behavior)
+    if crate::async_ctx::current_depth().is_some() {
+        return crate::async_ctx::scope("", f).await;
+    }
+    let depth = with_store(|store| store.push_scope(None));
+
+    match depth {
+        None => f.await,
+        Some(depth) => {
+            let cleanup = ScopeCleanup(depth);
+            let result = f.await;
+            std::mem::forget(cleanup);
+            leave_scope(depth);
+            result
+        }
+    }
+}
+
+/// Deprecated: use `async_ctx::scope()` instead.
+/// For backward compatibility, dispatches to task-local if available.
+#[deprecated(note = "Use async_ctx::scope() for task-local scoping.")]
+pub async fn named_scope_async<F, R>(name: impl Into<String>, f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    let name = name.into();
+    // If task-local is available, use it (old dispatch behavior)
+    if crate::async_ctx::current_depth().is_some() {
+        return crate::async_ctx::scope(&name, f).await;
+    }
+    let depth = with_store(|store| store.push_scope(Some(name)));
+
+    match depth {
+        None => f.await,
+        Some(depth) => {
+            let cleanup = ScopeCleanup(depth);
+            let result = f.await;
+            std::mem::forget(cleanup);
+            leave_scope(depth);
+            result
+        }
+    }
+}
+
 // ── Fork support ───────────────────────────────────────────────
 
 /// Create a ForkHandle from the current context state.
@@ -366,54 +405,6 @@ struct ScopeCleanup(usize);
 impl Drop for ScopeCleanup {
     fn drop(&mut self) {
         leave_scope(self.0);
-    }
-}
-
-/// Async version: execute a future in a new scope.
-/// The scope is entered before polling and exited after the future completes.
-/// If the future panics, the scope is cleaned up during unwind.
-pub async fn scope_async<F, R>(f: F) -> R
-where
-    F: std::future::Future<Output = R>,
-{
-    let depth = with_store(|store| store.push_scope(None));
-
-    match depth {
-        None => f.await, // store busy — run without scope
-        Some(depth) => {
-            let cleanup = ScopeCleanup(depth);
-            let result = f.await;
-            std::mem::forget(cleanup);
-            leave_scope(depth);
-            result
-        }
-    }
-}
-
-/// Async version of [`enter_named_scope`]: execute a future in a new **named** scope.
-///
-/// Like [`scope_async`], this avoids holding the `!Send` [`ScopeGuard`] across
-/// `.await` points by manually managing push/pop. If the future panics, the
-/// scope is cleaned up during unwind.
-///
-/// Named scopes appear in [`scope_chain()`] and propagate across process
-/// boundaries via serialization.
-pub async fn named_scope_async<F, R>(name: impl Into<String>, f: F) -> R
-where
-    F: std::future::Future<Output = R>,
-{
-    let name = name.into();
-    let depth = with_store(|store| store.push_scope(Some(name)));
-
-    match depth {
-        None => f.await,
-        Some(depth) => {
-            let cleanup = ScopeCleanup(depth);
-            let result = f.await;
-            std::mem::forget(cleanup);
-            leave_scope(depth);
-            result
-        }
     }
 }
 
@@ -460,20 +451,4 @@ pub(crate) fn set_remote_chain(chain: Vec<String>) {
     with_store(|store| store.set_remote_chain(chain));
 }
 
-// ── Thread-local escape hatch ──────────────────────────────────
 
-/// Escape hatch: explicitly use thread-local storage even inside an async runtime.
-/// Panic-safe and nesting-safe via depth counter + RAII guard.
-pub fn force_thread_local<R>(f: impl FnOnce() -> R) -> R {
-    FORCE_THREAD_LOCAL_DEPTH.with(|c| c.set(c.get() + 1));
-
-    struct DepthGuard;
-    impl Drop for DepthGuard {
-        fn drop(&mut self) {
-            crate::sync_storage::FORCE_THREAD_LOCAL_DEPTH.with(|c| c.set(c.get() - 1));
-        }
-    }
-    let _guard = DepthGuard;
-
-    f()
-}

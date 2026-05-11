@@ -33,7 +33,7 @@ pub fn push_scope(name: &str) -> ScopeGuard {
 /// or `None` if not called within an async task (no task-local context).
 pub fn try_push_scope(name: &str) -> Option<ScopeGuard> {
     let name = name.to_string();
-    with_task_store(|store| ScopeGuard::new(store.push_scope(Some(name))))
+    with_task_store(|store| ScopeGuard::new_async(store.push_scope(Some(name))))
 }
 
 /// Pop the top scope from the task-local store.

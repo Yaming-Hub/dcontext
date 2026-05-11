@@ -32,7 +32,17 @@ struct WireEntry {
 
 /// Serialize the current context (all scopes merged) into bytes.
 pub fn serialize_context() -> Result<Vec<u8>, ContextError> {
-    let values = storage::collect_values();
+    // Dispatch: try async context first
+    let values = if crate::async_ctx::current_depth().is_some() {
+        crate::async_ctx::snapshot().values.iter().map(|(k, v)| (*k, std::sync::Arc::clone(v))).collect()
+    } else {
+        storage::collect_values()
+    };
+    let scope_chain_val = if crate::async_ctx::current_depth().is_some() {
+        crate::async_ctx::scope_chain()
+    } else {
+        storage::collect_scope_chain()
+    };
     let mut entries = Vec::new();
 
     for (key, val) in &values {
@@ -65,7 +75,7 @@ pub fn serialize_context() -> Result<Vec<u8>, ContextError> {
     let wire = WireContext {
         version: WIRE_VERSION,
         entries,
-        scope_chain: storage::collect_scope_chain(),
+        scope_chain: scope_chain_val,
     };
 
     let bytes = bincode::serialize(&wire)
@@ -89,11 +99,19 @@ pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
     // Parse version prefix to decide format.
     let (entries, scope_chain) = deserialize_wire(bytes)?;
 
-    let guard = storage::enter_scope();
+    let use_async = crate::async_ctx::current_depth().is_some();
+    let guard = if use_async {
+        crate::async_ctx::push_scope("")
+    } else {
+        storage::enter_scope()
+    };
 
     // Restore remote scope chain.
     if !scope_chain.is_empty() {
-        storage::set_remote_chain(scope_chain);
+        if !use_async {
+            storage::set_remote_chain(scope_chain);
+        }
+        // TODO: async_ctx doesn't have set_remote_chain yet — skip for now
     }
 
     for entry in &entries {
@@ -119,7 +137,11 @@ pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
 
         match restored {
             Some(Some((static_key, Ok(val)))) => {
-                storage::set_value(static_key, std::sync::Arc::from(val));
+                if use_async {
+                    crate::async_ctx::set_raw_value(static_key, std::sync::Arc::from(val));
+                } else {
+                    storage::set_value(static_key, std::sync::Arc::from(val));
+                }
             }
             Some(Some((_, Err(e)))) => return Err(e),
             Some(None) | None => {
