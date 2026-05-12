@@ -82,12 +82,12 @@ pub use sync_ctx::{enter_named_scope, enter_scope};
 
 pub use inheritance::{
     spawn_blocking_with_async_context, spawn_with_async_context, spawn_with_sync_context,
-    ContextInheritance,
+    wrap_with_async_context, wrap_with_sync_context, ContextInheritance,
 };
 
 // ── Serialization (helpers) ───────────────────────────────────
 
-pub use wire::{make_wire_bytes, make_wire_bytes_v};
+pub use wire::{deserialize_to_snapshot, make_wire_bytes, make_wire_bytes_v};
 
 // ── Configuration ──────────────────────────────────────────────
 

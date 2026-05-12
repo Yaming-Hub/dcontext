@@ -1603,3 +1603,169 @@ async fn test_fork_scope_chain_preserved() {
     })
     .await;
 }
+
+// ══════════════════════════════════════════════════════════════
+//  wrap_with_*_context tests
+// ══════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_wrap_with_sync_context_fork() {
+    let key = unique_key("wrap_sync_fork", "rid");
+    register::<RequestId>(key);
+
+    sync_ctx::set_context(key, RequestId("from-sync".into()));
+
+    let wrapped = crate::wrap_with_sync_context(crate::ContextInheritance::Fork, async move {
+        async_ctx::get_context::<RequestId>(key)
+    });
+
+    // Not spawned yet — spawn now
+    let result = tokio::spawn(wrapped).await.unwrap();
+    assert_eq!(result.unwrap().0, "from-sync");
+}
+
+#[tokio::test]
+async fn test_wrap_with_sync_context_snapshot() {
+    let key = unique_key("wrap_sync_snap", "rid");
+    register::<RequestId>(key);
+
+    sync_ctx::set_context(key, RequestId("snap-val".into()));
+
+    let wrapped = crate::wrap_with_sync_context(crate::ContextInheritance::Snapshot, async move {
+        async_ctx::get_context::<RequestId>(key)
+    });
+
+    let result = tokio::spawn(wrapped).await.unwrap();
+    assert_eq!(result.unwrap().0, "snap-val");
+}
+
+#[tokio::test]
+async fn test_wrap_with_async_context_fork() {
+    let key = unique_key("wrap_async_fork", "rid");
+    register::<RequestId>(key);
+
+    let snap = {
+        sync_ctx::set_context(key, RequestId("parent-async".into()));
+        sync_ctx::snapshot()
+    };
+
+    async_ctx::with_context(snap, async {
+        let wrapped = crate::wrap_with_async_context(crate::ContextInheritance::Fork, async move {
+            async_ctx::get_context::<RequestId>(key)
+        });
+
+        let result = tokio::spawn(wrapped).await.unwrap();
+        assert_eq!(result.unwrap().0, "parent-async");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_wrap_with_sync_context_isolation() {
+    // Writes in the wrapped future should NOT leak back to the parent sync context
+    let key = unique_key("wrap_sync_iso", "rid");
+    register::<RequestId>(key);
+
+    sync_ctx::set_context(key, RequestId("original".into()));
+
+    let wrapped = crate::wrap_with_sync_context(crate::ContextInheritance::Fork, async move {
+        async_ctx::set_context(key, RequestId("child-override".into()));
+        async_ctx::get_context::<RequestId>(key)
+    });
+
+    let result = tokio::spawn(wrapped).await.unwrap();
+    assert_eq!(result.unwrap().0, "child-override");
+
+    // Parent sync context is untouched
+    assert_eq!(
+        sync_ctx::get_context::<RequestId>(key).unwrap().0,
+        "original"
+    );
+}
+
+#[tokio::test]
+async fn test_wrap_without_spawning() {
+    // The wrapped future can be awaited directly without spawning
+    let key = unique_key("wrap_no_spawn", "rid");
+    register::<RequestId>(key);
+
+    sync_ctx::set_context(key, RequestId("direct".into()));
+
+    let wrapped = crate::wrap_with_sync_context(crate::ContextInheritance::Fork, async move {
+        async_ctx::get_context::<RequestId>(key)
+    });
+
+    // Await directly — no tokio::spawn
+    let result = wrapped.await;
+    assert_eq!(result.unwrap().0, "direct");
+}
+
+// ══════════════════════════════════════════════════════════════
+//  deserialize_to_snapshot tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_deserialize_to_snapshot_basic() {
+    let key = unique_key("deser_snap", "rid");
+    register::<RequestId>(key);
+
+    // Serialize from sync context
+    sync_ctx::set_context(key, RequestId("wire-val".into()));
+    let _g = sync_ctx::enter_named_scope("my-scope");
+    let bytes = sync_ctx::serialize_context().unwrap();
+
+    // Deserialize directly to snapshot — no store mutation
+    let snap = crate::deserialize_to_snapshot(&bytes).unwrap();
+    assert_eq!(snap.scope_chain(), &["my-scope"]);
+
+    // Attach and read values
+    let _attach = sync_ctx::attach(snap);
+    assert_eq!(
+        sync_ctx::get_context::<RequestId>(key).unwrap().0,
+        "wire-val"
+    );
+}
+
+#[test]
+fn test_deserialize_to_snapshot_no_side_effects() {
+    let key = unique_key("deser_snap_nosideeffect", "rid");
+    register::<RequestId>(key);
+
+    sync_ctx::set_context(key, RequestId("pre-existing".into()));
+    let bytes = sync_ctx::serialize_context().unwrap();
+
+    // Change the sync context after serialization
+    sync_ctx::set_context(key, RequestId("current".into()));
+
+    // deserialize_to_snapshot should NOT touch the sync context
+    let _snap = crate::deserialize_to_snapshot(&bytes).unwrap();
+
+    // Sync context is unchanged
+    assert_eq!(
+        sync_ctx::get_context::<RequestId>(key).unwrap().0,
+        "current"
+    );
+}
+
+#[test]
+fn test_deserialize_to_snapshot_invalid_bytes() {
+    let result = crate::deserialize_to_snapshot(&[0xFF, 0x00, 0x42]);
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_deserialize_to_snapshot_with_context() {
+    // deserialize_to_snapshot → with_context round-trip
+    let key = unique_key("deser_snap_async", "rid");
+    register::<RequestId>(key);
+
+    sync_ctx::set_context(key, RequestId("for-async".into()));
+    let bytes = sync_ctx::serialize_context().unwrap();
+
+    let snap = crate::deserialize_to_snapshot(&bytes).unwrap();
+
+    let result =
+        async_ctx::with_context(snap, async { async_ctx::get_context::<RequestId>(key) }).await;
+
+    assert_eq!(result.unwrap().0, "for-async");
+}
