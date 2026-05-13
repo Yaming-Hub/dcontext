@@ -101,6 +101,13 @@ pub(crate) fn store_from_snapshot_with_registry(
 
 /// Push a named scope onto the context store.
 /// Returns a [`ScopeGuard`] that pops the scope on drop.
+///
+/// Scopes form a hierarchical chain queryable via [`scope_chain()`].
+/// Use `.scope("name")` on futures for async code (see [`ContextFutureExt::scope`]).
+///
+/// # Note
+/// The returned `ScopeGuard` is `!Send` — it must be dropped on the same thread.
+/// For async code in multi-threaded runtimes, prefer `future.scope("name")` instead.
 pub fn push_scope(name: &str) -> ScopeGuard {
     let name = name.to_string();
     registry::with_global_registry(|registry| {
@@ -109,7 +116,12 @@ pub fn push_scope(name: &str) -> ScopeGuard {
     })
 }
 
-/// Get the current scope chain.
+/// Get the current scope chain — the ordered list of named scopes from root to current.
+///
+/// This is the primary observability integration point: use `scope_chain()` to record
+/// the current execution path into tracing spans, logs, or metrics.
+///
+/// Returns an empty vec if no scopes are active.
 pub fn scope_chain() -> Vec<String> {
     try_apply(|store| store.scope_chain()).unwrap_or_default()
 }
@@ -162,10 +174,52 @@ pub fn fork() -> ContextStore {
     try_apply(|store| store.fork_child()).unwrap_or_else(ContextStore::new)
 }
 
+/// Capture a snapshot of the current context and serialize it to wire-format bytes.
+///
+/// Convenience method equivalent to `capture().serialize()`.
+/// Local-only variables are excluded.
+pub fn capture_serialized() -> Result<Vec<u8>, error::ContextError> {
+    capture().serialize()
+}
+
+/// Deserialize wire-format bytes and attach as root context.
+///
+/// Convenience method equivalent to:
+/// ```ignore
+/// let snap = ContextSnapshot::deserialize(bytes)?;
+/// Ok(attach_snapshot(snap))
+/// ```
+///
+/// Returns an [`AttachGuard`] that restores the previous context on drop.
+pub fn attach_from_bytes(bytes: &[u8]) -> Result<AttachGuard, error::ContextError> {
+    let snap = ContextSnapshot::deserialize(bytes)?;
+    Ok(attach_snapshot(snap))
+}
+
 /// Attach a snapshot as root context. Returns an [`AttachGuard`] that restores previous state.
+///
+/// # Note
+/// The returned `AttachGuard` is `!Send` — it must be dropped on the same thread.
+/// For async code, prefer `future.attach(snap)` instead.
 pub fn attach_snapshot(snap: ContextSnapshot) -> AttachGuard {
     let store: ContextStore = snap.into();
     attach_store(store)
+}
+
+/// Attach a snapshot and push a named scope in one call.
+///
+/// Equivalent to:
+/// ```ignore
+/// let _attach = attach_snapshot(snap);
+/// let _scope = push_scope(name);
+/// ```
+///
+/// Returns a combined guard that pops the scope and restores the previous context on drop.
+/// Useful at inbound boundaries where every attach point should have a scope name.
+pub fn attach_snapshot_with_scope(snap: ContextSnapshot, name: &str) -> (AttachGuard, ScopeGuard) {
+    let guard = attach_snapshot(snap);
+    let scope = push_scope(name);
+    (guard, scope)
 }
 
 /// Attach a `ContextStore` as root context. Returns an [`AttachGuard`].

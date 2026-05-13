@@ -11,7 +11,13 @@ use crate::store::CONTEXT;
 /// Created by [`attach_snapshot`](crate::attach_snapshot) or
 /// [`attach_store`](crate::attach_store).
 ///
-/// `!Send` - must be dropped on the same thread where it was created.
+/// # `!Send` constraint
+///
+/// This guard is `!Send` — it **must** be dropped on the same thread where it was created.
+/// Holding it across `.await` in a multi-threaded runtime will cause a compile error.
+///
+/// For async code, use `.attach(snap)` or `.scope("name")` from [`ContextFutureExt`](crate::ContextFutureExt)
+/// instead of manually creating guards.
 pub struct AttachGuard {
     prev: Option<ContextStore>,
     _not_send: std::marker::PhantomData<*const ()>,

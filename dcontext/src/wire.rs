@@ -40,8 +40,11 @@ pub(crate) fn serialize_from(
         let info = registry.get_serialization_info(key);
 
         let value_bytes = match info.as_ref().and_then(|i| i.serialize_fn.as_ref()) {
-            Some(custom_ser) => custom_ser(val.as_ref())?,
-            None => val.serialize_value()?,
+            Some(custom_ser) => custom_ser(val.as_ref())
+                .map_err(|e| ContextError::SerializationFailed(format!("key '{}': {}", key, e)))?,
+            None => val
+                .serialize_value()
+                .map_err(|e| ContextError::SerializationFailed(format!("key '{}': {}", key, e)))?,
         };
         let key_version = info.as_ref().map_or(1, |i| i.key_version);
         entries.push(WireEntry {

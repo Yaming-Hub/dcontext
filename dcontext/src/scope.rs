@@ -26,7 +26,14 @@ pub(crate) struct ScopeGarbage {
 // Scope guard
 
 /// RAII guard that reverts a scope on drop.
-/// Not Send - scopes are bound to their thread-local storage.
+///
+/// # `!Send` constraint
+///
+/// This guard is `!Send` — it **must** be dropped on the same thread where it was created.
+/// Holding it across `.await` in a multi-threaded runtime will cause a compile error.
+///
+/// For async code, use `.scope("name")` from [`ContextFutureExt`](crate::ContextFutureExt)
+/// instead of calling [`push_scope`](crate::push_scope) directly.
 pub struct ScopeGuard {
     expected_depth: usize,
     _not_send: std::marker::PhantomData<*const ()>,
