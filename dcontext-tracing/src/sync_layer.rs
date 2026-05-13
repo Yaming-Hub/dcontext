@@ -1,21 +1,19 @@
-//! Sync tracing layer that writes to the thread-local context store.
+//! Sync tracing layer that bridges span fields and context values.
 //!
-//! `SyncDcontextLayer` pushes/pops scopes on the **thread-local** store.
-//! It always succeeds (thread-local is always available).
+//! `SyncDcontextLayer` copies data between tracing spans and the
+//! **thread-local** dcontext store. It does **not** manage scopes —
+//! scope lifecycle is the caller's responsibility.
 //!
-//! This layer supports four levels of integration:
+//! This layer supports three features:
 //!
-//! 1. **Auto-scoping** (zero config): Every span enter creates a new dcontext
-//!    scope that inherits the parent scope's values. Reverted on span exit.
-//!
-//! 2. **Field extraction**: Extract tracing span fields into dcontext values.
+//! 1. **Field extraction**: Extract tracing span fields into dcontext values.
 //!    Configure via [`TracingField`](crate::TracingField) metadata at
 //!    registration time.
 //!
-//! 3. **Span info**: Optionally expose span metadata (name, target, level) as
+//! 2. **Span info**: Optionally expose span metadata (name, target, level) as
 //!    a [`SpanInfo`](crate::SpanInfo) context value.
 //!
-//! 4. **Span recording**: Auto-record context values into pre-declared Empty
+//! 3. **Span recording**: Auto-record context values into pre-declared Empty
 //!    span fields.
 
 use std::collections::HashSet;
@@ -26,7 +24,6 @@ use tracing_core::span;
 use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 
 use crate::field_mapping::ExtractedFields;
-use crate::guard_stack;
 use crate::layer_common;
 use crate::span_info::{SpanInfo, SPAN_INFO_KEY};
 use crate::tracing_field::get_tracing_fields;
@@ -39,12 +36,13 @@ struct SyncSkipMarker {
     skip: bool,
 }
 
-/// A tracing layer that manages dcontext scopes on the **thread-local** store.
+/// A tracing layer that bridges span fields and the **thread-local** dcontext store.
 ///
-/// On span enter: pushes a named scope via `sync_ctx::push_scope(span_name)`
-/// On span exit: pops the scope via guard drop
+/// On span enter: extracts span fields into context values, optionally sets
+/// span info, and records context values back into span fields.
 ///
-/// Always succeeds — thread-local storage is always available.
+/// Does **not** push or pop dcontext scopes — scope management is the
+/// caller's responsibility.
 ///
 /// # Example
 ///
@@ -63,7 +61,7 @@ pub struct SyncDcontextLayer<S> {
 }
 
 impl<S> SyncDcontextLayer<S> {
-    /// Create a new `SyncDcontextLayer` with default settings (auto-scoping only).
+    /// Create a new `SyncDcontextLayer` with default settings.
     pub fn new() -> Self {
         Self {
             include_span_info: false,
@@ -102,7 +100,7 @@ impl<S> SyncDcontextLayer<S> {
         }
         drop(extensions);
 
-        let skip = dcontext::async_ctx::current_depth().is_some();
+        let skip = dcontext::async_ctx::is_active();
         let mut extensions = span.extensions_mut();
         extensions.insert(SyncSkipMarker { skip });
         skip
@@ -266,59 +264,29 @@ where
             return;
         }
 
-        // Level 1: Create a new named dcontext scope
-        let guard = if let Some(span) = ctx.span(id) {
-            let name = span.metadata().name();
-            dcontext::sync_ctx::push_scope(name)
-        } else {
-            dcontext::sync_ctx::push_scope("")
-        };
-
-        // Level 2: Apply field extraction
+        // Field extraction: span fields → context values
         if let Some(span) = ctx.span(id) {
             apply_field_extraction(&span);
         }
 
-        // Level 3: Set span info
+        // Span info: span metadata → context value
         if self.include_span_info {
             if let Some(span) = ctx.span(id) {
                 set_span_info(&span);
             }
         }
 
-        // Level 4: Record context values into span fields
+        // Span recording: context values → span fields
         if let Some(span) = ctx.span(id) {
             record_context_to_span(&span);
         }
-
-        guard_stack::push_guard(id, guard);
     }
 
-    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(id) {
-            let extensions = span.extensions();
-            if let Some(marker) = extensions.get::<SyncSkipMarker>() {
-                if marker.skip {
-                    return;
-                }
-            }
-        }
-
-        guard_stack::pop_guard(id);
+    fn on_exit(&self, _id: &span::Id, _ctx: Context<'_, S>) {
+        // No-op: scopes are not managed by this layer.
     }
 
     fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(&id) {
-            let extensions = span.extensions();
-            if let Some(marker) = extensions.get::<SyncSkipMarker>() {
-                if marker.skip {
-                    return;
-                }
-            }
-        }
-
-        guard_stack::pop_guard(&id);
-
         if let Some(span) = ctx.span(&id) {
             let mut extensions = span.extensions_mut();
             extensions.remove::<ExtractedFields>();

@@ -356,14 +356,99 @@ pub async fn dcontext::async_ctx::scope<F>(name: &str, fut: F) -> F::Output;
 pub struct ContextSnapshot;
 pub struct RegistryBuilder;
 pub fn initialize(builder: RegistryBuilder);
-pub fn spawn_with_context(name: &str, f: impl FnOnce() + Send + 'static) -> ...;
-pub fn spawn_with_context_async<F>(future: F) -> ...;
-pub fn wrap_with_context<F, T>(f: F) -> ...;
-pub fn wrap_with_context_fn<F, T>(f: F) -> ...;
+
+// Spawn helpers (capture + spawn)
+pub fn spawn_with_sync_context(mode: ContextInheritance, future: F) -> JoinHandle<...>;
+pub fn spawn_with_async_context(mode: ContextInheritance, future: F) -> JoinHandle<...>;
+pub fn spawn_blocking_with_async_context(mode: ContextInheritance, f: F) -> JoinHandle<...>;
+
+// Wrap helpers (capture only, caller spawns)
+pub fn wrap_with_sync_context(mode: ContextInheritance, future: F) -> impl Future;
+pub fn wrap_with_async_context(mode: ContextInheritance, future: F) -> impl Future;
+
+// Wire deserialization without store mutation
+pub fn deserialize_to_snapshot(bytes: &[u8]) -> Result<ContextSnapshot, ContextError>;
+
 pub fn register_contexts!(...);
 ```
 
-### 4.5 Snapshot / Callback Pattern
+### 4.5 Context Inheritance: Fork vs Snapshot
+
+All spawn and wrap helpers accept a `ContextInheritance` mode:
+
+```rust
+pub enum ContextInheritance {
+    Fork,      // O(current_scope_keys) — Arc-shared frozen parent
+    Snapshot,  // O(depth × keys) — full deep copy
+}
+```
+
+**Fork** creates a child `ContextStore` whose `frozen_parent` points to the
+current scope via `Arc`. Value reads fall through to the frozen parent; writes
+are isolated (copy-on-write). This is the cheapest option and the default.
+
+**Snapshot** walks the entire scope chain, clones all effective values into a
+flat `HashMap`, and wraps it in an `Arc`. The result is a self-contained
+`ContextSnapshot` with no references back to the parent store.
+
+#### When to use each
+
+| Scenario | Mode | Why |
+|----------|------|-----|
+| `tokio::spawn` child task | **Fork** | Parent outlives child; cheap Arc sharing |
+| `spawn_blocking` thread | **Fork** | Same as above; blocking thread is short-lived |
+| Task queue / bounded channel | **Fork** via `wrap_with_*` | Capture is cheap; future carries its own scope |
+| Cross-thread message passing | **Snapshot** | Self-contained; sender's context may be gone when receiver reads |
+| Retry / rate-limit wrappers | **Fork** via `wrap_with_*` | Each attempt gets its own isolated scope |
+
+#### Anti-pattern: Fork for message passing
+
+Do **not** send a forked store across a message channel to a different thread.
+Fork creates a live `Arc` reference to the sender's scope chain. If the sender
+pops scopes or exits before the receiver reads, the forked child sees stale
+state. Use `Snapshot` (via `sync_ctx::snapshot()`) for messages instead.
+
+### 4.6 Wrap Helpers: Capture Now, Spawn Later
+
+The spawn helpers (`spawn_with_*`) couple context capture with task spawning.
+When you need to capture context but spawn later — e.g., for backpressure,
+ordering, concurrency control — use the wrap helpers:
+
+```rust
+// capture sync context into a wrapped future
+let wrapped = dcontext::wrap_with_sync_context(
+    dcontext::ContextInheritance::Fork,
+    async { handle_request().await },
+);
+
+// enqueue on a bounded channel (backpressure)
+sender.try_send(Box::pin(wrapped))?;
+
+// consumer spawns when ready
+let task = receiver.recv().await.unwrap();
+tokio::spawn(task);
+```
+
+The wrapped future carries its own task-local context scope. It can be stored,
+queued, retried, or awaited directly without spawning.
+
+### 4.7 Direct Wire Deserialization
+
+`deserialize_to_snapshot` converts wire bytes directly into a `ContextSnapshot`
+without touching any live context store:
+
+```rust
+// Old pattern: mutate store, snapshot, drop
+let _guard = dcontext::sync_ctx::deserialize_context(&bytes)?;
+let snap = dcontext::sync_ctx::snapshot();
+drop(_guard);
+
+// New pattern: direct, no side effects
+let snap = dcontext::deserialize_to_snapshot(&bytes)?;
+```
+
+This is especially useful on sync actor threads (no task-local store) or when
+you need to inspect wire context without side effects.
 
 ```rust
 let _guard = dcontext::sync_ctx::enter_scope();
@@ -627,25 +712,42 @@ fn handle_request() {
 
 ### 11.2 Cross-Thread Propagation
 
+For spawning a child task/thread, use the spawn helpers with `ContextInheritance`:
+
 ```rust
-use dcontext::{spawn_with_context, sync_ctx};
+use dcontext::{ContextInheritance, spawn_with_sync_context, sync_ctx};
 
 let _guard = sync_ctx::enter_scope();
 sync_ctx::set_context("request_id", RequestId("req-789".into()));
 
-let handle = spawn_with_context("worker", || {
-    let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
-    println!("Worker sees: {}", rid.0);
-})
-.unwrap();
+// Spawn an async task that inherits sync context (Fork = cheap)
+spawn_with_sync_context(ContextInheritance::Fork, async {
+    let rid = dcontext::async_ctx::get_context::<RequestId>("request_id").unwrap();
+    println!("Task sees: {}", rid.0);
+});
+```
 
-handle.join().unwrap();
+For cross-thread **message passing** (sender and receiver are independent),
+use `Snapshot` instead of `Fork`:
+
+```rust
+use dcontext::sync_ctx;
+
+// Sender
+sync_ctx::set_context("request_id", RequestId("req-789".into()));
+let snap = sync_ctx::snapshot();  // self-contained deep copy
+tx.send(WorkItem { context: snap, data }).unwrap();
+
+// Receiver (different thread)
+let item = rx.recv().unwrap();
+let _guard = sync_ctx::attach(item.context);
+let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
 ```
 
 ### 11.3 Async Task Propagation
 
 ```rust
-use dcontext::{async_ctx, spawn_with_context_async, sync_ctx};
+use dcontext::{async_ctx, ContextInheritance, spawn_with_async_context, sync_ctx};
 
 let snap = {
     let _guard = sync_ctx::enter_scope();
@@ -654,7 +756,8 @@ let snap = {
 };
 
 async_ctx::with_context(snap, async {
-    let handle = spawn_with_context_async(async {
+    // Spawn child task with Fork (cheapest)
+    let handle = spawn_with_async_context(ContextInheritance::Fork, async {
         let rid = async_ctx::get_context::<RequestId>("request_id").unwrap();
         println!("Async task sees: {}", rid.0);
     });
@@ -662,6 +765,23 @@ async_ctx::with_context(snap, async {
     handle.await.unwrap();
 })
 .await;
+```
+
+For capture-now-spawn-later patterns (e.g., task queues with backpressure):
+
+```rust
+use dcontext::{ContextInheritance, wrap_with_sync_context};
+
+// On sync actor thread: capture context, wrap future, enqueue
+let wrapped = wrap_with_sync_context(
+    ContextInheritance::Fork,
+    async { handle_rpc().await },
+);
+bounded_channel.try_send(Box::pin(wrapped))?;
+
+// Consumer loop: spawn when ready
+let task = bounded_channel.recv().await.unwrap();
+tokio::spawn(task);
 ```
 
 ### 11.4 Cross-Process Propagation
@@ -691,17 +811,16 @@ tracing_subscriber::registry()
 
 A typical async server flow is:
 
-1. Deserialize incoming wire bytes into a sync snapshot at the edge.
+1. Deserialize incoming wire bytes directly into a snapshot (no store mutation).
 2. Hand that snapshot to `async_ctx::with_context` for the request future.
 3. Use `async_ctx::scope` or `async_ctx::set_context` inside handlers.
-4. Serialize with `sync_ctx::serialize_context` or another outbound helper when forwarding.
+4. Serialize with `async_ctx::serialize_context` when forwarding.
 
 ```rust
-let snap = if let Some(bytes) = inbound_header_bytes {
-    let _guard = dcontext::sync_ctx::deserialize_context(bytes).unwrap();
-    dcontext::sync_ctx::snapshot()
-} else {
-    dcontext::ContextSnapshot::default()
+let snap = match inbound_header_bytes {
+    Some(bytes) => dcontext::deserialize_to_snapshot(bytes)
+        .unwrap_or_default(),
+    None => dcontext::ContextSnapshot::default(),
 };
 
 dcontext::async_ctx::with_context(snap, async move {
@@ -741,7 +860,7 @@ dcontext::async_ctx::with_context(snap, async move {
 - ~~**Pluggable top-level codec**~~ ✅ Implemented as `register_with_codec` — per-key custom serialize/deserialize functions. The top-level wire format envelope remains bincode; inner values can use any format (JSON, MessagePack, etc.).
 - **`tracing` / OpenTelemetry interop (S5):** ~~Define how `dcontext` relates
   to `tracing::Span` and `opentelemetry::Context`.~~ Partially implemented:
-  - ✅ `dcontext-tracing` crate with `DcontextLayer` — span lifecycle creates/reverts scopes
+  - ✅ `dcontext-tracing` crate with `DcontextLayer` — span↔context data bridge (field extraction, log enrichment, span recording)
   - ✅ Field mapping — span fields automatically populate context values
   - ✅ Log enrichment — `WithContextFields` formatter injects context into log output
   - ✅ Extensible per-key metadata system for cross-crate annotations

@@ -60,6 +60,14 @@ pub(crate) fn set_scope_barrier() {
     try_apply(|store| store.set_scope_barrier());
 }
 
+/// Returns `true` if a task-local context store is available.
+///
+/// This indicates the code is running inside an `async_ctx::with_context`
+/// scope (i.e., a tokio task with an initialized task-local store).
+pub fn is_active() -> bool {
+    try_apply(|_| ()).is_some()
+}
+
 /// Peek at the current scope depth on the task-local store.
 ///
 /// The depth uniquely identifies the active scope within the store.
@@ -172,7 +180,21 @@ pub fn snapshot() -> ContextSnapshot {
 /// with its values. Returns a [`ScopeGuard`] that pops the scope on drop.
 /// Returns a no-op guard if not in an async task.
 pub fn attach(snap: ContextSnapshot) -> ScopeGuard {
-    let guard = push_scope("");
+    attach_inner(snap, "")
+}
+
+/// Attach a snapshot to the task-local context by pushing a new **named**
+/// scope with its values. The name appears in [`scope_chain()`], making it
+/// visible for debugging and tracing.
+///
+/// Returns a [`ScopeGuard`] that pops the scope on drop.
+/// Returns a no-op guard if not in an async task.
+pub fn attach_named(name: &str, snap: ContextSnapshot) -> ScopeGuard {
+    attach_inner(snap, name)
+}
+
+fn attach_inner(snap: ContextSnapshot, name: &str) -> ScopeGuard {
+    let guard = push_scope(name);
     if !snap.scope_chain.is_empty() {
         set_remote_chain(snap.scope_chain);
     }
@@ -263,6 +285,30 @@ where
             result
         }
     }
+}
+
+// ── Context availability ───────────────────────────────────────
+
+/// Check whether a task-local context store is currently active.
+///
+/// Returns `true` if this code is running inside an async task that has
+/// a task-local context store (e.g., wrapped with [`with_context`]).
+/// Returns `false` if called from a blocking thread, a sync context,
+/// or outside any task-local scope.
+///
+/// This is a lightweight check that does not take or mutate the store.
+/// Use it to guard operations that should only run when async context
+/// is available.
+pub fn has_context() -> bool {
+    TASK_CONTEXT
+        .try_with(|cell| {
+            // Peek: take the store, check if Some, put it back.
+            let store = cell.take();
+            let available = store.is_some();
+            cell.set(store);
+            available
+        })
+        .unwrap_or(false)
 }
 
 // ── Internal helpers ───────────────────────────────────────────

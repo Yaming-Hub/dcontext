@@ -1,14 +1,15 @@
 # dcontext-tracing
 
-Automatic [dcontext](https://crates.io/crates/dcontext) scope management via
+Bidirectional bridge between [dcontext](https://crates.io/crates/dcontext) and
 [tracing](https://crates.io/crates/tracing) spans.
 
 [![Crates.io](https://img.shields.io/crates/v/dcontext-tracing.svg)](https://crates.io/crates/dcontext-tracing)
 [![Docs.rs](https://docs.rs/dcontext-tracing/badge.svg)](https://docs.rs/dcontext-tracing)
 
-When you enter a tracing span, this crate automatically creates a dcontext
-scope. When the span exits, the scope is reverted. This means your context
-values follow the natural span lifecycle — no manual scope management needed.
+This crate copies data between tracing span fields and dcontext context values.
+It does **not** manage dcontext scopes — scope lifecycle remains the caller's
+responsibility. This keeps the crate simple and avoids issues with span/scope
+lifetime mismatches in async code.
 
 ## Quick Start
 
@@ -35,16 +36,13 @@ tracing_subscriber::registry()
 Use `SyncDcontextLayer` with `dcontext::sync_ctx`:
 
 ```rust
-dcontext::sync_ctx::set_context("user", "alice".to_string());
+// Manage scopes yourself
+let _scope = dcontext::sync_ctx::enter_named_scope("request");
 
-{
-    let _span = tracing::info_span!("request").entered();
-    dcontext::sync_ctx::set_context("request_id", "abc-123".to_string());
-
-    let user = dcontext::sync_ctx::get_context::<String>("user").unwrap();
-    assert_eq!(user, "alice");
-}
-// Scope reverted — "request_id" is gone, "user" remains
+// Span fields are extracted into context automatically
+let _span = tracing::info_span!("handler", request_id = "abc-123").entered();
+let id = dcontext::sync_ctx::get_context::<String>("request_id").unwrap();
+assert_eq!(id, "abc-123");
 ```
 
 ### Async / Task-Local Code
@@ -80,35 +78,17 @@ Map tracing span fields directly to dcontext values. When a span with the
 configured field is entered, the value is extracted and set in context:
 
 ```rust
-use dcontext::sync_ctx;
-use dcontext_tracing::{FromFieldValue, SyncDcontextLayer};
+use dcontext_tracing::TracingField;
 
-#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
-struct RequestId(String);
-
-impl FromFieldValue for RequestId {
-    fn from_str_value(s: &str) -> Option<Self> {
-        Some(RequestId(s.to_string()))
-    }
-}
-
-let layer = SyncDcontextLayer::builder()
-    .map_field::<RequestId>("request_id")
-    .build();
-
-tracing_subscriber::registry().with(layer).init();
-
-let _span = tracing::info_span!("handler", request_id = "req-001").entered();
-let id = sync_ctx::get_context::<RequestId>("request_id").unwrap();
-assert_eq!(id.0, "req-001");
-```
-
-You can also map a field to a different context key name:
-
-```rust
-let layer = dcontext_tracing::SyncDcontextLayer::builder()
-    .map_field_as::<RequestId>("req_id", "request_id")
-    .build();
+let mut builder = dcontext::RegistryBuilder::new();
+builder.register_with::<String>("request_id", |opts| {
+    opts.with_metadata(
+        TracingField::builder("request_id")
+            .extract_from_str(|s| Some(s.to_string()))
+            .enrich_display::<String>()
+            .build(),
+    )
+});
 ```
 
 ## Span Info
@@ -144,40 +124,22 @@ for a complete working example.
 | `SyncDcontextLayer<S>` | Tracing layer for thread-local `dcontext::sync_ctx` |
 | `AsyncDcontextLayer<S>` | Tracing layer for task-local `dcontext::async_ctx` |
 | `DcontextLayer<S>` | Legacy alias retained for compatibility |
-| `FromFieldValue` | Trait for converting tracing fields to context types |
+| `TracingField` | Per-key metadata controlling extraction and enrichment |
 | `SpanInfo` | Span metadata (name, target, level) |
 | `SPAN_INFO_KEY` | Context key for `SpanInfo` (`"dcontext.span"`) |
+| `WithContextFields` | Formatter wrapper for log enrichment |
+| `collect_log_fields` | Collect all enrichable context values for custom formatters |
 
 ## How It Works
 
-`SyncDcontextLayer` (and the legacy `DcontextLayer` alias) use a
-**thread-local stack** to store dcontext `ScopeGuard`s (which are `!Send` and
-cannot be stored in tracing's span extensions). On span enter, a new scope is
-pushed; on span exit, the scope is popped and the guard dropped, reverting
-context changes.
+The layer hooks into tracing's span lifecycle (`on_new_span`, `on_enter`,
+`on_close`) to copy data between spans and the dcontext store. It does
+**not** push or pop dcontext scopes — scope management stays with
+application code, which can manage scopes independently of span lifetime.
 
-`AsyncDcontextLayer` writes to `dcontext::async_ctx` task-local storage instead
-and keeps per-span lifecycle state in span extensions so scopes survive
-Tokio yield points and task migration.
-
-## Scope Chain Integration
-
-Span names automatically become named scopes in the dcontext scope chain.
-Each time a span is entered, the layer pushes the span name into the active
-store, so scope-chain queries reflect the tracing span hierarchy:
-
-```rust
-let _outer = tracing::info_span!("api_handler").entered();
-{
-    let _inner = tracing::info_span!("db_query").entered();
-    let chain = dcontext::sync_ctx::scope_chain();
-    // chain == ["api_handler", "db_query"]
-}
-// After _inner exits: chain == ["api_handler"]
-```
-
-With `AsyncDcontextLayer`, use `dcontext::async_ctx::scope_chain()` instead so
-the chain follows the Tokio task across `.await` points.
+`SyncDcontextLayer` reads/writes `dcontext::sync_ctx` (thread-local).
+`AsyncDcontextLayer` reads/writes `dcontext::async_ctx` (task-local) and
+performs extraction only on the first enter of each span.
 
 ## Related
 

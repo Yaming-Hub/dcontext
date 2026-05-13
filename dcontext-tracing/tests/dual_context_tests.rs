@@ -251,7 +251,7 @@ async fn repeated_yields_do_not_grow_scope_chain() {
 // ══════════════════════════════════════════════════════════════
 
 #[test]
-fn sync_layer_manages_thread_local_scopes() {
+fn sync_layer_does_not_create_scopes() {
     dcontext::sync_ctx::clear();
 
     let subscriber =
@@ -262,11 +262,11 @@ fn sync_layer_manages_thread_local_scopes() {
         let span = tracing::info_span!("sync_handler");
         let _entered = span.enter();
 
+        // Layer should NOT push scopes — scope chain remains empty
         let chain = dcontext::sync_ctx::scope_chain();
-        assert_eq!(chain, vec!["sync_handler"]);
+        assert!(chain.is_empty(), "layer should not push scopes: {:?}", chain);
     }
 
-    // After span exits, scope reverts
     let chain = dcontext::sync_ctx::scope_chain();
     assert!(chain.is_empty(), "Leaked: {:?}", chain);
 

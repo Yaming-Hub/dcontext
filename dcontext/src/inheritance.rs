@@ -1,12 +1,19 @@
 //! Context inheritance — propagating context across task/thread boundaries.
 //!
-//! Three spawn helpers cover the common cross-boundary scenarios:
+//! ## Spawn helpers (capture + spawn)
 //!
 //! | Helper | Source | Target |
 //! |--------|--------|--------|
 //! | [`spawn_with_async_context`] | async (task-local) | async task |
 //! | [`spawn_blocking_with_async_context`] | async (task-local) | blocking thread |
 //! | [`spawn_with_sync_context`] | sync (thread-local) | async task |
+//!
+//! ## Wrap helpers (capture only, no spawn)
+//!
+//! | Helper | Source | Returns |
+//! |--------|--------|---------|
+//! | [`wrap_with_sync_context`] | sync (thread-local) | `impl Future` with task-local context |
+//! | [`wrap_with_async_context`] | async (task-local) | `impl Future` with task-local context |
 //!
 //! Each takes a [`ContextInheritance`] mode:
 //!
@@ -123,6 +130,70 @@ where
 {
     let store = capture_sync(mode);
     tokio::spawn(TASK_CONTEXT.scope(Cell::new(Some(store)), future))
+}
+
+// ── Wrap helpers (capture only, caller spawns) ────────────────
+
+/// Wrap a future so it runs with a **task-local** context inherited from the
+/// current **sync** (thread-local) context.
+///
+/// The future is **not** spawned — it can be stored, queued, or spawned later.
+/// This is the decoupled version of [`spawn_with_sync_context`]: it captures
+/// the context now and returns a wrapped future that carries its own task-local
+/// context scope.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use dcontext::{wrap_with_sync_context, ContextInheritance};
+///
+/// // Capture sync context, wrap the future, enqueue for later spawn
+/// let wrapped = wrap_with_sync_context(ContextInheritance::Fork, async {
+///     let rid: String = dcontext::async_ctx::get_context("request_id").unwrap();
+/// });
+/// channel.send(Box::pin(wrapped)).await;  // spawn later
+/// ```
+pub fn wrap_with_sync_context<F>(
+    mode: ContextInheritance,
+    future: F,
+) -> impl std::future::Future<Output = F::Output> + Send
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let store = capture_sync(mode);
+    TASK_CONTEXT.scope(Cell::new(Some(store)), future)
+}
+
+/// Wrap a future so it runs with a **task-local** context inherited from the
+/// current **async** (task-local) context.
+///
+/// The future is **not** spawned — it can be stored, queued, or spawned later.
+/// This is the decoupled version of [`spawn_with_async_context`]: it captures
+/// the context now and returns a wrapped future that carries its own task-local
+/// context scope.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use dcontext::{wrap_with_async_context, ContextInheritance};
+///
+/// // Capture async context, wrap the future, retry later
+/// let wrapped = wrap_with_async_context(ContextInheritance::Fork, async {
+///     process_request().await;
+/// });
+/// retry_queue.push(Box::pin(wrapped));
+/// ```
+pub fn wrap_with_async_context<F>(
+    mode: ContextInheritance,
+    future: F,
+) -> impl std::future::Future<Output = F::Output> + Send
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let store = capture_async(mode);
+    TASK_CONTEXT.scope(Cell::new(Some(store)), future)
 }
 
 // ── Internal: capture context into a ContextStore ─────────────

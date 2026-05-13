@@ -161,6 +161,56 @@ fn deserialize_wire(bytes: &[u8]) -> Result<(Vec<WireEntry>, Vec<String>), Conte
     }
 }
 
+/// Deserialize wire bytes directly into a [`ContextSnapshot`] without
+/// touching any live context store (thread-local or task-local).
+///
+/// This is useful when:
+/// - You need to pass context across a channel/queue as a snapshot
+/// - You're on a thread without a task-local store (sync actor)
+/// - You want to inspect wire context without side effects
+///
+/// Values are deserialized using the registered deserializers, same as
+/// `deserialize_context`. Local-only keys are skipped. The scope chain
+/// from the wire format is preserved in the snapshot.
+pub fn deserialize_to_snapshot(bytes: &[u8]) -> Result<crate::ContextSnapshot, ContextError> {
+    let (entries, scope_chain) = deserialize_wire(bytes)?;
+
+    let mut values: HashMap<&'static str, Arc<dyn ContextValue>> = HashMap::new();
+    for entry in &entries {
+        let key_str = entry.key.as_str();
+        let restored = registry::with_registration(key_str, |reg| {
+            if reg.local_only || reg.deserializers.is_empty() {
+                return None;
+            }
+            match reg.deserializers.get(&entry.key_version) {
+                Some(deser_fn) => Some((reg.key, deser_fn(&entry.value))),
+                None => Some((
+                    reg.key,
+                    Err(ContextError::DeserializationFailed(format!(
+                        "no deserializer for key '{}' wire version {} (registered versions: {:?})",
+                        key_str,
+                        entry.key_version,
+                        reg.deserializers.keys().collect::<Vec<_>>()
+                    ))),
+                )),
+            }
+        });
+
+        match restored {
+            Some(Some((static_key, Ok(val)))) => {
+                values.insert(static_key, Arc::from(val));
+            }
+            Some(Some((_, Err(e)))) => return Err(e),
+            Some(None) | None => {}
+        }
+    }
+
+    Ok(crate::ContextSnapshot {
+        values: Arc::new(values),
+        scope_chain,
+    })
+}
+
 /// Construct wire-format bytes with a single entry. This is a helper for
 /// testing version migration — it lets you create wire bytes as if they came
 /// from a sender running an older schema version.
