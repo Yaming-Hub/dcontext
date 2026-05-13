@@ -1,8 +1,8 @@
 [package]
 name = "dcontext-tracing"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
-description = "Automatic dcontext scope management via tracing spans"
+description = "Bidirectional bridge between dcontext context values and tracing spans"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/microsoft/dcontext"

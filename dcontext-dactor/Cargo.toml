@@ -1,6 +1,6 @@
 [package]
 name = "dcontext-dactor"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 description = "Automatic dcontext propagation through dactor actor messages"
 license = "MIT"
