@@ -5,12 +5,12 @@ use base64::Engine as _;
 
 use crate::*;
 // Re-import from the crate root
-use crate::async_ctx;
 use crate::sync_ctx;
 use crate::wire::test_helpers::{make_wire_bytes, make_wire_bytes_v};
 use crate::ContextError;
 use crate::ContextSnapshot;
 use crate::ScopeGuard;
+use std::future::Future;
 
 // ── Test types ─────────────────────────────────────────────────
 
@@ -28,6 +28,15 @@ fn unique_key(prefix: &str, suffix: &str) -> &'static str {
     // Leak a unique string for each test key — acceptable in tests.
     let s = format!("{}_{}", prefix, suffix);
     Box::leak(s.into_boxed_str())
+}
+
+fn with_snapshot<F: Future>(snap: ContextSnapshot, fut: F) -> WithContext<F> {
+    fut.with_context(snapshot_to_store(snap))
+}
+
+async fn async_scope<F: Future>(name: &str, fut: F) -> F::Output {
+    let _scope = push_scope(name);
+    fut.await
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -730,8 +739,8 @@ mod async_tests {
             sync_ctx::snapshot()
         };
 
-        let result = async_ctx::with_context(snap, async {
-            async_ctx::get_context::<RequestId>(key).unwrap()
+        let result = with_snapshot(snap, async {
+            get_context::<RequestId>(key).unwrap()
         })
         .await;
 
@@ -748,23 +757,23 @@ mod async_tests {
             sync_ctx::snapshot()
         };
 
-        async_ctx::with_context(snap, async {
+        with_snapshot(snap, async {
             assert_eq!(
-                async_ctx::get_context::<RequestId>(key).unwrap().0,
+                get_context::<RequestId>(key).unwrap().0,
                 "before-async"
             );
 
-            async_ctx::scope("", async {
-                async_ctx::set_context(key, RequestId("inside-async".into()));
+            async_scope("", async {
+                set_context(key, RequestId("inside-async".into()));
                 assert_eq!(
-                    async_ctx::get_context::<RequestId>(key).unwrap().0,
+                    get_context::<RequestId>(key).unwrap().0,
                     "inside-async"
                 );
             })
             .await;
 
             assert_eq!(
-                async_ctx::get_context::<RequestId>(key).unwrap().0,
+                get_context::<RequestId>(key).unwrap().0,
                 "before-async"
             );
         })
@@ -781,10 +790,10 @@ mod async_tests {
             sync_ctx::snapshot()
         };
 
-        let handle = async_ctx::with_context(snap, async {
-            let child_snap = async_ctx::snapshot();
-            tokio::spawn(async_ctx::with_context(child_snap, async {
-                async_ctx::get_context::<RequestId>(key).unwrap()
+        let handle = with_snapshot(snap, async {
+            let child_snap = snapshot();
+            tokio::spawn(with_snapshot(child_snap, async {
+                get_context::<RequestId>(key).unwrap()
             }))
         })
         .await;
@@ -803,16 +812,16 @@ mod async_tests {
             sync_ctx::snapshot()
         };
 
-        async_ctx::with_context(snap, async {
-            assert_eq!(async_ctx::get_context::<RequestId>(key).unwrap().0, "outer");
+        with_snapshot(snap, async {
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "outer");
 
-            async_ctx::scope("", async {
-                async_ctx::set_context(key, RequestId("inner".into()));
-                assert_eq!(async_ctx::get_context::<RequestId>(key).unwrap().0, "inner");
+            async_scope("", async {
+                set_context(key, RequestId("inner".into()));
+                assert_eq!(get_context::<RequestId>(key).unwrap().0, "inner");
             })
             .await;
 
-            assert_eq!(async_ctx::get_context::<RequestId>(key).unwrap().0, "outer");
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "outer");
         })
         .await;
     }
@@ -827,12 +836,12 @@ mod async_tests {
             sync_ctx::snapshot()
         };
 
-        async_ctx::with_context(snap, async {
-            let bytes = async_ctx::serialize_context().unwrap();
-            async_ctx::set_context(key, RequestId("cleared".into()));
-            let _guard = async_ctx::deserialize_context(&bytes).unwrap();
+        with_snapshot(snap, async {
+            let bytes = serialize_context().unwrap();
+            set_context(key, RequestId("cleared".into()));
+            let _guard = deserialize_context(&bytes).unwrap();
             assert_eq!(
-                async_ctx::get_context::<RequestId>(key).unwrap().0,
+                get_context::<RequestId>(key).unwrap().0,
                 "async-serde"
             );
         })
@@ -985,11 +994,11 @@ mod async_scope_chain_tests {
         let _g = sync_ctx::enter_named_scope("pre-send");
         let snap = sync_ctx::snapshot();
 
-        async_ctx::with_context(snap, async {
-            assert_eq!(async_ctx::scope_chain(), vec!["pre-send"]);
+        with_snapshot(snap, async {
+            assert_eq!(scope_chain(), vec!["pre-send"]);
 
-            async_ctx::scope("handler", async {
-                assert_eq!(async_ctx::scope_chain(), vec!["pre-send", "handler"]);
+            async_scope("handler", async {
+                assert_eq!(scope_chain(), vec!["pre-send", "handler"]);
             })
             .await;
         })
@@ -1003,12 +1012,12 @@ mod async_scope_chain_tests {
             sync_ctx::snapshot()
         };
 
-        async_ctx::with_context(snap, async {
-            async_ctx::scope("level-1", async {
-                assert_eq!(async_ctx::scope_chain(), vec!["root", "level-1"]);
+        with_snapshot(snap, async {
+            async_scope("level-1", async {
+                assert_eq!(scope_chain(), vec!["root", "level-1"]);
 
-                async_ctx::scope("level-2", async {
-                    assert_eq!(async_ctx::scope_chain(), vec!["root", "level-1", "level-2"]);
+                async_scope("level-2", async {
+                    assert_eq!(scope_chain(), vec!["root", "level-1", "level-2"]);
                 })
                 .await;
             })
@@ -1425,34 +1434,34 @@ async fn test_async_reentrant_safety() {
         sync_ctx::snapshot()
     };
 
-    async_ctx::with_context(snap, async {
-        assert_eq!(async_ctx::get_context::<RequestId>(key).unwrap().0, "base");
+    with_snapshot(snap, async {
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "base");
 
-        async_ctx::scope("", async {
-            async_ctx::set_context(key, RequestId("in-scope-async".into()));
+        async_scope("", async {
+            set_context(key, RequestId("in-scope-async".into()));
             assert_eq!(
-                async_ctx::get_context::<RequestId>(key).unwrap().0,
+                get_context::<RequestId>(key).unwrap().0,
                 "in-scope-async"
             );
 
-            async_ctx::scope("inner", async {
+            async_scope("inner", async {
                 assert_eq!(
-                    async_ctx::get_context::<RequestId>(key).unwrap().0,
+                    get_context::<RequestId>(key).unwrap().0,
                     "in-scope-async"
                 );
-                async_ctx::set_context(key, RequestId("deep".into()));
-                assert_eq!(async_ctx::get_context::<RequestId>(key).unwrap().0, "deep");
+                set_context(key, RequestId("deep".into()));
+                assert_eq!(get_context::<RequestId>(key).unwrap().0, "deep");
             })
             .await;
 
             assert_eq!(
-                async_ctx::get_context::<RequestId>(key).unwrap().0,
+                get_context::<RequestId>(key).unwrap().0,
                 "in-scope-async"
             );
         })
         .await;
 
-        assert_eq!(async_ctx::get_context::<RequestId>(key).unwrap().0, "base");
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "base");
     })
     .await;
 }
@@ -1472,8 +1481,8 @@ async fn test_fork_reads_parent_values() {
         sync_ctx::snapshot()
     };
 
-    let result = async_ctx::with_context(snap, async {
-        async_ctx::get_context::<RequestId>(key).unwrap()
+    let result = with_snapshot(snap, async {
+        get_context::<RequestId>(key).unwrap()
     })
     .await;
 
@@ -1491,9 +1500,9 @@ async fn test_fork_writes_are_isolated() {
         sync_ctx::snapshot()
     };
 
-    async_ctx::with_context(snap, async {
-        async_ctx::set_context(key, RequestId("child-override".into()));
-        let val = async_ctx::get_context::<RequestId>(key).unwrap();
+    with_snapshot(snap, async {
+        set_context(key, RequestId("child-override".into()));
+        let val = get_context::<RequestId>(key).unwrap();
         assert_eq!(val.0, "child-override");
     })
     .await;
@@ -1515,12 +1524,12 @@ async fn test_fork_is_cheap_clone() {
 
     let snap2 = snap.clone();
 
-    let r1 = async_ctx::with_context(snap, async {
-        async_ctx::get_context::<RequestId>(key).unwrap()
+    let r1 = with_snapshot(snap, async {
+        get_context::<RequestId>(key).unwrap()
     })
     .await;
-    let r2 = async_ctx::with_context(snap2, async {
-        async_ctx::get_context::<RequestId>(key).unwrap()
+    let r2 = with_snapshot(snap2, async {
+        get_context::<RequestId>(key).unwrap()
     })
     .await;
 
@@ -1539,16 +1548,16 @@ async fn test_fork_child_scopes_work() {
         sync_ctx::snapshot()
     };
 
-    async_ctx::with_context(snap, async {
-        assert_eq!(async_ctx::get_context::<RequestId>(key).unwrap().0, "base");
+    with_snapshot(snap, async {
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "base");
 
-        async_ctx::scope("", async {
-            async_ctx::set_context(key, RequestId("inner".into()));
-            assert_eq!(async_ctx::get_context::<RequestId>(key).unwrap().0, "inner");
+        async_scope("", async {
+            set_context(key, RequestId("inner".into()));
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "inner");
         })
         .await;
 
-        assert_eq!(async_ctx::get_context::<RequestId>(key).unwrap().0, "base");
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "base");
     })
     .await;
 }
@@ -1564,8 +1573,8 @@ async fn test_spawn_with_fork_async() {
         sync_ctx::snapshot()
     };
 
-    let join = tokio::spawn(async_ctx::with_context(snap, async {
-        async_ctx::get_context::<RequestId>(key).unwrap()
+    let join = tokio::spawn(with_snapshot(snap, async {
+        get_context::<RequestId>(key).unwrap()
     }));
 
     let result = join.await.unwrap();
@@ -1576,7 +1585,7 @@ async fn test_spawn_with_fork_async() {
 async fn test_fork_empty_context() {
     let snap = ContextSnapshot::empty();
 
-    async_ctx::with_context(snap, async {
+    with_snapshot(snap, async {
         // No values set — empty context should be attachable.
     })
     .await;
@@ -1593,8 +1602,8 @@ async fn test_fork_scope_chain_preserved() {
         sync_ctx::snapshot()
     };
 
-    async_ctx::with_context(snap, async {
-        let chain = async_ctx::scope_chain();
+    with_snapshot(snap, async {
+        let chain = scope_chain();
         assert!(
             chain.contains(&"parent-scope".to_string()),
             "snapshot should preserve parent scope chain: {:?}",

@@ -1,6 +1,6 @@
 [package]
 name = "dcontext"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Distributed context propagation for Rust — scoped, type-safe, serializable"
 license = "MIT"
@@ -14,7 +14,7 @@ bincode = "1"
 base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync"] }
+pin-project-lite = "0.2"
 
 [features]
 default = ["base64", "context-key"]

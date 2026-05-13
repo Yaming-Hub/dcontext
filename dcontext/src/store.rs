@@ -26,7 +26,7 @@ pub(crate) const MAX_SCOPE_DEPTH: usize = 1024;
 /// User code (Clone, Drop, callbacks) runs **after** step 3, when the
 /// Cell holds a valid store. Re-entrant access during user code succeeds.
 /// Re-entrant access during steps 1–3 sees `None` and returns defaults.
-pub(crate) struct ContextStore {
+pub struct ContextStore {
     /// Frozen parent scope chain (immutable linked list).
     pub(crate) scope_chain: Option<Arc<ScopeNode>>,
     /// Active scope's values (sparse — only keys set in this scope).
@@ -60,7 +60,7 @@ pub(crate) struct ContextStore {
 
 impl ContextStore {
     /// Create a new store with an empty root scope.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             scope_chain: None,
             current_values: HashMap::new(),

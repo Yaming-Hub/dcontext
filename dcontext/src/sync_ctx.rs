@@ -154,7 +154,7 @@ pub fn with_context_value<R>(key: &str, f: impl FnOnce(&dyn std::any::Any) -> R)
 
 /// Take a snapshot of the current thread-local context.
 ///
-/// Used for propagating context to spawned threads or bridging to async.
+/// Used for propagating context to spawned threads or async tasks.
 pub fn snapshot() -> ContextSnapshot {
     try_apply(|store| {
         let values = store.collect_values();
@@ -169,18 +169,7 @@ pub fn snapshot() -> ContextSnapshot {
 
 /// Initialize/reset the thread-local context from a snapshot.
 ///
-/// Used when bridging from async context to a sync thread
-/// (e.g., in `spawn_blocking`).
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let snap = dcontext::async_ctx::snapshot();
-/// tokio::task::spawn_blocking(move || {
-///     dcontext::sync_ctx::restore(snap);
-///     do_blocking_work();
-/// }).await;
-/// ```
+/// Replace the current thread-local store from a snapshot.
 pub fn restore(snapshot: ContextSnapshot) {
     try_apply(|store| {
         let chain = snapshot.scope_chain.clone();
@@ -222,7 +211,7 @@ pub fn serialize_context() -> Result<Vec<u8>, crate::error::ContextError> {
 /// Pushes a new scope with deserialized values and activates a scope
 /// barrier that hides parent scopes.
 pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, crate::error::ContextError> {
-    crate::wire::deserialize_into(bytes, false)
+    crate::wire::deserialize_into(bytes)
 }
 
 // ── Legacy scope management (re-exported at crate root) ────────
