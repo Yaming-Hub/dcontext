@@ -28,7 +28,7 @@ impl AttachGuard {
 
 impl Drop for AttachGuard {
     fn drop(&mut self) {
-        CONTEXT.with(|cell| {
+        std::thread::LocalKey::with(&CONTEXT, |cell| {
             cell.set(self.prev.take());
         });
     }

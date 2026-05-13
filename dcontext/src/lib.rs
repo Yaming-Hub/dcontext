@@ -80,11 +80,6 @@ pub fn scope_chain() -> Vec<String> {
     try_apply(|store| store.scope_chain()).unwrap_or_default()
 }
 
-/// Get the current scope depth.
-pub fn current_depth() -> Option<usize> {
-    try_apply(|store| store.depth)
-}
-
 /// Set a context variable.
 pub fn set_context_variable<T>(key: &'static str, value: T)
 where
@@ -151,13 +146,13 @@ pub fn attach_snapshot(snap: ContextSnapshot) -> AttachGuard {
 
 /// Attach a `ContextStore` as root context. Returns an [`AttachGuard`].
 pub fn attach_store(store: ContextStore) -> AttachGuard {
-    let prev = CONTEXT.with(|cell| cell.replace(Some(store)));
+    let prev = std::thread::LocalKey::with(&CONTEXT, |cell| cell.replace(Some(store)));
     AttachGuard::new(prev)
 }
 
 /// Merge values from another store into the current context.
 /// Only merges values, not scope chain.
-pub fn merge_context(source: ContextStore) {
+pub fn merge_with(source: ContextStore) {
     let values = source.collect_values();
     try_apply(|store| {
         for (key, val) in values {

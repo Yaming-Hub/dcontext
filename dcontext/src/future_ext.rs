@@ -23,9 +23,9 @@ impl<F: Future> Future for WithContext<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let prev = CONTEXT.with(|cell| cell.replace(this.store.take()));
+        let prev = std::thread::LocalKey::with(&CONTEXT, |cell| cell.replace(this.store.take()));
         let result = this.inner.poll(cx);
-        *this.store = CONTEXT.with(|cell| cell.replace(prev));
+        *this.store = std::thread::LocalKey::with(&CONTEXT, |cell| cell.replace(prev));
         result
     }
 }
@@ -38,7 +38,7 @@ pub trait ContextFutureExt: Sized {
     ///
     /// On each poll, the store is swapped into thread-local storage.
     /// Mutations within the future persist across await points.
-    fn with_context(self, store: ContextStore) -> WithContext<Self> {
+    fn with(self, store: ContextStore) -> WithContext<Self> {
         WithContext {
             inner: self,
             store: Some(store),
@@ -47,11 +47,11 @@ pub trait ContextFutureExt: Sized {
 
     /// Attach a `ContextSnapshot` as the active store for this future.
     ///
-    /// Equivalent to `.with_context(snap.into())`.
+    /// Equivalent to `.with(snap.into())`.
     /// Use at inbound boundaries where a deserialized snapshot needs to
     /// become the active context.
     fn attach(self, snap: crate::ContextSnapshot) -> WithContext<Self> {
-        self.with_context(snap.into())
+        self.with(snap.into())
     }
 
     /// Fork the current context and wrap this future with the forked child.
@@ -59,7 +59,7 @@ pub trait ContextFutureExt: Sized {
     /// The child inherits parent values via frozen parent (cheap, Arc-shared).
     /// Writes in the child are isolated from the parent.
     fn fork(self) -> WithContext<Self> {
-        self.with_context(crate::fork())
+        self.with(crate::fork())
     }
 
     /// Capture the current context and wrap this future with it.
@@ -68,7 +68,7 @@ pub trait ContextFutureExt: Sized {
     /// it to a store.
     fn capture(self) -> WithContext<Self> {
         let snap = crate::capture();
-        self.with_context(snap.into())
+        self.with(snap.into())
     }
 
     /// Push a named scope into the given store and wrap this future.
@@ -80,7 +80,7 @@ pub trait ContextFutureExt: Sized {
     fn scope(self, name: &str) -> WithContext<Self> {
         let mut store = crate::fork();
         store.push_scope(Some(name.to_string()));
-        self.with_context(store)
+        self.with(store)
     }
 }
 

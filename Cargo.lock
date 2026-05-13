@@ -262,23 +262,11 @@ dependencies = [
  "base64",
  "bincode",
  "dcontext",
- "dcontext-tracing",
+ "dcontext-dactor",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "dcontext-tracing"
-version = "0.9.0"
-dependencies = [
- "dcontext",
- "serde",
- "tokio",
- "tracing",
- "tracing-core",
  "tracing-subscriber",
 ]
 

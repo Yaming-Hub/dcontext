@@ -30,7 +30,7 @@ fn unique_key(prefix: &str, suffix: &str) -> &'static str {
 }
 
 fn with_snapshot<F: Future>(snap: ContextSnapshot, fut: F) -> WithContext<F> {
-    fut.with_context(snap.into())
+    fut.with(snap.into())
 }
 
 async fn async_scope<F: Future>(name: &str, fut: F) -> F::Output {
@@ -1553,4 +1553,439 @@ async fn test_fork_scope_chain_preserved() {
         );
     })
     .await;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  merge_with tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_merge_with_adds_values() {
+    let key = unique_key("merge_add", "rid");
+    register::<RequestId>(key);
+
+    // Create a store with a value
+    let snap = {
+        let _scope = enter_scope();
+        set_context(key, RequestId("merged-val".into()));
+        snapshot()
+    };
+    let source: crate::store::ContextStore = snap.into();
+
+    // Clear context and merge
+    clear();
+    crate::merge_with(source);
+
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "merged-val");
+}
+
+#[test]
+fn test_merge_with_overwrites_existing() {
+    let key = unique_key("merge_overwrite", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("original".into()));
+
+    let snap = {
+        let _scope = enter_scope();
+        set_context(key, RequestId("new-val".into()));
+        snapshot()
+    };
+    let source: crate::store::ContextStore = snap.into();
+
+    crate::merge_with(source);
+
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "new-val");
+}
+
+// ══════════════════════════════════════════════════════════════
+//  capture() local-only exclusion tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_capture_excludes_local_only() {
+    let key_remote = unique_key("cap_local", "remote");
+    let key_local = unique_key("cap_local", "local");
+    register::<RequestId>(key_remote);
+    register_with::<RequestId>(key_local, |o| o.local_only());
+
+    set_context(key_remote, RequestId("remote-val".into()));
+    set_context(key_local, RequestId("local-val".into()));
+
+    let snap = capture();
+    // Remote key should be in snapshot
+    assert!(snap.values.contains_key(key_remote));
+    // Local-only key should NOT be in snapshot
+    assert!(!snap.values.contains_key(key_local));
+}
+
+#[test]
+fn test_fork_preserves_local_only() {
+    let key_local = unique_key("fork_local", "local");
+    register_with::<RequestId>(key_local, |o| o.local_only());
+
+    set_context(key_local, RequestId("local-val".into()));
+
+    // Fork should preserve all values including local-only
+    let forked = crate::fork();
+    let _g = crate::attach_store(forked);
+    assert_eq!(get_context::<RequestId>(key_local).unwrap().0, "local-val");
+}
+
+// ══════════════════════════════════════════════════════════════
+//  From<ContextSnapshot> registry validation tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_snapshot_to_store_filters_unknown_keys() {
+    let key = unique_key("snap_filter", "known");
+    register::<RequestId>(key);
+
+    // Manually construct a snapshot with an unknown key
+    let mut values = std::collections::HashMap::new();
+    values.insert(
+        key,
+        std::sync::Arc::new(RequestId("known-val".into()))
+            as std::sync::Arc<dyn crate::value::ContextValue>,
+    );
+    values.insert(
+        "totally_unknown_key_xyz",
+        std::sync::Arc::new(RequestId("ghost".into()))
+            as std::sync::Arc<dyn crate::value::ContextValue>,
+    );
+
+    let snap = ContextSnapshot {
+        values: std::sync::Arc::new(values),
+        scope_chain: vec![],
+    };
+
+    let store: crate::store::ContextStore = snap.into();
+    let all = store.collect_values();
+
+    // Known key should be present
+    assert!(all.contains_key(key));
+    // Unknown key should be filtered out
+    assert!(!all.contains_key("totally_unknown_key_xyz"));
+}
+
+#[test]
+fn test_snapshot_to_store_filters_local_keys() {
+    let key_local = unique_key("snap_local_filter", "local");
+    register_with::<RequestId>(key_local, |o| o.local_only());
+
+    // Even if a snapshot somehow has a local key, converting to store filters it
+    let mut values = std::collections::HashMap::new();
+    values.insert(
+        key_local,
+        std::sync::Arc::new(RequestId("local-ghost".into()))
+            as std::sync::Arc<dyn crate::value::ContextValue>,
+    );
+
+    let snap = ContextSnapshot {
+        values: std::sync::Arc::new(values),
+        scope_chain: vec![],
+    };
+
+    let store: crate::store::ContextStore = snap.into();
+    let all = store.collect_values();
+
+    assert!(!all.contains_key(key_local));
+}
+
+// ══════════════════════════════════════════════════════════════
+//  ContextFutureExt trait method tests
+// ══════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_future_ext_attach() {
+    let key = unique_key("fut_attach", "rid");
+    register::<RequestId>(key);
+
+    let snap = {
+        let _scope = enter_scope();
+        set_context(key, RequestId("attached".into()));
+        snapshot()
+    };
+
+    let result = async { get_context::<RequestId>(key).unwrap() }
+        .attach(snap)
+        .await;
+
+    assert_eq!(result.0, "attached");
+}
+
+#[tokio::test]
+async fn test_future_ext_fork() {
+    let key = unique_key("fut_fork", "rid");
+    register::<RequestId>(key);
+
+    // Set up context with a value
+    let snap = {
+        let _scope = enter_scope();
+        set_context(key, RequestId("parent-val".into()));
+        snapshot()
+    };
+
+    with_snapshot(snap, async {
+        // Fork inherits parent values
+        let result = async {
+            let val = get_context::<RequestId>(key).unwrap();
+            // Write in fork is isolated
+            set_context(key, RequestId("forked".into()));
+            val
+        }
+        .fork()
+        .await;
+
+        assert_eq!(result.0, "parent-val");
+        // Parent value unchanged
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "parent-val");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_future_ext_scope() {
+    let key = unique_key("fut_scope", "rid");
+    register::<RequestId>(key);
+
+    let snap = {
+        let _scope = enter_scope();
+        set_context(key, RequestId("base".into()));
+        snapshot()
+    };
+
+    with_snapshot(snap, async {
+        let chain = async {
+            set_context(key, RequestId("scoped".into()));
+            scope_chain()
+        }
+        .scope("my-scope")
+        .await;
+
+        assert!(chain.contains(&"my-scope".to_string()));
+        // Parent value not affected by scoped write
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "base");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_future_ext_capture() {
+    let key = unique_key("fut_capture", "rid");
+    register::<RequestId>(key);
+
+    let snap = {
+        let _scope = enter_scope();
+        set_context(key, RequestId("original".into()));
+        snapshot()
+    };
+
+    with_snapshot(snap, async {
+        let result = async { get_context::<RequestId>(key).unwrap() }
+            .capture()
+            .await;
+
+        assert_eq!(result.0, "original");
+    })
+    .await;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  update_context_variable tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_update_context_variable_modifies_value() {
+    let key = unique_key("update_mod", "uid");
+    register::<UserId>(key);
+
+    set_context(key, UserId(10));
+    update_context(key, |v: UserId| UserId(v.0 + 5));
+
+    assert_eq!(get_context::<UserId>(key).unwrap().0, 15);
+}
+
+#[test]
+fn test_update_context_variable_uses_default_when_missing() {
+    let key = unique_key("update_default", "uid");
+    register::<UserId>(key);
+
+    // No value set — update should use Default (0)
+    update_context(key, |v: UserId| UserId(v.0 + 42));
+
+    assert_eq!(get_context::<UserId>(key).unwrap().0, 42);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  clear() tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_clear_removes_all_values() {
+    let key = unique_key("clear_all", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("before-clear".into()));
+    assert!(get_context::<RequestId>(key).is_some());
+
+    clear();
+
+    assert_eq!(get_context::<RequestId>(key), None);
+}
+
+#[test]
+fn test_clear_resets_scope_chain() {
+    let _g = enter_named_scope("before-clear");
+    assert!(!scope_chain().is_empty());
+
+    clear();
+
+    assert!(scope_chain().is_empty());
+}
+
+// ══════════════════════════════════════════════════════════════
+//  AttachGuard nesting tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_attach_guard_restores_on_drop() {
+    let key = unique_key("attach_restore", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("outer".into()));
+
+    {
+        let snap = {
+            let _scope = enter_scope();
+            set_context(key, RequestId("inner".into()));
+            snapshot()
+        };
+        let _guard = attach_snapshot(snap);
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "inner");
+    }
+
+    // After guard drops, previous context restored
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "outer");
+}
+
+#[test]
+fn test_nested_attach_guards() {
+    let key = unique_key("attach_nested", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("level-0".into()));
+
+    let snap1 = {
+        let _scope = enter_scope();
+        set_context(key, RequestId("level-1".into()));
+        snapshot()
+    };
+    let snap2 = {
+        let _scope = enter_scope();
+        set_context(key, RequestId("level-2".into()));
+        snapshot()
+    };
+
+    {
+        let _g1 = attach_snapshot(snap1);
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "level-1");
+
+        {
+            let _g2 = attach_snapshot(snap2);
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "level-2");
+        }
+        // g2 dropped — back to level-1
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "level-1");
+    }
+    // g1 dropped — back to level-0
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "level-0");
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Snapshot serialize/deserialize roundtrip tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_snapshot_serialize_deserialize_roundtrip() {
+    let key = unique_key("snap_roundtrip", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("wire-val".into()));
+    let _scope = enter_named_scope("wire-scope");
+
+    let snap = capture();
+    let bytes = snap.serialize().unwrap();
+    let restored = ContextSnapshot::deserialize(&bytes).unwrap();
+
+    let _g = attach_snapshot(restored);
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "wire-val");
+    assert!(scope_chain().contains(&"wire-scope".to_string()));
+}
+
+#[test]
+fn test_snapshot_deserialize_invalid_bytes() {
+    let result = ContextSnapshot::deserialize(&[0xFF, 0xFF, 0xFF]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_snapshot_serialize_excludes_local() {
+    let key_remote = unique_key("snap_ser_remote", "remote");
+    let key_local = unique_key("snap_ser_local", "local");
+    register::<RequestId>(key_remote);
+    register_with::<RequestId>(key_local, |o| o.local_only());
+
+    set_context(key_remote, RequestId("remote".into()));
+    set_context(key_local, RequestId("local".into()));
+
+    let snap = capture();
+    let bytes = snap.serialize().unwrap();
+    let restored = ContextSnapshot::deserialize(&bytes).unwrap();
+
+    let _g = attach_snapshot(restored);
+    assert_eq!(get_context::<RequestId>(key_remote).unwrap().0, "remote");
+    // Local key not serialized, so not present after deserialize
+    assert_eq!(get_context::<RequestId>(key_local), None);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Thread safety tests
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn test_context_is_thread_isolated() {
+    let key = unique_key("thread_iso", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("main-thread".into()));
+
+    let handle = std::thread::spawn(move || {
+        // Different thread has its own context
+        assert_eq!(get_context::<RequestId>(key), None);
+        set_context(key, RequestId("other-thread".into()));
+        get_context::<RequestId>(key).unwrap()
+    });
+
+    let other_val = handle.join().unwrap();
+    assert_eq!(other_val.0, "other-thread");
+    // Main thread unchanged
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "main-thread");
+}
+
+#[test]
+fn test_snapshot_can_cross_threads() {
+    let key = unique_key("snap_cross_thread", "rid");
+    register::<RequestId>(key);
+
+    set_context(key, RequestId("cross-thread".into()));
+    let snap = capture();
+
+    let handle = std::thread::spawn(move || {
+        let _g = attach_snapshot(snap);
+        get_context::<RequestId>(key).unwrap()
+    });
+
+    let result = handle.join().unwrap();
+    assert_eq!(result.0, "cross-thread");
 }

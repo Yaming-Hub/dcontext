@@ -112,7 +112,7 @@ fn bench_attach_vs_with_fork(c: &mut Criterion) {
                         populate_context(num_keys);
                         dcontext::fork()
                     });
-                    async {}.with_context(store).await;
+                    async {}.with(store).await;
                 });
             },
         );
@@ -176,7 +176,7 @@ fn bench_concurrent_spawn(c: &mut Criterion) {
                             let _v: BenchValue = dcontext::get_context_variable(KEYS[2]).unwrap();
                             let _v: BenchValue = dcontext::get_context_variable(KEYS[4]).unwrap();
                         }
-                        .with_context(s),
+                        .with(s),
                     ));
                 }
                 for h in handles {
@@ -211,7 +211,7 @@ fn bench_read_throughput(c: &mut Criterion) {
                             let _v: BenchValue = dcontext::get_context_variable(KEYS[i]).unwrap();
                         }
                     }
-                    .with_context(s),
+                    .with(s),
                 ));
             }
             for t in tasks {
