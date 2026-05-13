@@ -91,6 +91,15 @@ fn deserialize_context(bytes: &[u8]) -> Result<AttachGuard, ContextError> {
     ContextSnapshot::deserialize(bytes).map(attach_snapshot)
 }
 
+fn snapshot_context<T>(snap: &ContextSnapshot, key: &str) -> Option<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    snap.values
+        .get(key)
+        .and_then(|arc| arc.as_any().downcast_ref::<T>().cloned())
+}
+
 // ══════════════════════════════════════════════════════════════
 //  Registration tests
 // ══════════════════════════════════════════════════════════════
@@ -408,6 +417,155 @@ fn test_serialize_multiple_keys() {
         assert_eq!(get_context::<RequestId>(key_a).unwrap().0, "req-multi");
         assert_eq!(get_context::<UserId>(key_b).unwrap().0, 42);
     }
+}
+
+#[test]
+fn test_serialize_deserialize_with_isolated_registry() {
+    let key_rid = "isolated.serialize.request_id";
+    let key_uid = "isolated.serialize.user_id";
+
+    let mut builder = RegistryBuilder::new();
+    builder.register::<RequestId>(key_rid);
+    builder.register_with::<UserId>(key_uid, |opts| opts.version(2));
+
+    let map = builder.into_map();
+    let registry = crate::registry::Registry::new(&map);
+
+    let values: HashMap<&'static str, Arc<dyn ContextValue>> = HashMap::from([
+        (
+            key_rid,
+            Arc::new(RequestId("iso-req".into())) as Arc<dyn ContextValue>,
+        ),
+        (key_uid, Arc::new(UserId(7)) as Arc<dyn ContextValue>),
+    ]);
+
+    let bytes =
+        crate::wire::serialize_from(&registry, values, vec!["rpc".into(), "handler".into()])
+            .unwrap();
+
+    let snap = crate::wire::deserialize_to_snapshot(&registry, &bytes).unwrap();
+    assert_eq!(
+        snap.scope_chain(),
+        &["rpc".to_string(), "handler".to_string()]
+    );
+    assert_eq!(
+        snapshot_context::<RequestId>(&snap, key_rid),
+        Some(RequestId("iso-req".into()))
+    );
+    assert_eq!(snapshot_context::<UserId>(&snap, key_uid), Some(UserId(7)));
+}
+
+#[test]
+fn test_capture_with_custom_registry_excludes_local() {
+    let key_public = "isolated.capture.public";
+    let key_local = "isolated.capture.local";
+
+    let mut builder = RegistryBuilder::new();
+    builder.register::<RequestId>(key_public);
+    builder.register_with::<UserId>(key_local, |opts| opts.local_only());
+
+    let map = builder.into_map();
+    let registry = crate::registry::Registry::new(&map);
+
+    let mut store = ContextStore::new();
+    store.set_value(key_public, Arc::new(RequestId("root".into())));
+    store.set_value(key_local, Arc::new(UserId(1)));
+    store.push_scope(&registry, Some("request".into()));
+    store.set_value(key_public, Arc::new(RequestId("child".into())));
+    store.set_value(key_local, Arc::new(UserId(2)));
+
+    let snap = crate::capture_with_registry(&store, &registry);
+
+    assert_eq!(snap.scope_chain(), &["request".to_string()]);
+    assert_eq!(
+        snapshot_context::<RequestId>(&snap, key_public),
+        Some(RequestId("child".into()))
+    );
+    assert_eq!(snapshot_context::<UserId>(&snap, key_local), None);
+}
+
+#[test]
+fn test_from_snapshot_with_isolated_registry_filters_invalid() {
+    let key_valid = "isolated.snapshot.valid";
+    let key_local = "isolated.snapshot.local";
+    let key_mismatch = "isolated.snapshot.mismatch";
+    let key_unknown = "isolated.snapshot.unknown";
+
+    let mut builder = RegistryBuilder::new();
+    builder.register::<RequestId>(key_valid);
+    builder.register_with::<UserId>(key_local, |opts| opts.local_only());
+    builder.register::<UserId>(key_mismatch);
+
+    let map = builder.into_map();
+    let registry = crate::registry::Registry::new(&map);
+
+    let values: HashMap<&'static str, Arc<dyn ContextValue>> = HashMap::from([
+        (
+            key_valid,
+            Arc::new(RequestId("keep-me".into())) as Arc<dyn ContextValue>,
+        ),
+        (key_local, Arc::new(UserId(9)) as Arc<dyn ContextValue>),
+        (
+            key_mismatch,
+            Arc::new(RequestId("wrong-type".into())) as Arc<dyn ContextValue>,
+        ),
+        (
+            key_unknown,
+            Arc::new(RequestId("unknown".into())) as Arc<dyn ContextValue>,
+        ),
+    ]);
+    let snap = ContextSnapshot {
+        values: Arc::new(values),
+        scope_chain: vec!["remote".into()],
+    };
+
+    let store = crate::store_from_snapshot_with_registry(snap, &registry);
+
+    assert_eq!(store.scope_chain(), vec!["remote"]);
+    assert_eq!(
+        store
+            .get_value(key_valid)
+            .and_then(|arc| arc.as_any().downcast_ref::<RequestId>().cloned()),
+        Some(RequestId("keep-me".into()))
+    );
+    assert!(store.get_value(key_local).is_none());
+    assert!(store.get_value(key_mismatch).is_none());
+    assert!(store.get_value(key_unknown).is_none());
+}
+
+#[test]
+fn test_push_scope_caches_with_isolated_registry() {
+    let key_cached = "isolated.cache.cached";
+    let key_plain = "isolated.cache.plain";
+
+    let mut builder = RegistryBuilder::new();
+    builder.register_with::<RequestId>(key_cached, |opts| opts.cached());
+    builder.register::<UserId>(key_plain);
+
+    let map = builder.into_map();
+    let registry = crate::registry::Registry::new(&map);
+
+    let mut store = ContextStore::new();
+    store.set_value(key_cached, Arc::new(RequestId("cached-root".into())));
+    store.set_value(key_plain, Arc::new(UserId(42)));
+
+    let depth = store.push_scope(&registry, Some("child".into()));
+
+    assert_eq!(depth, 2);
+    assert!(store.current_values.contains_key(key_cached));
+    assert!(!store.current_values.contains_key(key_plain));
+    assert_eq!(
+        store
+            .get_value(key_cached)
+            .and_then(|arc| arc.as_any().downcast_ref::<RequestId>().cloned()),
+        Some(RequestId("cached-root".into()))
+    );
+    assert_eq!(
+        store
+            .get_value(key_plain)
+            .and_then(|arc| arc.as_any().downcast_ref::<UserId>().cloned()),
+        Some(UserId(42))
+    );
 }
 
 // ══════════════════════════════════════════════════════════════

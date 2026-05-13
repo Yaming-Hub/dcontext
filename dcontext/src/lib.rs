@@ -67,6 +67,38 @@ use crate::value::ContextValue;
 
 // ── Public API ─────────────────────────────────────────────────
 
+pub(crate) fn capture_with_registry(
+    store: &ContextStore,
+    registry: &registry::Registry<'_>,
+) -> ContextSnapshot {
+    let values: HashMap<&'static str, Arc<dyn ContextValue>> = store
+        .collect_values()
+        .into_iter()
+        .filter(|(k, _)| !registry.is_local_key(k))
+        .collect();
+    let scope_chain = store.scope_chain();
+    ContextSnapshot {
+        values: Arc::new(values),
+        scope_chain,
+    }
+}
+
+pub(crate) fn store_from_snapshot_with_registry(
+    snap: ContextSnapshot,
+    registry: &registry::Registry<'_>,
+) -> ContextStore {
+    let ContextSnapshot {
+        values,
+        scope_chain,
+    } = snap;
+    let values: HashMap<&'static str, Arc<dyn ContextValue>> = values
+        .iter()
+        .filter(|(k, v)| registry.is_valid_value(k, v.as_ref()) && !registry.is_local_key(k))
+        .map(|(k, v)| (*k, Arc::clone(v)))
+        .collect();
+    ContextStore::from_values_with_chain(values, scope_chain)
+}
+
 /// Push a named scope onto the context store.
 /// Returns a [`ScopeGuard`] that pops the scope on drop.
 pub fn push_scope(name: &str) -> ScopeGuard {
@@ -119,19 +151,7 @@ where
 /// Local-only variables (registered with `.local_only()`) are excluded.
 pub fn capture() -> ContextSnapshot {
     registry::with_global_registry(|registry| {
-        try_apply(|store| {
-            let values: HashMap<&'static str, Arc<dyn ContextValue>> = store
-                .collect_values()
-                .into_iter()
-                .filter(|(k, _)| !registry.is_local_key(k))
-                .collect();
-            let scope_chain = store.scope_chain();
-            ContextSnapshot {
-                values: Arc::new(values),
-                scope_chain,
-            }
-        })
-        .unwrap_or_default()
+        try_apply(|store| capture_with_registry(store, registry)).unwrap_or_default()
     })
 }
 
@@ -176,20 +196,7 @@ pub fn clear() {
 
 impl From<ContextSnapshot> for ContextStore {
     fn from(snap: ContextSnapshot) -> Self {
-        registry::with_global_registry(|registry| {
-            let ContextSnapshot {
-                values,
-                scope_chain,
-            } = snap;
-            let values: HashMap<&'static str, Arc<dyn ContextValue>> = values
-                .iter()
-                .filter(|(k, v)| {
-                    registry.is_valid_value(k, v.as_ref()) && !registry.is_local_key(k)
-                })
-                .map(|(k, v)| (*k, Arc::clone(v)))
-                .collect();
-            ContextStore::from_values_with_chain(values, scope_chain)
-        })
+        registry::with_global_registry(|registry| store_from_snapshot_with_registry(snap, registry))
     }
 }
 
