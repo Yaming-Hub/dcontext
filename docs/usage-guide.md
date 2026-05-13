@@ -269,45 +269,128 @@ let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
 assert_eq!(rid.0, "req-123");
 ```
 
-### Spawning threads with context
+### Context inheritance modes
 
-Root-level thread helpers are still available. Capture happens from the sync
-store, so thread code should read from `sync_ctx`:
+When propagating context across boundaries, `dcontext` supports two capture
+modes via [`ContextInheritance`]:
+
+| Mode | Cost | Semantics |
+|------|------|-----------|
+| **Fork** (default) | O(current scope keys) | Child gets a frozen Arc reference to the parent's scope chain. Reads fall through; writes are copy-on-write isolated. |
+| **Snapshot** | O(depth × keys) | Full deep copy of all effective values into a flat HashMap. Self-contained, no references back to parent. |
+
+**When to use each:**
+
+- **Fork** — best for parent-child task/thread relationships where the parent
+  outlives the child. Cheap to create, shares values via Arc.
+- **Snapshot** — best for cross-thread message passing, queuing, or any case
+  where the context must be self-contained and the sender's context may change
+  or disappear before the receiver uses it.
+
+### Spawn helpers (capture + spawn)
+
+These helpers capture context and immediately spawn a thread or task:
 
 ```rust
-use dcontext::{spawn_with_context, sync_ctx};
+use dcontext::{ContextInheritance, spawn_with_sync_context, spawn_with_async_context,
+               spawn_blocking_with_async_context};
 
+// Sync → async task (e.g., from a sync handler into a Tokio task)
+spawn_with_sync_context(ContextInheritance::Fork, async {
+    let rid = dcontext::async_ctx::get_context::<RequestId>("request_id").unwrap();
+});
+
+// Async → async child task
+spawn_with_async_context(ContextInheritance::Fork, async {
+    let rid = dcontext::async_ctx::get_context::<RequestId>("request_id").unwrap();
+});
+
+// Async → blocking thread
+spawn_blocking_with_async_context(ContextInheritance::Fork, || {
+    let rid = dcontext::sync_ctx::get_context::<RequestId>("request_id").unwrap();
+});
+```
+
+### Wrap helpers (capture now, spawn later)
+
+When you need to capture context but **not** spawn immediately — e.g., for
+task queues, retry wrappers, rate limiters, or priority queues — use the
+wrap helpers:
+
+```rust
+use dcontext::{ContextInheritance, wrap_with_sync_context, wrap_with_async_context};
+
+// Capture sync context into a future (does NOT spawn)
+let wrapped = wrap_with_sync_context(ContextInheritance::Fork, async {
+    dcontext::async_ctx::get_context::<RequestId>("request_id").unwrap()
+});
+
+// Enqueue for later execution
+channel.send(Box::pin(wrapped)).await;
+
+// Consumer spawns when ready
+let task = channel.recv().await.unwrap();
+tokio::spawn(task);
+```
+
+These decompose the spawn helpers into capture + wrap, leaving spawn to the
+caller. The wrapped future carries its own task-local context scope.
+
+### Cross-thread message passing (use Snapshot)
+
+When sending context via a message/channel to another thread (not spawning a
+child), use **Snapshot**. The snapshot is self-contained — no references back
+to the sender's store — so it remains valid even after the sender's context
+changes or is dropped:
+
+```rust
+use dcontext::sync_ctx;
+
+// Sender thread
 sync_ctx::set_context("request_id", RequestId("req-001".into()));
+let snap = sync_ctx::snapshot();  // self-contained deep copy
+tx.send(Message { context: snap, payload: data }).unwrap();
 
-let handle = spawn_with_context("worker-thread", || {
-    let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
-    assert_eq!(rid.0, "req-001");
-})
-.unwrap();
-
-handle.join().unwrap();
+// Receiver thread (different thread)
+let msg = rx.recv().unwrap();
+let _guard = sync_ctx::attach(msg.context);  // install into receiver's store
+let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
 ```
 
-### Wrapping closures
+**Do not use Fork for message passing** — Fork creates an `Arc`-shared
+reference to the sender's live store. If the sender's scope is popped before
+the receiver reads the context, the forked child may see stale or missing
+values.
 
-For thread pools or callbacks where you need a callable that carries context:
+### Direct wire deserialization (no store mutation)
+
+When receiving wire bytes from an RPC or message queue, you can deserialize
+directly into a `ContextSnapshot` without mutating any live store:
 
 ```rust
-use dcontext::{wrap_with_context, wrap_with_context_fn, sync_ctx};
+// Wire bytes arrive from a remote process
+let snap = dcontext::deserialize_to_snapshot(&wire_bytes)
+    .unwrap_or_default();
 
-let task = wrap_with_context(|| {
-    let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
-    process(rid);
-});
-thread_pool.execute(task);
-
-let handler = wrap_with_context_fn(|| {
-    sync_ctx::get_context::<RequestId>("request_id").unwrap()
-});
-for _ in 0..10 {
-    handler();
-}
+// Use the snapshot however you need:
+let _guard = sync_ctx::attach(snap.clone());  // install in sync context
+// or
+async_ctx::with_context(snap, async { ... }).await;  // install in async context
 ```
+
+This avoids the old pattern of `deserialize_context` → `snapshot()` → `drop(guard)`.
+
+### Propagation summary
+
+| Pattern | Recommended API |
+|---------|----------------|
+| Parent spawns child task (async → async) | `spawn_with_async_context(Fork, fut)` |
+| Parent spawns child task (sync → async) | `spawn_with_sync_context(Fork, fut)` |
+| Async task → blocking thread | `spawn_blocking_with_async_context(Fork, f)` |
+| Capture now, spawn/execute later | `wrap_with_sync_context(Fork, fut)` or `wrap_with_async_context(Fork, fut)` |
+| Send context via channel/message to another thread | `sync_ctx::snapshot()` → send `ContextSnapshot` |
+| Receive wire bytes from remote process | `deserialize_to_snapshot(&bytes)` |
+| HTTP middleware: wire bytes → async handler | `deserialize_to_snapshot(&bytes)` → `async_ctx::with_context(snap, fut)` |
 
 ## 6. Async Integration (Tokio)
 

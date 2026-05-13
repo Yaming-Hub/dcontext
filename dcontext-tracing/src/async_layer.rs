@@ -250,7 +250,8 @@ where
             None => return,
         };
 
-        // Check if we've already pushed a scope for this span (re-enter after yield).
+        // Fast path: check if we've already pushed a scope for this span
+        // (re-enter after yield). Uses a read lock for the common case.
         {
             let extensions = span.extensions();
             if extensions.get::<AsyncScopeState>().is_some() {
@@ -267,6 +268,20 @@ where
         let depth = guard.expected_depth();
         std::mem::forget(guard);
 
+        // Store depth in span extensions for verification on close.
+        // Re-check under the write lock to handle the race where another
+        // task entered the same shared span concurrently (TOCTOU between
+        // the read-lock check above and this write-lock acquisition).
+        {
+            let mut extensions = span.extensions_mut();
+            if extensions.get_mut::<AsyncScopeState>().is_some() {
+                // Another task won the race — undo our push and bail out.
+                dcontext::async_ctx::pop_scope(depth);
+                return;
+            }
+            extensions.insert(AsyncScopeState { depth });
+        }
+
         // Level 2: Apply field extraction into task-local context
         apply_field_extraction(&span);
 
@@ -277,10 +292,6 @@ where
 
         // Level 4: Record context values into span fields
         record_context_to_span(&span);
-
-        // Store depth in span extensions for verification on close
-        let mut extensions = span.extensions_mut();
-        extensions.insert(AsyncScopeState { depth });
     }
 
     fn on_exit(&self, _id: &span::Id, _ctx: Context<'_, S>) {
