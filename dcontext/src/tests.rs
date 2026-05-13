@@ -39,8 +39,10 @@ async fn async_scope<F: Future>(name: &str, fut: F) -> F::Output {
 }
 
 fn enter_scope() -> ScopeGuard {
-    crate::store::try_apply(|store| ScopeGuard::new(store.push_scope(None)))
-        .unwrap_or_else(ScopeGuard::noop)
+    crate::registry::with_global_registry(|registry| {
+        crate::store::try_apply(|store| ScopeGuard::new(store.push_scope(registry, None)))
+            .unwrap_or_else(ScopeGuard::noop)
+    })
 }
 
 fn enter_named_scope(name: impl Into<String>) -> ScopeGuard {

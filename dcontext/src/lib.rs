@@ -71,8 +71,10 @@ use crate::value::ContextValue;
 /// Returns a [`ScopeGuard`] that pops the scope on drop.
 pub fn push_scope(name: &str) -> ScopeGuard {
     let name = name.to_string();
-    try_apply(|store| ScopeGuard::new(store.push_scope(Some(name))))
-        .unwrap_or_else(ScopeGuard::noop)
+    registry::with_global_registry(|registry| {
+        try_apply(|store| ScopeGuard::new(store.push_scope(registry, Some(name))))
+            .unwrap_or_else(ScopeGuard::noop)
+    })
 }
 
 /// Get the current scope chain.
@@ -116,19 +118,21 @@ where
 /// Capture a snapshot of the current context.
 /// Local-only variables (registered with `.local_only()`) are excluded.
 pub fn capture() -> ContextSnapshot {
-    try_apply(|store| {
-        let values: HashMap<&'static str, Arc<dyn ContextValue>> = store
-            .collect_values()
-            .into_iter()
-            .filter(|(k, _)| !registry::is_local_key(k))
-            .collect();
-        let scope_chain = store.scope_chain();
-        ContextSnapshot {
-            values: Arc::new(values),
-            scope_chain,
-        }
+    registry::with_global_registry(|registry| {
+        try_apply(|store| {
+            let values: HashMap<&'static str, Arc<dyn ContextValue>> = store
+                .collect_values()
+                .into_iter()
+                .filter(|(k, _)| !registry.is_local_key(k))
+                .collect();
+            let scope_chain = store.scope_chain();
+            ContextSnapshot {
+                values: Arc::new(values),
+                scope_chain,
+            }
+        })
+        .unwrap_or_default()
     })
-    .unwrap_or_default()
 }
 
 /// Fork the current context. Creates a child store with a frozen parent.
@@ -172,13 +176,20 @@ pub fn clear() {
 
 impl From<ContextSnapshot> for ContextStore {
     fn from(snap: ContextSnapshot) -> Self {
-        let values: HashMap<&'static str, Arc<dyn ContextValue>> = snap
-            .values
-            .iter()
-            .filter(|(k, v)| registry::is_valid_value(k, v.as_ref()) && !registry::is_local_key(k))
-            .map(|(k, v)| (*k, Arc::clone(v)))
-            .collect();
-        ContextStore::from_values_with_chain(values, snap.scope_chain)
+        registry::with_global_registry(|registry| {
+            let ContextSnapshot {
+                values,
+                scope_chain,
+            } = snap;
+            let values: HashMap<&'static str, Arc<dyn ContextValue>> = values
+                .iter()
+                .filter(|(k, v)| {
+                    registry.is_valid_value(k, v.as_ref()) && !registry.is_local_key(k)
+                })
+                .map(|(k, v)| (*k, Arc::clone(v)))
+                .collect();
+            ContextStore::from_values_with_chain(values, scope_chain)
+        })
     }
 }
 

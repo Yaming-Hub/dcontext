@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ContextError;
-use crate::registry;
+use crate::registry::Registry;
 use crate::snapshot::ContextSnapshot;
 use crate::value::ContextValue;
 
@@ -30,13 +30,14 @@ type DeserializedEntry = (&'static str, Box<dyn ContextValue>);
 
 /// Serialize a snapshot into wire-format bytes.
 pub(crate) fn serialize_from(
+    registry: &Registry<'_>,
     values: HashMap<&'static str, Arc<dyn ContextValue>>,
     scope_chain_val: Vec<String>,
 ) -> Result<Vec<u8>, ContextError> {
     let mut entries = Vec::new();
 
     for (key, val) in &values {
-        let info = registry::get_serialization_info(key);
+        let info = registry.get_serialization_info(key);
 
         let value_bytes = match info.as_ref().and_then(|i| i.serialize_fn.as_ref()) {
             Some(custom_ser) => custom_ser(val.as_ref())?,
@@ -65,12 +66,15 @@ pub(crate) fn serialize_from(
 }
 
 /// Deserialize bytes into a standalone snapshot.
-pub(crate) fn deserialize_to_snapshot(bytes: &[u8]) -> Result<ContextSnapshot, ContextError> {
+pub(crate) fn deserialize_to_snapshot(
+    registry: &Registry<'_>,
+    bytes: &[u8],
+) -> Result<ContextSnapshot, ContextError> {
     let (entries, scope_chain) = deserialize_wire(bytes)?;
     let mut values = HashMap::new();
 
     for entry in &entries {
-        if let Some((static_key, val)) = deserialize_entry(entry)? {
+        if let Some((static_key, val)) = deserialize_entry(registry, entry)? {
             values.insert(static_key, Arc::from(val));
         }
     }
@@ -81,9 +85,12 @@ pub(crate) fn deserialize_to_snapshot(bytes: &[u8]) -> Result<ContextSnapshot, C
     })
 }
 
-fn deserialize_entry(entry: &WireEntry) -> Result<Option<DeserializedEntry>, ContextError> {
+fn deserialize_entry(
+    registry: &Registry<'_>,
+    entry: &WireEntry,
+) -> Result<Option<DeserializedEntry>, ContextError> {
     let key_str = entry.key.as_str();
-    let restored = registry::with_registration(key_str, |reg| {
+    let restored = registry.with_registration(key_str, |reg| {
         if reg.deserializers.is_empty() {
             return None;
         }

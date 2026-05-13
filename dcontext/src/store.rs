@@ -7,6 +7,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::registry::Registry;
 use crate::scope::ScopeNode;
 use crate::value::ContextValue;
 
@@ -136,7 +137,7 @@ impl ContextStore {
     /// that only increments the depth counter without allocating a node.
     ///
     /// Returns the new depth.
-    pub(crate) fn push_scope(&mut self, name: Option<String>) -> usize {
+    pub(crate) fn push_scope(&mut self, registry: &Registry<'_>, name: Option<String>) -> usize {
         self.depth += 1;
 
         // Beyond the limit: dead scope — just bump depth, no real work.
@@ -144,7 +145,7 @@ impl ContextStore {
             return self.depth;
         }
 
-        let cached = crate::registry::cached_keys();
+        let cached = registry.cached_keys();
         let mut cached_values: Vec<(&'static str, Arc<dyn ContextValue>)> = Vec::new();
         for &key in &cached {
             if let Some(val) = self.get_value(key) {
@@ -406,7 +407,8 @@ mod tests {
 
         // Push up to the limit — all real scopes.
         for i in 0..MAX_SCOPE_DEPTH {
-            let depth = store.push_scope(Some(format!("scope_{}", i)));
+            let registry = crate::registry::Registry::empty();
+            let depth = store.push_scope(&registry, Some(format!("scope_{}", i)));
             assert_eq!(depth, i + 2); // depth starts at 1, first push yields 2
         }
         assert_eq!(store.depth, MAX_SCOPE_DEPTH + 1);
@@ -424,9 +426,10 @@ mod tests {
         assert_eq!(real_node_count, MAX_SCOPE_DEPTH);
 
         // Push beyond the limit — dead scopes.
-        let dead_depth_1 = store.push_scope(Some("dead_1".to_string()));
+        let registry = crate::registry::Registry::empty();
+        let dead_depth_1 = store.push_scope(&registry, Some("dead_1".to_string()));
         assert_eq!(dead_depth_1, MAX_SCOPE_DEPTH + 2);
-        let dead_depth_2 = store.push_scope(Some("dead_2".to_string()));
+        let dead_depth_2 = store.push_scope(&registry, Some("dead_2".to_string()));
         assert_eq!(dead_depth_2, MAX_SCOPE_DEPTH + 3);
 
         // Real node count should NOT grow — dead scopes are not real.
@@ -466,12 +469,13 @@ mod tests {
         let mut store = ContextStore::new();
 
         // Push one real scope and set a value.
-        store.push_scope(None);
+        let registry = crate::registry::Registry::empty();
+        store.push_scope(&registry, None);
         store.set_value("persistent", Arc::new(42u64));
 
         // Push up to and beyond the limit.
         for _ in 0..MAX_SCOPE_DEPTH + 5 {
-            store.push_scope(None);
+            store.push_scope(&registry, None);
         }
 
         // The value set in the real scope should still be readable.
@@ -496,7 +500,8 @@ mod tests {
         // Push well beyond the limit.
         let total = MAX_SCOPE_DEPTH + 10;
         for _ in 0..total {
-            let d = store.push_scope(None);
+            let registry = crate::registry::Registry::empty();
+            let d = store.push_scope(&registry, None);
             depths.push(d);
         }
         assert_eq!(store.depth, total + 1);

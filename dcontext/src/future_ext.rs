@@ -78,9 +78,11 @@ pub trait ContextFutureExt: Sized {
     /// next.scope("remote:MyActor").attach(snap).await
     /// ```
     fn scope(self, name: &str) -> WithContext<Self> {
-        let mut store = crate::fork();
-        store.push_scope(Some(name.to_string()));
-        self.with(store)
+        crate::registry::with_global_registry(|registry| {
+            let mut store = crate::fork();
+            store.push_scope(registry, Some(name.to_string()));
+            self.with(store)
+        })
     }
 }
 

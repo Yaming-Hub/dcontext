@@ -12,7 +12,7 @@ type DeserializeFn =
 /// Type alias for custom serializer functions (Arc so it can be cloned without a lock).
 type SerializeFn = Arc<dyn Fn(&dyn ContextValue) -> Result<Vec<u8>, ContextError> + Send + Sync>;
 
-type RegistryMap = HashMap<&'static str, Registration>;
+pub(crate) type RegistryMap = HashMap<&'static str, Registration>;
 
 /// Metadata stored for each registered context key.
 pub(crate) struct Registration {
@@ -53,11 +53,103 @@ static FROZEN: OnceLock<RegistryMap> = OnceLock::new();
 /// Not used in production — only a fallback when FROZEN is not set.
 static BUILD: std::sync::LazyLock<Mutex<Option<RegistryMap>>> =
     std::sync::LazyLock::new(|| Mutex::new(Some(HashMap::new())));
+static EMPTY_MAP: std::sync::LazyLock<RegistryMap> = std::sync::LazyLock::new(HashMap::new);
 
 fn lock_build() -> std::sync::MutexGuard<'static, Option<RegistryMap>> {
     BUILD
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Read-only view into a registry map. Used for dependency injection.
+pub(crate) struct Registry<'a> {
+    map: &'a RegistryMap,
+}
+
+impl<'a> Registry<'a> {
+    pub(crate) fn new(map: &'a RegistryMap) -> Self {
+        Self { map }
+    }
+
+    pub(crate) fn empty() -> Registry<'static> {
+        Registry { map: &EMPTY_MAP }
+    }
+
+    pub(crate) fn with_registration<R>(
+        &self,
+        key: &str,
+        f: impl FnOnce(&Registration) -> R,
+    ) -> Option<R> {
+        self.map.get(key).map(f)
+    }
+
+    pub(crate) fn get_serialization_info(&self, key: &str) -> Option<SerializationInfo> {
+        self.map.get(key).map(|r| SerializationInfo {
+            key_version: r.key_version,
+            serialize_fn: r.serialize_fn.clone(),
+        })
+    }
+
+    pub(crate) fn cached_keys(&self) -> Vec<&'static str> {
+        self.map
+            .iter()
+            .filter(|(_, r)| r.cached)
+            .map(|(&k, _)| k)
+            .collect()
+    }
+
+    pub(crate) fn is_local_key(&self, key: &str) -> bool {
+        self.map.get(key).is_some_and(|r| r.local_only)
+    }
+
+    pub(crate) fn is_valid_value(&self, key: &str, value: &dyn ContextValue) -> bool {
+        self.map
+            .get(key)
+            .is_some_and(|r| r.type_id == value.as_any().type_id())
+    }
+
+    pub(crate) fn with_metadata<M: 'static, R>(
+        &self,
+        key: &str,
+        f: impl FnOnce(&M) -> R,
+    ) -> Option<R> {
+        self.with_registration(key, |r| {
+            r.metadata
+                .get(&TypeId::of::<M>())
+                .and_then(|boxed| boxed.downcast_ref::<M>())
+                .map(f)
+        })
+        .flatten()
+    }
+
+    pub(crate) fn keys_with_metadata<M: 'static, R>(
+        &self,
+        f: impl Fn(&'static str, &M) -> R,
+    ) -> Vec<R> {
+        self.map
+            .iter()
+            .filter_map(|(&key, reg)| {
+                reg.metadata
+                    .get(&TypeId::of::<M>())
+                    .and_then(|boxed| boxed.downcast_ref::<M>())
+                    .map(|meta| f(key, meta))
+            })
+            .collect()
+    }
+}
+
+/// Execute `f` with a reference to the global registry.
+/// After initialize(): lock-free. Before: acquires Mutex.
+pub(crate) fn with_global_registry<R>(f: impl FnOnce(&Registry<'_>) -> R) -> R {
+    if let Some(frozen) = FROZEN.get() {
+        return f(&Registry::new(frozen));
+    }
+
+    let guard = lock_build();
+    match guard.as_ref() {
+        Some(map) => f(&Registry::new(map)),
+        None => f(&Registry::empty()),
+    }
 }
 
 // ── Registration options ───────────────────────────────────────
@@ -427,6 +519,13 @@ impl Default for RegistryBuilder {
     }
 }
 
+#[cfg(test)]
+impl RegistryBuilder {
+    pub(crate) fn into_map(self) -> RegistryMap {
+        self.map
+    }
+}
+
 // ── Initialization ─────────────────────────────────────────────
 
 /// Freeze the registry. Consumes the builder and makes all reads lock-free.
@@ -536,12 +635,9 @@ pub(crate) fn register_migration<TOld, TCurrent>(
 ///
 /// After [`initialize`]: lock-free (OnceLock deref + HashMap lookup).
 /// Before [`initialize`]: acquires Mutex (correct, but slower — for tests).
+#[allow(dead_code)]
 pub(crate) fn with_registration<R>(key: &str, f: impl FnOnce(&Registration) -> R) -> Option<R> {
-    if let Some(frozen) = FROZEN.get() {
-        return frozen.get(key).map(f);
-    }
-    let guard = lock_build();
-    guard.as_ref().and_then(|map| map.get(key).map(f))
+    with_global_registry(|registry| registry.with_registration(key, f))
 }
 
 /// Info needed by `serialize_context`, fetched in a single lookup.
@@ -551,57 +647,29 @@ pub(crate) struct SerializationInfo {
 }
 
 /// Single-lookup extraction of everything `serialize_context` needs.
+#[allow(dead_code)]
 pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
-    let extract = |r: &Registration| SerializationInfo {
-        key_version: r.key_version,
-        serialize_fn: r.serialize_fn.clone(),
-    };
-
-    if let Some(frozen) = FROZEN.get() {
-        return frozen.get(key).map(extract);
-    }
-    let guard = lock_build();
-    guard.as_ref().and_then(|map| map.get(key).map(extract))
+    with_global_registry(|registry| registry.get_serialization_info(key))
 }
 
 /// Return registered keys that have per-scope caching enabled.
 /// These keys will have their effective values eagerly copied into each
 /// new scope on entry, giving O(1) reads.
+#[allow(dead_code)]
 pub(crate) fn cached_keys() -> Vec<&'static str> {
-    let filter = |map: &RegistryMap| -> Vec<&'static str> {
-        map.iter()
-            .filter(|(_, r)| r.cached)
-            .map(|(&k, _)| k)
-            .collect()
-    };
-    if let Some(frozen) = FROZEN.get() {
-        return filter(frozen);
-    }
-    let guard = lock_build();
-    guard.as_ref().map_or_else(Vec::new, filter)
+    with_global_registry(|registry| registry.cached_keys())
 }
 
 /// Check if a key is registered as local-only.
+#[allow(dead_code)]
 pub(crate) fn is_local_key(key: &str) -> bool {
-    let check = |map: &RegistryMap| -> bool { map.get(key).is_some_and(|r| r.local_only) };
-    if let Some(frozen) = FROZEN.get() {
-        return check(frozen);
-    }
-    let guard = lock_build();
-    guard.as_ref().is_some_and(check)
+    with_global_registry(|registry| registry.is_local_key(key))
 }
 
 /// Check if a value is valid for a given key (key exists and TypeId matches).
+#[allow(dead_code)]
 pub(crate) fn is_valid_value(key: &str, value: &dyn ContextValue) -> bool {
-    let check = |map: &RegistryMap| -> bool {
-        map.get(key)
-            .is_some_and(|r| r.type_id == value.as_any().type_id())
-    };
-    if let Some(frozen) = FROZEN.get() {
-        return check(frozen);
-    }
-    let guard = lock_build();
-    guard.as_ref().is_some_and(check)
+    with_global_registry(|registry| registry.is_valid_value(key, value))
 }
 
 // ── Metadata query API ─────────────────────────────────────────
@@ -611,13 +679,7 @@ pub(crate) fn is_valid_value(key: &str, value: &dyn ContextValue) -> bool {
 /// Returns `None` if the key is not registered or has no metadata of type `M`.
 /// After [`initialize`]: lock-free. Before: acquires Mutex.
 pub fn with_metadata<M: 'static, R>(key: &str, f: impl FnOnce(&M) -> R) -> Option<R> {
-    with_registration(key, |r| {
-        r.metadata
-            .get(&TypeId::of::<M>())
-            .and_then(|boxed| boxed.downcast_ref::<M>())
-            .map(f)
-    })
-    .flatten()
+    with_global_registry(|registry| registry.with_metadata(key, f))
 }
 
 /// Iterate over all registered keys that have metadata of type `M`.
@@ -625,21 +687,7 @@ pub fn with_metadata<M: 'static, R>(key: &str, f: impl FnOnce(&M) -> R) -> Optio
 /// Calls `f(key, metadata)` for each matching key and collects the results.
 /// After [`initialize`]: lock-free. Before: acquires Mutex.
 pub fn keys_with_metadata<M: 'static, R>(f: impl Fn(&'static str, &M) -> R) -> Vec<R> {
-    let collect = |map: &RegistryMap| -> Vec<R> {
-        map.iter()
-            .filter_map(|(&key, reg)| {
-                reg.metadata
-                    .get(&TypeId::of::<M>())
-                    .and_then(|boxed| boxed.downcast_ref::<M>())
-                    .map(|meta| f(key, meta))
-            })
-            .collect()
-    };
-    if let Some(frozen) = FROZEN.get() {
-        return collect(frozen);
-    }
-    let guard = lock_build();
-    guard.as_ref().map_or_else(Vec::new, collect)
+    with_global_registry(|registry| registry.keys_with_metadata(f))
 }
 
 #[cfg(test)]
@@ -688,5 +736,20 @@ mod tests {
         try_register::<TestVal>(key).unwrap();
         let err = try_register::<OtherVal>(key).unwrap_err();
         assert!(matches!(err, ContextError::AlreadyRegistered(_)));
+    }
+
+    #[test]
+    fn registry_supports_injected_builder_map() {
+        let key = unique_reg_key("injected");
+        let mut builder = RegistryBuilder::new();
+        builder.register_with::<TestVal>(key, |opts| opts.cached().with_metadata(7usize));
+
+        let map = builder.into_map();
+        let registry = Registry::new(&map);
+
+        assert!(registry.with_registration(key, |_| true).unwrap_or(false));
+        assert_eq!(registry.cached_keys(), vec![key]);
+        assert!(registry.is_valid_value(key, &TestVal::default()));
+        assert_eq!(registry.with_metadata::<usize, _>(key, |n| *n), Some(7));
     }
 }
