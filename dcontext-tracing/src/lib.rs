@@ -1,49 +1,43 @@
 //! # dcontext-tracing
 //!
-//! Automatic [dcontext](https://docs.rs/dcontext) scope management via
+//! Bidirectional bridge between [dcontext](https://docs.rs/dcontext) and
 //! [tracing](https://docs.rs/tracing) spans.
 //!
-//! This crate provides a [`tracing_subscriber::Layer`] that automatically
-//! creates and manages dcontext scopes when tracing spans are entered and
-//! exited. This means your context values follow the natural span lifecycle
-//! without any manual scope management.
+//! This crate provides [`tracing_subscriber::Layer`] implementations that
+//! copy data between tracing span fields and dcontext context values.
+//! It does **not** manage dcontext scopes — scope lifecycle remains the
+//! caller's responsibility.
 //!
 //! ## Quick Start
 //!
 //! ```rust,no_run
 //! use tracing_subscriber::prelude::*;
 //!
-//! // Zero-config: every span creates a dcontext scope
+//! // Install the layer — field extraction and recording happen automatically
 //! tracing_subscriber::registry()
-//!     .with(dcontext_tracing::DcontextLayer::new())
+//!     .with(dcontext_tracing::SyncDcontextLayer::new())
 //!     .init();
 //! ```
 //!
 //! ## Features
 //!
-//! ### Level 1: Automatic Scoping
+//! ### Field Extraction (span → context)
 //!
-//! With zero configuration, `DcontextLayer` creates a new dcontext scope
-//! every time a span is entered. Values set inside a span are automatically
-//! cleaned up when the span exits, just like tracing's own span lifecycle.
+//! When a tracing span contains a field that matches a registered
+//! [`TracingField`], the value is extracted and set as a context variable.
 //!
 //! ```rust,no_run
 //! # use tracing_subscriber::prelude::*;
 //! # tracing_subscriber::registry()
-//! #     .with(dcontext_tracing::DcontextLayer::new())
+//! #     .with(dcontext_tracing::SyncDcontextLayer::new())
 //! #     .init();
 //! #
-//! // Register context keys, then inside a span:
-//! // dcontext::sync_ctx::set_context("user", "alice".to_string());
-//! // {
-//! //     let _span = tracing::info_span!("request").entered();
-//! //     // New scope created — inherits parent values
-//! //     dcontext::sync_ctx::set_context("request_id", "abc-123".to_string());
-//! // }
-//! // Scope reverted — "request_id" gone, "user" remains
+//! // With TracingField metadata registered for "request_id":
+//! // let _span = tracing::info_span!("handler", request_id = "abc-123").entered();
+//! // → dcontext now has request_id = "abc-123"
 //! ```
 //!
-//! ### Level 2: Field-to-Context Extraction
+//! ### Log & Span Enrichment (context → log/span)
 //!
 //! Extract tracing span fields directly into dcontext values using
 //! [`TracingField`] metadata:
@@ -77,7 +71,7 @@
 //! // let layer = DcontextLayer::new();
 //! ```
 //!
-//! ### Level 3: Span Info
+//! ### Span Info
 //!
 //! Expose span metadata as a context value:
 //!
@@ -96,27 +90,26 @@
 //!
 //! ## How It Works
 //!
-//! The layer uses a thread-local stack to store dcontext `ScopeGuard`s
-//! (which are `!Send` and cannot be stored in tracing's span extensions).
-//! On span enter, a new scope is pushed; on span exit, the scope is popped
-//! and the guard dropped, reverting context changes made in that scope.
+//! The layer hooks into tracing's span lifecycle (`on_new_span`, `on_enter`,
+//! `on_close`) to copy data between spans and the dcontext store. It does
+//! **not** push or pop dcontext scopes — that responsibility stays with
+//! application code, which can manage scopes independently of span lifetime.
 //!
-//! This mirrors the approach used by `tracing-opentelemetry` for similar
-//! thread-local guard management.
+//! `SyncDcontextLayer` reads/writes `dcontext::sync_ctx` (thread-local).
+//! `AsyncDcontextLayer` reads/writes `dcontext::async_ctx` (task-local) and
+//! performs extraction only on the first enter of each span.
 //!
 //! ## Async Behavior
 //!
-//! Tokio async code should use [`AsyncDcontextLayer`], which stores span state
-//! in `dcontext::async_ctx` task-local storage so mapped values, span info, and
-//! scope chain entries persist across `.await` points in the task.
+//! Tokio async code should use [`AsyncDcontextLayer`], which performs field
+//! extraction into `dcontext::async_ctx` task-local storage on first span
+//! enter. Values persist across `.await` points in the task.
 //!
 //! [`SyncDcontextLayer`] (and the legacy [`DcontextLayer`] alias) remain useful
-//! for synchronous or explicitly thread-local code. `dcontext::sync_ctx` always uses
-//! thread-local storage directly, so no `force_thread_local()` wrapper is needed.
+//! for synchronous or explicitly thread-local code.
 
 mod async_layer;
 mod field_mapping;
-pub(crate) mod guard_stack;
 mod layer_common;
 mod span_info;
 mod sync_layer;

@@ -860,7 +860,7 @@ dcontext::async_ctx::with_context(snap, async move {
 - ~~**Pluggable top-level codec**~~ ✅ Implemented as `register_with_codec` — per-key custom serialize/deserialize functions. The top-level wire format envelope remains bincode; inner values can use any format (JSON, MessagePack, etc.).
 - **`tracing` / OpenTelemetry interop (S5):** ~~Define how `dcontext` relates
   to `tracing::Span` and `opentelemetry::Context`.~~ Partially implemented:
-  - ✅ `dcontext-tracing` crate with `DcontextLayer` — span lifecycle creates/reverts scopes
+  - ✅ `dcontext-tracing` crate with `DcontextLayer` — span↔context data bridge (field extraction, log enrichment, span recording)
   - ✅ Field mapping — span fields automatically populate context values
   - ✅ Log enrichment — `WithContextFields` formatter injects context into log output
   - ✅ Extensible per-key metadata system for cross-crate annotations
