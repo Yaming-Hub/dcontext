@@ -180,7 +180,21 @@ pub fn snapshot() -> ContextSnapshot {
 /// with its values. Returns a [`ScopeGuard`] that pops the scope on drop.
 /// Returns a no-op guard if not in an async task.
 pub fn attach(snap: ContextSnapshot) -> ScopeGuard {
-    let guard = push_scope("");
+    attach_inner(snap, "")
+}
+
+/// Attach a snapshot to the task-local context by pushing a new **named**
+/// scope with its values. The name appears in [`scope_chain()`], making it
+/// visible for debugging and tracing.
+///
+/// Returns a [`ScopeGuard`] that pops the scope on drop.
+/// Returns a no-op guard if not in an async task.
+pub fn attach_named(name: &str, snap: ContextSnapshot) -> ScopeGuard {
+    attach_inner(snap, name)
+}
+
+fn attach_inner(snap: ContextSnapshot, name: &str) -> ScopeGuard {
+    let guard = push_scope(name);
     if !snap.scope_chain.is_empty() {
         set_remote_chain(snap.scope_chain);
     }

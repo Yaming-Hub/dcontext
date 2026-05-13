@@ -203,7 +203,23 @@ pub fn clear() {
 /// Attach a snapshot to the thread-local context by pushing a new scope
 /// with its values. Returns a [`ScopeGuard`] that pops the scope on drop.
 pub fn attach(snap: ContextSnapshot) -> ScopeGuard {
-    let guard = enter_scope();
+    attach_inner(snap, None)
+}
+
+/// Attach a snapshot to the thread-local context by pushing a new **named**
+/// scope with its values. The name appears in [`scope_chain()`], making it
+/// visible for debugging and tracing.
+///
+/// Returns a [`ScopeGuard`] that pops the scope on drop.
+pub fn attach_named(name: impl Into<String>, snap: ContextSnapshot) -> ScopeGuard {
+    attach_inner(snap, Some(name.into()))
+}
+
+fn attach_inner(snap: ContextSnapshot, name: Option<String>) -> ScopeGuard {
+    let guard = match name {
+        Some(n) => enter_named_scope(n),
+        None => enter_scope(),
+    };
     if !snap.scope_chain.is_empty() {
         set_remote_chain(snap.scope_chain);
     }
