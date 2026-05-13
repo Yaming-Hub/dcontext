@@ -24,6 +24,27 @@ impl ContextSnapshot {
     pub fn scope_chain(&self) -> &[String] {
         &self.scope_chain
     }
+
+    /// Serialize this snapshot to wire-format bytes.
+    pub fn serialize(&self) -> Result<Vec<u8>, crate::error::ContextError> {
+        crate::registry::with_global_registry(|registry| {
+            crate::wire::serialize_from(
+                registry,
+                self.values
+                    .iter()
+                    .map(|(k, v)| (*k, Arc::clone(v)))
+                    .collect(),
+                self.scope_chain.clone(),
+            )
+        })
+    }
+
+    /// Deserialize wire-format bytes into a snapshot.
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, crate::error::ContextError> {
+        crate::registry::with_global_registry(|registry| {
+            crate::wire::deserialize_to_snapshot(registry, bytes)
+        })
+    }
 }
 
 impl Default for ContextSnapshot {

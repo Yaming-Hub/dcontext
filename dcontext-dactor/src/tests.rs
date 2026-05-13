@@ -2,6 +2,7 @@ use dactor::{
     ActorContext, ActorId, Disposition, HeaderRegistry, HeaderValue, Headers, InboundContext,
     InboundInterceptor, NodeId, OutboundContext, OutboundInterceptor, RuntimeHeaders, SendMode,
 };
+use dcontext::ContextFutureExt;
 use dcontext::ContextSnapshot;
 
 use crate::header::{ContextHeader, ContextSnapshotHeader};
@@ -86,8 +87,8 @@ fn outbound_remote_attaches_wire_header_only() {
 async fn outbound_local_attaches_snapshot_only() {
     init_registry();
 
-    dcontext::async_ctx::with_context(ContextSnapshot::empty(), async {
-        dcontext::async_ctx::set_context("request_id", RequestId("req-abc".into()));
+    async {
+        dcontext::set_context_variable("request_id", RequestId("req-abc".into()));
 
         let interceptor = ContextOutboundInterceptor::default();
         let ctx = make_outbound_ctx(false);
@@ -106,7 +107,8 @@ async fn outbound_local_attaches_snapshot_only() {
             headers.get::<ContextHeader>().is_none(),
             "local should NOT have wire header — no serialization needed"
         );
-    })
+    }
+    .attach(ContextSnapshot::empty())
     .await;
 }
 
@@ -209,9 +211,9 @@ fn inbound_interceptor_converts_wire_to_snapshot() {
     init_registry();
 
     let wire_bytes = {
-        let _guard = dcontext::sync_ctx::enter_scope();
-        dcontext::sync_ctx::set_context("request_id", RequestId("req-wire".into()));
-        dcontext::sync_ctx::serialize_context().unwrap()
+        let _guard = dcontext::push_scope("test");
+        dcontext::set_context_variable("request_id", RequestId("req-wire".into()));
+        dcontext::capture().serialize().unwrap()
     };
 
     let interceptor = ContextInboundInterceptor::default();
@@ -237,9 +239,9 @@ fn bytes_to_snapshot_roundtrip() {
     init_registry();
 
     let wire_bytes = {
-        let _guard = dcontext::sync_ctx::enter_scope();
-        dcontext::sync_ctx::set_context("request_id", RequestId("roundtrip".into()));
-        dcontext::sync_ctx::serialize_context().unwrap()
+        let _guard = dcontext::push_scope("test");
+        dcontext::set_context_variable("request_id", RequestId("roundtrip".into()));
+        dcontext::capture().serialize().unwrap()
     };
 
     let snap = bytes_to_snapshot(&wire_bytes);
@@ -300,20 +302,20 @@ fn extract_context_returns_none_when_empty() {
 async fn end_to_end_local_propagation() {
     init_registry();
 
-    let (rh, msg, mut headers) =
-        dcontext::async_ctx::with_context(ContextSnapshot::empty(), async {
-            dcontext::async_ctx::set_context("request_id", RequestId("e2e-local".into()));
+    let (rh, msg, mut headers) = async {
+        dcontext::set_context_variable("request_id", RequestId("e2e-local".into()));
 
-            // Outbound interceptor captures snapshot (no serialization for local).
-            let outbound = ContextOutboundInterceptor::default();
-            let out_ctx = make_outbound_ctx(false);
-            let rh = RuntimeHeaders::new();
-            let mut headers = Headers::new();
-            let msg = 42u64;
-            outbound.on_send(&out_ctx, &rh, &mut headers, &msg);
-            (rh, msg, headers)
-        })
-        .await;
+        // Outbound interceptor captures snapshot (no serialization for local).
+        let outbound = ContextOutboundInterceptor::default();
+        let out_ctx = make_outbound_ctx(false);
+        let rh = RuntimeHeaders::new();
+        let mut headers = Headers::new();
+        let msg = 42u64;
+        outbound.on_send(&out_ctx, &rh, &mut headers, &msg);
+        (rh, msg, headers)
+    }
+    .attach(ContextSnapshot::empty())
+    .await;
 
     // Verify no wire header was produced for local target.
     assert!(
@@ -339,8 +341,8 @@ async fn end_to_end_local_propagation() {
 
     // Extract and verify.
     let snap = extract_context(&actor_ctx).expect("should have propagated context");
-    let _restore = dcontext::sync_ctx::attach(snap);
-    let rid: RequestId = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
+    let _restore = dcontext::attach_snapshot(snap);
+    let rid: RequestId = dcontext::get_context_variable("request_id").unwrap_or_default();
     assert_eq!(rid.0, "e2e-local");
 }
 
@@ -350,9 +352,9 @@ fn end_to_end_remote_propagation() {
 
     // Simulate sender serializing context (remote path).
     let wire_bytes = {
-        let _guard = dcontext::sync_ctx::enter_scope();
-        dcontext::sync_ctx::set_context("request_id", RequestId("e2e-remote".into()));
-        dcontext::sync_ctx::serialize_context().unwrap()
+        let _guard = dcontext::push_scope("test");
+        dcontext::set_context_variable("request_id", RequestId("e2e-remote".into()));
+        dcontext::capture().serialize().unwrap()
     };
 
     // Simulate receiving wire bytes (as if from remote transport).
@@ -376,8 +378,8 @@ fn end_to_end_remote_propagation() {
     actor_ctx.headers = headers;
 
     let snap = extract_context(&actor_ctx).expect("should have propagated context");
-    let _restore = dcontext::sync_ctx::attach(snap);
-    let rid: RequestId = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
+    let _restore = dcontext::attach_snapshot(snap);
+    let rid: RequestId = dcontext::get_context_variable("request_id").unwrap_or_default();
     assert_eq!(rid.0, "e2e-remote");
 }
 
@@ -389,9 +391,9 @@ async fn with_propagated_context_establishes_scope() {
     init_registry();
 
     let snap = {
-        let _guard = dcontext::sync_ctx::enter_scope();
-        dcontext::sync_ctx::set_context("request_id", RequestId("async-test".into()));
-        dcontext::sync_ctx::snapshot()
+        let _guard = dcontext::push_scope("test");
+        dcontext::set_context_variable("request_id", RequestId("async-test".into()));
+        dcontext::capture()
     };
 
     let mut actor_ctx = ActorContext::new(
@@ -406,7 +408,7 @@ async fn with_propagated_context_establishes_scope() {
         .insert(ContextSnapshotHeader { snapshot: snap });
 
     let result = crate::with_propagated_context(&actor_ctx, async {
-        let rid: RequestId = dcontext::async_ctx::get_context("request_id").unwrap_or_default();
+        let rid: RequestId = dcontext::get_context_variable("request_id").unwrap_or_default();
         rid.0
     })
     .await;
@@ -438,9 +440,9 @@ fn wrap_handler_returns_some_when_snapshot_present() {
     init_registry();
 
     let snap = {
-        let _guard = dcontext::sync_ctx::enter_scope();
-        dcontext::sync_ctx::set_context("request_id", RequestId("wrap-test".into()));
-        dcontext::sync_ctx::snapshot()
+        let _guard = dcontext::push_scope("test");
+        dcontext::set_context_variable("request_id", RequestId("wrap-test".into()));
+        dcontext::capture()
     };
 
     let interceptor = ContextInboundInterceptor::default();
@@ -473,9 +475,9 @@ async fn wrap_handler_restores_context_in_handler_future() {
     init_registry();
 
     let snap = {
-        let _guard = dcontext::sync_ctx::enter_scope();
-        dcontext::sync_ctx::set_context("request_id", RequestId("auto-restore".into()));
-        dcontext::sync_ctx::snapshot()
+        let _guard = dcontext::push_scope("test");
+        dcontext::set_context_variable("request_id", RequestId("auto-restore".into()));
+        dcontext::capture()
     };
 
     let interceptor = ContextInboundInterceptor::default();
@@ -494,7 +496,7 @@ async fn wrap_handler_restores_context_in_handler_future() {
 
     let inner: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
         Box::pin(async move {
-            let rid: RequestId = dcontext::async_ctx::get_context("request_id").unwrap_or_default();
+            let rid: RequestId = dcontext::get_context_variable("request_id").unwrap_or_default();
             *captured_clone.lock().await = rid.0;
         });
 
@@ -527,9 +529,9 @@ async fn wrap_handler_end_to_end_local() {
 
     // Simulate: sender sets context → outbound captures → inbound normalizes → wrap_handler restores
     let snap = {
-        let _guard = dcontext::sync_ctx::enter_scope();
-        dcontext::sync_ctx::set_context("request_id", RequestId("e2e-wrap-local".into()));
-        dcontext::sync_ctx::snapshot()
+        let _guard = dcontext::push_scope("test");
+        dcontext::set_context_variable("request_id", RequestId("e2e-wrap-local".into()));
+        dcontext::capture()
     };
 
     // Outbound would capture snapshot for local target; simulate directly.
@@ -558,7 +560,7 @@ async fn wrap_handler_end_to_end_local() {
 
     let inner: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
         Box::pin(async move {
-            let rid: RequestId = dcontext::async_ctx::get_context("request_id").unwrap_or_default();
+            let rid: RequestId = dcontext::get_context_variable("request_id").unwrap_or_default();
             *captured_clone.lock().await = rid.0;
         });
 
@@ -574,9 +576,9 @@ async fn wrap_handler_end_to_end_remote() {
 
     // Simulate remote path: wire bytes → inbound deserializes → wrap_handler restores
     let wire_bytes = {
-        let _guard = dcontext::sync_ctx::enter_scope();
-        dcontext::sync_ctx::set_context("request_id", RequestId("e2e-wrap-remote".into()));
-        dcontext::sync_ctx::serialize_context().unwrap()
+        let _guard = dcontext::push_scope("test");
+        dcontext::set_context_variable("request_id", RequestId("e2e-wrap-remote".into()));
+        dcontext::capture().serialize().unwrap()
     };
 
     let mut headers = Headers::new();
@@ -601,7 +603,7 @@ async fn wrap_handler_end_to_end_remote() {
 
     let inner: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
         Box::pin(async move {
-            let rid: RequestId = dcontext::async_ctx::get_context("request_id").unwrap_or_default();
+            let rid: RequestId = dcontext::get_context_variable("request_id").unwrap_or_default();
             *captured_clone.lock().await = rid.0;
         });
 
@@ -619,9 +621,9 @@ fn register_context_headers_enables_wire_roundtrip() {
 
     // Serialize context to wire bytes.
     let wire_bytes = {
-        let _guard = dcontext::sync_ctx::enter_scope();
-        dcontext::sync_ctx::set_context("request_id", RequestId("wire-roundtrip".into()));
-        dcontext::sync_ctx::serialize_context().unwrap()
+        let _guard = dcontext::push_scope("test");
+        dcontext::set_context_variable("request_id", RequestId("wire-roundtrip".into()));
+        dcontext::capture().serialize().unwrap()
     };
 
     // Outbound: insert ContextHeader into Headers, then convert to wire format.
@@ -649,7 +651,7 @@ fn register_context_headers_enables_wire_roundtrip() {
     );
 
     let snap = snap.unwrap();
-    let _restore = dcontext::sync_ctx::attach(snap);
-    let rid: RequestId = dcontext::sync_ctx::get_context("request_id").unwrap_or_default();
+    let _restore = dcontext::attach_snapshot(snap);
+    let rid: RequestId = dcontext::get_context_variable("request_id").unwrap_or_default();
     assert_eq!(rid.0, "wire-roundtrip");
 }

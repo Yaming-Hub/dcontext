@@ -4,6 +4,7 @@ use dactor::{
     Disposition, HandlerWrapper, Headers, InboundContext, InboundInterceptor, Outcome,
     RuntimeHeaders,
 };
+use dcontext::ContextFutureExt;
 
 use crate::header::{ContextHeader, ContextSnapshotHeader};
 use crate::propagation::bytes_to_snapshot;
@@ -50,6 +51,7 @@ use crate::ErrorPolicy;
 ///     }
 /// }
 /// ```
+#[derive(Default)]
 pub struct ContextInboundInterceptor {
     error_policy: ErrorPolicy,
 }
@@ -58,14 +60,6 @@ impl ContextInboundInterceptor {
     /// Create with a specific error policy.
     pub fn new(error_policy: ErrorPolicy) -> Self {
         Self { error_policy }
-    }
-}
-
-impl Default for ContextInboundInterceptor {
-    fn default() -> Self {
-        Self {
-            error_policy: ErrorPolicy::default(),
-        }
     }
 }
 
@@ -121,11 +115,13 @@ impl InboundInterceptor for ContextInboundInterceptor {
         let scope_name = format!("remote:{}", ctx.actor_name);
         Some(Box::new(move |next| {
             Box::pin(async move {
-                let result = dcontext::async_ctx::with_context(snapshot, async move {
-                    dcontext::async_ctx::scope(&scope_name, next).await
-                })
+                let scoped_snapshot = async move {
+                    let _scope = dcontext::push_scope(&scope_name);
+                    dcontext::capture()
+                }
+                .attach(snapshot)
                 .await;
-                result
+                next.attach(scoped_snapshot).await
             })
         }))
     }

@@ -47,12 +47,12 @@ where
 
     /// Get the value. Returns `None` if not set.
     pub fn get(&self) -> Option<T> {
-        crate::sync_ctx::get_context::<T>(self.key)
+        crate::get_context_variable::<T>(self.key)
     }
 
     /// Set the value in the current scope.
     pub fn set(&self, value: T) {
-        crate::sync_ctx::set_context::<T>(self.key, value);
+        crate::set_context_variable::<T>(self.key, value);
     }
 
     /// Get the string key name.

@@ -1,110 +1,80 @@
-//! # Sample: Dual-Context — Async-to-Sync Bridging
+//! # Sample: Unified Context — Async-to-Thread Bridging
 //!
-//! Demonstrates the one-way bridging pattern: capturing a snapshot from
-//! `async_ctx` (task-local) and restoring it in `sync_ctx` (thread-local).
-//!
-//! This is the recommended pattern for:
-//! - `spawn_blocking` calls that need request context
-//! - CPU-bound work offloaded to a thread pool
-//! - FFI calls on a dedicated thread
-//!
-//! Key concepts:
-//! - `async_ctx::snapshot()` — capture current task-local state
-//! - `sync_ctx::restore(snapshot)` — initialize thread-local from snapshot
-//! - Bridging is one-way: async → sync only (never reverse)
+//! Demonstrates capturing context in async code and attaching it in blocking
+//! work using `attach_snapshot()` or `attach_store()`.
 //!
 //! Usage: `cargo run --bin dual_bridging`
 
-use dcontext::{async_ctx, sync_ctx, ContextSnapshot};
+use dcontext::{
+    attach_snapshot, attach_store, capture, fork, get_context_variable, scope_chain,
+    set_context_variable, ContextFutureExt,
+};
 
 #[tokio::main]
 async fn main() {
-    println!("=== Async → Sync Bridging ===\n");
+    println!("=== Async → Thread Bridging ===\n");
 
-    let initial = ContextSnapshot::empty();
-    async_ctx::with_context(initial, async {
-        // Set up context in the async handler
-        async_ctx::set_context("request_id", "req-bridge-001".to_string());
-        async_ctx::set_context("user_id", "alice".to_string());
-        let _guard = async_ctx::push_scope("handle_request");
+    async {
+        set_context_variable("request_id", "req-bridge-001".to_string());
+        set_context_variable("user_id", "alice".to_string());
 
         println!(
             "[async] request_id = {:?}",
-            async_ctx::get_context::<String>("request_id")
+            get_context_variable::<String>("request_id")
         );
-        println!("[async] scope_chain = {:?}", async_ctx::scope_chain());
 
-        // ── Pattern 1: spawn_blocking ─────────────────────────
-        println!("\n--- Pattern 1: spawn_blocking ---");
-        let snap = async_ctx::snapshot();
+        println!("\n--- Pattern 1: spawn_blocking with snapshot ---");
+        let snap = capture();
         let result = tokio::task::spawn_blocking(move || {
-            // Restore the async context into this blocking thread's thread-local
-            sync_ctx::restore(snap);
+            let _guard = attach_snapshot(snap);
 
-            let rid: Option<String> = sync_ctx::get_context("request_id");
-            let uid: Option<String> = sync_ctx::get_context("user_id");
-            let chain = sync_ctx::scope_chain();
-
+            let rid: Option<String> = get_context_variable("request_id");
+            let uid: Option<String> = get_context_variable("user_id");
             println!("  [blocking] request_id = {:?}", rid);
             println!("  [blocking] user_id    = {:?}", uid);
-            println!("  [blocking] chain      = {:?}", chain);
 
-            // Can push scopes on the sync side
-            let _guard = sync_ctx::push_scope("heavy_computation");
-            println!(
-                "  [blocking] chain (in scope) = {:?}",
-                sync_ctx::scope_chain()
-            );
-
-            // Simulate heavy work
+            let _guard = dcontext::push_scope("heavy_computation");
+            println!("  [blocking] chain      = {:?}", scope_chain());
             std::thread::sleep(std::time::Duration::from_millis(10));
-
             "computation_result"
         })
         .await
         .unwrap();
         println!("  [async] got result: {:?}", result);
 
-        // ── Pattern 2: Thread pool / OS threads ───────────────
-        println!("\n--- Pattern 2: OS thread with context ---");
-        let snap = async_ctx::snapshot();
+        println!("\n--- Pattern 2: OS thread with ContextStore ---");
+        let store = fork();
         let handle = std::thread::spawn(move || {
-            sync_ctx::restore(snap);
-
-            let rid: Option<String> = sync_ctx::get_context("request_id");
-            let chain = sync_ctx::scope_chain();
+            let _guard = attach_store(store);
+            let rid: Option<String> = get_context_variable("request_id");
             println!("  [OS thread] request_id = {:?}", rid);
-            println!("  [OS thread] chain      = {:?}", chain);
-
-            // Modifications on the sync side don't affect the async caller
-            sync_ctx::set_context("request_id", "modified-in-thread".to_string());
+            println!("  [OS thread] chain      = {:?}", scope_chain());
+            set_context_variable("request_id", "modified-in-thread".to_string());
         });
         handle.join().unwrap();
 
-        // Async context is unaffected
         println!(
             "\n  [async] request_id still = {:?}",
-            async_ctx::get_context::<String>("request_id")
+            get_context_variable::<String>("request_id")
         );
 
-        // ── Pattern 3: Multiple child tasks from same snapshot ─
         println!("\n--- Pattern 3: Fan-out to multiple blocking threads ---");
-        let snap = async_ctx::snapshot();
-
+        let snap = capture();
         let mut handles = Vec::new();
         for i in 0..3 {
             let snap_clone = snap.clone();
             handles.push(tokio::task::spawn_blocking(move || {
-                sync_ctx::restore(snap_clone);
-                let _guard = sync_ctx::push_scope(&format!("worker_{}", i));
-                let chain = sync_ctx::scope_chain();
-                println!("  [worker {}] chain = {:?}", i, chain);
+                let _guard = attach_snapshot(snap_clone);
+                let _scope = dcontext::push_scope(&format!("worker_{}", i));
+                println!("  [worker {}] chain = {:?}", i, scope_chain());
             }));
         }
         for h in handles {
             h.await.unwrap();
         }
-    })
+    }
+    .scope("handle_request")
+    .capture()
     .await;
 
     println!("\nDone!");

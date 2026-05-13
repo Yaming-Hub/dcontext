@@ -231,11 +231,12 @@ dependencies = [
 
 [[package]]
 name = "dcontext"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "bincode",
  "criterion",
+ "pin-project-lite",
  "serde",
  "serde_json",
  "thiserror",
@@ -244,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "dcontext-dactor"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "dactor",
@@ -261,23 +262,11 @@ dependencies = [
  "base64",
  "bincode",
  "dcontext",
- "dcontext-tracing",
+ "dcontext-dactor",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "dcontext-tracing"
-version = "0.8.0"
-dependencies = [
- "dcontext",
- "serde",
- "tokio",
- "tracing",
- "tracing-core",
  "tracing-subscriber",
 ]
 

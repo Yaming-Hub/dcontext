@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 base64 = "0.22"
 dcontext = { path = "../dcontext" }
-dcontext-tracing = { path = "../dcontext-tracing" }
+dcontext-dactor = { path = "../dcontext-dactor" }
 bincode = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

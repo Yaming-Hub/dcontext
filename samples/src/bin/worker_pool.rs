@@ -1,11 +1,13 @@
 //! # Sample 6: Worker Pool with Context
 //!
 //! Demonstrates propagating context to a pool of worker threads.
-//! Each worker inherits the context from the dispatcher.
 //!
 //! Usage: `cargo run --bin worker_pool`
 
-use dcontext::{initialize, sync_ctx, RegistryBuilder};
+use dcontext::{
+    attach_snapshot, capture, get_context_variable, initialize, push_scope, set_context_variable,
+    ContextSnapshot, RegistryBuilder,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 
@@ -21,22 +23,20 @@ fn main() {
     builder.register::<TenantId>("tenant_id");
     initialize(builder);
 
-    // Simulate processing multiple requests, each with its own context.
-    let requests = vec![
+    let requests = [
         ("req-001", "tenant-alpha"),
         ("req-002", "tenant-beta"),
         ("req-003", "tenant-gamma"),
     ];
 
-    // Spawn worker threads, each with its own channel.
     let mut workers = vec![];
     for i in 0..2 {
-        let (worker_tx, worker_rx) = mpsc::channel::<(dcontext::ContextSnapshot, String)>();
+        let (worker_tx, worker_rx) = mpsc::channel::<(ContextSnapshot, String)>();
         std::thread::spawn(move || {
             while let Ok((snap, task_name)) = worker_rx.recv() {
-                let _guard = sync_ctx::attach(snap);
-                let rid = sync_ctx::get_context::<RequestId>("request_id").unwrap();
-                let tid = sync_ctx::get_context::<TenantId>("tenant_id").unwrap();
+                let _guard = attach_snapshot(snap);
+                let rid = get_context_variable::<RequestId>("request_id").unwrap();
+                let tid = get_context_variable::<TenantId>("tenant_id").unwrap();
                 println!(
                     "[worker-{}] {} — request_id={:?}, tenant_id={:?}",
                     i, task_name, rid.0, tid.0
@@ -46,25 +46,19 @@ fn main() {
         workers.push(worker_tx);
     }
 
-    // Dispatch requests to workers (round-robin).
     for (idx, (req_id, tenant)) in requests.iter().enumerate() {
-        {
-            let _guard = sync_ctx::enter_scope();
-            sync_ctx::set_context("request_id", RequestId(req_id.to_string()));
-            sync_ctx::set_context("tenant_id", TenantId(tenant.to_string()));
+        let _guard = push_scope("dispatch");
+        set_context_variable("request_id", RequestId(req_id.to_string()));
+        set_context_variable("tenant_id", TenantId(tenant.to_string()));
 
-            let snap = sync_ctx::snapshot();
-            let worker_idx = idx % workers.len();
-            workers[worker_idx]
-                .send((snap, format!("task-{}", idx)))
-                .unwrap();
-        }
+        let snap = capture();
+        let worker_idx = idx % workers.len();
+        workers[worker_idx]
+            .send((snap, format!("task-{}", idx)))
+            .unwrap();
     }
 
-    // Drop all senders to signal workers to stop.
     drop(workers);
-
-    // Give workers time to process.
     std::thread::sleep(std::time::Duration::from_millis(100));
     println!("\n[main] all requests dispatched");
 }

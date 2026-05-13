@@ -1,11 +1,12 @@
-//! # Sample 9: Async Scopes with async_ctx::scope
+//! # Sample 9: Async Scopes with ContextFutureExt::scope
 //!
-//! Demonstrates `async_ctx::scope` for creating scoped context changes
-//! that work correctly across .await points.
+//! Demonstrates scoped context changes that work correctly across `.await`.
 //!
 //! Usage: `cargo run --bin async_scopes`
 
-use dcontext::{async_ctx, initialize, sync_ctx, RegistryBuilder};
+use dcontext::{
+    get_context_variable, initialize, set_context_variable, ContextFutureExt, RegistryBuilder,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -25,59 +26,56 @@ async fn main() {
     builder.register::<Phase>("phase");
     initialize(builder);
 
-    let snap = {
-        sync_ctx::set_context("request_id", RequestId("req-async-scoped".into()));
-        sync_ctx::set_context("phase", Phase("init".into()));
-        sync_ctx::snapshot()
-    };
+    set_context_variable("request_id", RequestId("req-async-scoped".into()));
+    set_context_variable("phase", Phase("init".into()));
 
-    async_ctx::with_context(snap, async {
+    async {
         println!(
             "[main] request_id = {:?}",
-            async_ctx::get_context::<RequestId>("request_id").unwrap()
+            get_context_variable::<RequestId>("request_id").unwrap()
         );
         println!(
             "[main] phase      = {:?}",
-            async_ctx::get_context::<Phase>("phase").unwrap()
+            get_context_variable::<Phase>("phase").unwrap()
         );
 
-        // async_ctx::scope works across .await points.
-        async_ctx::scope("", async {
-            async_ctx::set_context("phase", Phase("processing".into()));
+        async {
+            set_context_variable("phase", Phase("processing".into()));
             println!(
                 "\n[async scope] phase = {:?}",
-                async_ctx::get_context::<Phase>("phase").unwrap()
+                get_context_variable::<Phase>("phase").unwrap()
             );
 
-            // .await inside the async scope — context is preserved.
             simulate_io().await;
 
             println!(
                 "[async scope after await] phase = {:?}",
-                async_ctx::get_context::<Phase>("phase").unwrap()
+                get_context_variable::<Phase>("phase").unwrap()
             );
 
-            // Spawn a child task from within the async scope.
-            let child_snap = async_ctx::snapshot();
-            let handle = tokio::spawn(async_ctx::with_context(child_snap, async {
-                println!(
-                    "[child task] request_id = {:?}",
-                    async_ctx::get_context::<RequestId>("request_id").unwrap()
-                );
-                println!(
-                    "[child task] phase      = {:?}",
-                    async_ctx::get_context::<Phase>("phase").unwrap()
-                );
-            }));
+            let handle = tokio::spawn(
+                async {
+                    println!(
+                        "[child task] request_id = {:?}",
+                        get_context_variable::<RequestId>("request_id").unwrap()
+                    );
+                    println!(
+                        "[child task] phase      = {:?}",
+                        get_context_variable::<Phase>("phase").unwrap()
+                    );
+                }
+                .fork(),
+            );
             handle.await.unwrap();
-        })
+        }
+        .scope("processing")
         .await;
 
-        // After async_ctx::scope — phase reverted.
         println!(
             "\n[main after async scope] phase = {:?}",
-            async_ctx::get_context::<Phase>("phase").unwrap()
+            get_context_variable::<Phase>("phase").unwrap()
         );
-    })
+    }
+    .capture()
     .await;
 }

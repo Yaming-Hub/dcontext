@@ -33,6 +33,7 @@ use crate::ErrorPolicy;
 ///     ContextOutboundInterceptor::new(ErrorPolicy::Reject),
 /// ));
 /// ```
+#[derive(Default)]
 pub struct ContextOutboundInterceptor {
     error_policy: ErrorPolicy,
 }
@@ -41,14 +42,6 @@ impl ContextOutboundInterceptor {
     /// Create with a specific error policy.
     pub fn new(error_policy: ErrorPolicy) -> Self {
         Self { error_policy }
-    }
-}
-
-impl Default for ContextOutboundInterceptor {
-    fn default() -> Self {
-        Self {
-            error_policy: ErrorPolicy::default(),
-        }
     }
 }
 
@@ -66,7 +59,7 @@ impl OutboundInterceptor for ContextOutboundInterceptor {
     ) -> Disposition {
         if ctx.remote {
             // Remote target: serialize context to wire bytes.
-            match dcontext::async_ctx::serialize_context() {
+            match dcontext::capture().serialize() {
                 Ok(bytes) => {
                     headers.insert(ContextHeader { bytes });
                 }
@@ -84,7 +77,7 @@ impl OutboundInterceptor for ContextOutboundInterceptor {
             }
         } else {
             // Local target: snapshot only — no serialization needed.
-            let snap = dcontext::async_ctx::snapshot();
+            let snap = dcontext::capture();
             headers.insert(ContextSnapshotHeader { snapshot: snap });
         }
 

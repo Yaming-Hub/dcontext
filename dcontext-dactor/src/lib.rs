@@ -116,19 +116,14 @@ pub fn register_context_headers(registry: &mut dactor::HeaderRegistry) {
 ///
 /// Passed to [`ContextOutboundInterceptor::new`] and
 /// [`ContextInboundInterceptor::new`] to configure error handling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ErrorPolicy {
     /// Log a warning and deliver the message without propagated context.
     /// This is the default.
+    #[default]
     LogAndContinue,
     /// Reject the message via [`Disposition::Reject`](dactor::Disposition::Reject).
     Reject,
-}
-
-impl Default for ErrorPolicy {
-    fn default() -> Self {
-        Self::LogAndContinue
-    }
 }
 
 #[cfg(test)]

@@ -1,22 +1,20 @@
 //! # Sample 13: Version Migration
 //!
 //! Demonstrates `register_migration` for automatic wire format migration.
-//! When a context struct's schema evolves, nodes can register migration
-//! functions that convert old wire versions to the current type during
-//! deserialization.
 //!
 //! Usage: `cargo run --bin version_migration`
 
-use dcontext::{initialize, make_wire_bytes, sync_ctx, RegistryBuilder};
+use dcontext::{
+    attach_snapshot, capture, get_context_variable, initialize, make_wire_bytes,
+    set_context_variable, ContextSnapshot, RegistryBuilder,
+};
 use serde::{Deserialize, Serialize};
 
-/// Version 1: original schema with just a trace_id.
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct TraceContextV1 {
     trace_id: String,
 }
 
-/// Version 2: adds span_id and a sampling flag.
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 struct TraceContextV2 {
     trace_id: String,
@@ -27,25 +25,19 @@ struct TraceContextV2 {
 fn main() {
     println!("=== Version Migration ===\n");
 
-    // Register the CURRENT version (V2) of the context type.
     let mut builder = RegistryBuilder::new();
     builder.register_with::<TraceContextV2>("trace_ctx", |o| o.version(2));
-
-    // Register a migration from V1 → V2. When wire bytes arrive with
-    // key_version=1, they are deserialized as TraceContextV1, then
-    // converted to TraceContextV2 via this function.
     builder.register_migration::<TraceContextV1, TraceContextV2>("trace_ctx", 1, |v1| {
         TraceContextV2 {
             trace_id: v1.trace_id,
-            span_id: String::new(), // V1 didn't have span_id
-            sampled: true,          // default: sampled
+            span_id: String::new(),
+            sampled: true,
         }
     });
     initialize(builder);
 
-    // --- Scenario 1: Current version roundtrip (V2 → V2) ---
     println!("1. Current version roundtrip (V2 → V2):");
-    sync_ctx::set_context(
+    set_context_variable(
         "trace_ctx",
         TraceContextV2 {
             trace_id: "tid-current".into(),
@@ -53,22 +45,20 @@ fn main() {
             sampled: false,
         },
     );
-    let bytes_v2 = sync_ctx::serialize_context().unwrap();
+    let bytes_v2 = capture().serialize().unwrap();
 
     {
-        let _guard = sync_ctx::deserialize_context(&bytes_v2).unwrap();
-        let ctx: TraceContextV2 = sync_ctx::get_context("trace_ctx").unwrap();
+        let snap = ContextSnapshot::deserialize(&bytes_v2).unwrap();
+        let _guard = attach_snapshot(snap);
+        let ctx: TraceContextV2 = get_context_variable("trace_ctx").unwrap();
         println!("   trace_id = {}", ctx.trace_id);
         println!("   span_id  = {}", ctx.span_id);
         println!("   sampled  = {}", ctx.sampled);
     }
 
-    // --- Scenario 2: Receiving V1 bytes → auto-migrated to V2 ---
     println!("\n2. Receiving old V1 bytes → auto-migrated to V2:");
     println!("   (Simulating bytes from a node running the old schema)");
 
-    // To simulate V1 wire bytes, we construct them using make_wire_bytes.
-    // In production, these would come from serialize_context() on a V1 sender.
     let v1_wire = {
         let v1 = TraceContextV1 {
             trace_id: "tid-from-old-node".into(),
@@ -78,8 +68,9 @@ fn main() {
     };
 
     {
-        let _guard = sync_ctx::deserialize_context(&v1_wire).unwrap();
-        let ctx: TraceContextV2 = sync_ctx::get_context("trace_ctx").unwrap();
+        let snap = ContextSnapshot::deserialize(&v1_wire).unwrap();
+        let _guard = attach_snapshot(snap);
+        let ctx: TraceContextV2 = get_context_variable("trace_ctx").unwrap();
         println!("   trace_id = {} (preserved from V1)", ctx.trace_id);
         println!(
             "   span_id  = {:?} (default — V1 didn't have it)",
@@ -91,10 +82,8 @@ fn main() {
         );
     }
 
-    // --- Scenario 3: Multiple versions coexist ---
     println!("\n3. Both V1 and V2 deserializers registered:");
     println!("   The receiver can handle bytes from any known version.");
     println!("   Unknown versions return a clear error listing supported versions.");
-
     println!("\nDone! Version migration enables safe rolling upgrades.");
 }

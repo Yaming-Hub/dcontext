@@ -3,9 +3,11 @@
 //! `ContextStore` is the mutable state that lives inside a `Cell<Option<ContextStore>>`.
 //! It is accessed via the take/set pattern for contention-free interior mutability.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::registry::Registry;
 use crate::scope::ScopeNode;
 use crate::value::ContextValue;
 
@@ -26,7 +28,7 @@ pub(crate) const MAX_SCOPE_DEPTH: usize = 1024;
 /// User code (Clone, Drop, callbacks) runs **after** step 3, when the
 /// Cell holds a valid store. Re-entrant access during user code succeeds.
 /// Re-entrant access during steps 1–3 sees `None` and returns defaults.
-pub(crate) struct ContextStore {
+pub struct ContextStore {
     /// Frozen parent scope chain (immutable linked list).
     pub(crate) scope_chain: Option<Arc<ScopeNode>>,
     /// Active scope's values (sparse — only keys set in this scope).
@@ -135,7 +137,7 @@ impl ContextStore {
     /// that only increments the depth counter without allocating a node.
     ///
     /// Returns the new depth.
-    pub(crate) fn push_scope(&mut self, name: Option<String>) -> usize {
+    pub(crate) fn push_scope(&mut self, registry: &Registry<'_>, name: Option<String>) -> usize {
         self.depth += 1;
 
         // Beyond the limit: dead scope — just bump depth, no real work.
@@ -143,7 +145,7 @@ impl ContextStore {
             return self.depth;
         }
 
-        let cached = crate::registry::cached_keys();
+        let cached = registry.cached_keys();
         let mut cached_values: Vec<(&'static str, Arc<dyn ContextValue>)> = Vec::new();
         for &key in &cached {
             if let Some(val) = self.get_value(key) {
@@ -322,25 +324,6 @@ impl ContextStore {
         result
     }
 
-    /// Set the remote scope chain.
-    pub(crate) fn set_remote_chain(&mut self, chain: Vec<String>) {
-        self.remote_chain = Arc::new(chain);
-        self.remote_chain_base_depth = self.depth;
-    }
-
-    /// Activate a scope barrier at the current depth.
-    ///
-    /// All scopes with depth <= the barrier depth become invisible to
-    /// value lookups, `collect_values`, and `scope_chain`. The barrier
-    /// is automatically saved/restored by `push_scope`/`pop_scope`, so
-    /// dropping the guard that owns this scope clears the barrier.
-    pub(crate) fn set_scope_barrier(&mut self) {
-        // Block everything below the current scope. The current scope's
-        // parent chain starts at depth - 1, so barrier = depth - 1
-        // hides all ancestors.
-        self.scope_barrier = Some(self.depth - 1);
-    }
-
     /// Build the full scope chain: frozen parent names + remote prefix + local named scope names.
     /// Stops at the scope_barrier — hidden scopes are excluded.
     pub(crate) fn scope_chain(&self) -> Vec<String> {
@@ -395,6 +378,25 @@ impl ContextStore {
     }
 }
 
+// ── Thread-local storage ───────────────────────────────────────
+
+thread_local! {
+    pub(crate) static CONTEXT: Cell<Option<ContextStore>> =
+        Cell::new(Some(ContextStore::new()));
+}
+
+/// Execute `f` with exclusive access to the thread-local context store.
+pub(crate) fn try_apply<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
+    CONTEXT
+        .try_with(|cell| {
+            let mut store = cell.take()?;
+            let result = f(&mut store);
+            cell.set(Some(store));
+            Some(result)
+        })
+        .unwrap_or(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,7 +407,8 @@ mod tests {
 
         // Push up to the limit — all real scopes.
         for i in 0..MAX_SCOPE_DEPTH {
-            let depth = store.push_scope(Some(format!("scope_{}", i)));
+            let registry = crate::registry::Registry::empty();
+            let depth = store.push_scope(&registry, Some(format!("scope_{}", i)));
             assert_eq!(depth, i + 2); // depth starts at 1, first push yields 2
         }
         assert_eq!(store.depth, MAX_SCOPE_DEPTH + 1);
@@ -423,9 +426,10 @@ mod tests {
         assert_eq!(real_node_count, MAX_SCOPE_DEPTH);
 
         // Push beyond the limit — dead scopes.
-        let dead_depth_1 = store.push_scope(Some("dead_1".to_string()));
+        let registry = crate::registry::Registry::empty();
+        let dead_depth_1 = store.push_scope(&registry, Some("dead_1".to_string()));
         assert_eq!(dead_depth_1, MAX_SCOPE_DEPTH + 2);
-        let dead_depth_2 = store.push_scope(Some("dead_2".to_string()));
+        let dead_depth_2 = store.push_scope(&registry, Some("dead_2".to_string()));
         assert_eq!(dead_depth_2, MAX_SCOPE_DEPTH + 3);
 
         // Real node count should NOT grow — dead scopes are not real.
@@ -465,12 +469,13 @@ mod tests {
         let mut store = ContextStore::new();
 
         // Push one real scope and set a value.
-        store.push_scope(None);
+        let registry = crate::registry::Registry::empty();
+        store.push_scope(&registry, None);
         store.set_value("persistent", Arc::new(42u64));
 
         // Push up to and beyond the limit.
         for _ in 0..MAX_SCOPE_DEPTH + 5 {
-            store.push_scope(None);
+            store.push_scope(&registry, None);
         }
 
         // The value set in the real scope should still be readable.
@@ -495,7 +500,8 @@ mod tests {
         // Push well beyond the limit.
         let total = MAX_SCOPE_DEPTH + 10;
         for _ in 0..total {
-            let d = store.push_scope(None);
+            let registry = crate::registry::Registry::empty();
+            let d = store.push_scope(&registry, None);
             depths.push(d);
         }
         assert_eq!(store.depth, total + 1);

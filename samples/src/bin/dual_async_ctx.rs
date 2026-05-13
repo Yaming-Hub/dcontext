@@ -1,107 +1,77 @@
-//! # Sample: Dual-Context — Async Context
+//! # Sample: Unified Context — Async Usage
 //!
-//! Demonstrates using `dcontext::async_ctx` for task-local context management.
-//! All operations in `async_ctx` target the tokio task-local store exclusively.
-//!
-//! Key concepts:
-//! - `async_ctx::with_context` — establishes task-local context for a future
-//! - `async_ctx::scope` — scoped context that auto-reverts (safe across .await)
-//! - `async_ctx::push_scope` / `scope_chain` — named scope tracking
-//! - `async_ctx::set_context` / `get_context` — type-safe value access
-//! - `async_ctx::snapshot` — capture for propagation to child tasks
+//! Demonstrates the new `ContextFutureExt` pattern for async code.
 //!
 //! Usage: `cargo run --bin dual_async_ctx`
 
-use dcontext::async_ctx;
-use dcontext::ContextSnapshot;
+use dcontext::{clear, get_context_variable, scope_chain, set_context_variable, ContextFutureExt};
 
 #[tokio::main]
 async fn main() {
-    println!("=== dcontext::async_ctx — Task-Local Context ===\n");
+    println!("=== Unified Context — Async Usage ===\n");
+    clear();
 
-    // All async_ctx operations require a task-local context to be established.
-    // Use `with_context` at the entry point (e.g., request handler).
-    let initial = ContextSnapshot::empty();
-
-    async_ctx::with_context(initial, async {
-        // ── Basic set/get ──────────────────────────────────────────
+    async {
         println!("--- Basic set/get ---");
-        async_ctx::set_context("request_id", "req-42".to_string());
-        async_ctx::set_context("user_id", 1001u64);
+        set_context_variable("request_id", "req-42".to_string());
+        set_context_variable("user_id", 1001u64);
 
-        let rid: Option<String> = async_ctx::get_context("request_id");
-        let uid: Option<u64> = async_ctx::get_context("user_id");
+        let rid: Option<String> = get_context_variable("request_id");
+        let uid: Option<u64> = get_context_variable("user_id");
         println!("  request_id = {:?}", rid);
         println!("  user_id    = {:?}", uid);
 
-        // ── Scoped context ────────────────────────────────────────
         println!("\n--- Scoped context (auto-reverts) ---");
-        async_ctx::scope("handle_request", async {
-            async_ctx::set_context("request_id", "req-scoped".to_string());
-            let rid: Option<String> = async_ctx::get_context("request_id");
+        async {
+            set_context_variable("request_id", "req-scoped".to_string());
+            let rid: Option<String> = get_context_variable("request_id");
             println!("  Inside scope: request_id = {:?}", rid);
+            println!("  Scope chain: {:?}", scope_chain());
 
-            let chain = async_ctx::scope_chain();
-            println!("  Scope chain: {:?}", chain);
-
-            // Nested scopes
-            async_ctx::scope("validate", async {
-                let chain = async_ctx::scope_chain();
-                println!("  Nested scope chain: {:?}", chain);
-            })
+            async {
+                println!("  Nested scope chain: {:?}", scope_chain());
+            }
+            .scope("validate")
             .await;
-        })
+        }
+        .scope("handle_request")
         .await;
 
-        // After scope exits, values revert
-        let rid: Option<String> = async_ctx::get_context("request_id");
+        let rid: Option<String> = get_context_variable("request_id");
         println!("  After scope: request_id = {:?} (reverted)", rid);
-        let chain = async_ctx::scope_chain();
-        println!("  Scope chain: {:?} (empty)", chain);
+        println!("  Scope chain: {:?} (empty)", scope_chain());
 
-        // ── Safe across .await ────────────────────────────────────
         println!("\n--- Safe across .await (no leak) ---");
-        async_ctx::scope("io_operation", async {
-            println!("  Before yield: chain = {:?}", async_ctx::scope_chain());
-            tokio::task::yield_now().await; // simulates I/O
-            println!("  After yield:  chain = {:?}", async_ctx::scope_chain());
-        })
+        async {
+            println!("  Before yield: chain = {:?}", scope_chain());
+            tokio::task::yield_now().await;
+            println!("  After yield:  chain = {:?}", scope_chain());
+        }
+        .scope("io_operation")
         .await;
-        println!(
-            "  After scope:  chain = {:?} (clean)",
-            async_ctx::scope_chain()
-        );
+        println!("  After scope:  chain = {:?} (clean)", scope_chain());
 
-        // ── Propagate to child tasks ──────────────────────────────
-        println!("\n--- Propagate to child tasks via snapshot ---");
-        async_ctx::set_context("trace_id", "trace-abc".to_string());
-        let _guard = async_ctx::push_scope("parent_handler");
-
-        let child_snap = async_ctx::snapshot();
-        let handle = tokio::spawn(async move {
-            async_ctx::with_context(child_snap, async {
-                let tid: Option<String> = async_ctx::get_context("trace_id");
-                let chain = async_ctx::scope_chain();
+        println!("\n--- Propagate to child tasks via fork ---");
+        set_context_variable("trace_id", "trace-abc".to_string());
+        let handle = tokio::spawn(
+            async {
+                let tid: Option<String> = get_context_variable("trace_id");
                 println!("  [child task] trace_id = {:?}", tid);
-                println!("  [child task] chain    = {:?}", chain);
-
-                // Child modifications are isolated
-                async_ctx::set_context("trace_id", "trace-child".to_string());
-            })
-            .await;
-        });
+                println!("  [child task] chain    = {:?}", scope_chain());
+                set_context_variable("trace_id", "trace-child".to_string());
+            }
+            .scope("parent_handler")
+            .fork(),
+        );
         handle.await.unwrap();
 
-        // Parent is unaffected
-        let tid: Option<String> = async_ctx::get_context("trace_id");
+        let tid: Option<String> = get_context_variable("trace_id");
         println!("  [parent] trace_id still = {:?}", tid);
-    })
+    }
+    .capture()
     .await;
 
-    // Outside async context, async_ctx gracefully returns defaults
-    println!("\n--- Outside async context (graceful no-op) ---");
-    let chain = async_ctx::scope_chain();
-    println!("  scope_chain() = {:?} (empty — not in task)", chain);
-
+    println!("\n--- Outside wrapped future ---");
+    println!("  scope_chain() = {:?} (empty)", scope_chain());
     println!("\nDone!");
 }
