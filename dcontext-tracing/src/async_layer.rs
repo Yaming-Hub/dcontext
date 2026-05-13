@@ -238,6 +238,13 @@ where
     }
 
     fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        // Early exit if no async (task-local) context is active.
+        // This avoids accessing span extensions on blocking threads or
+        // other non-async paths, preventing poisoned-mutex cascades.
+        if !dcontext::async_ctx::has_context() {
+            return;
+        }
+
         let span = match ctx.span(id) {
             Some(s) => s,
             None => return,
@@ -281,6 +288,11 @@ where
     }
 
     fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        // Skip if no async context — nothing was pushed in on_enter.
+        if !dcontext::async_ctx::has_context() {
+            return;
+        }
+
         let span = match ctx.span(&id) {
             Some(s) => s,
             None => return,

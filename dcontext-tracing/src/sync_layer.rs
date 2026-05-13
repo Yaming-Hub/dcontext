@@ -102,7 +102,7 @@ impl<S> SyncDcontextLayer<S> {
         }
         drop(extensions);
 
-        let skip = dcontext::async_ctx::current_depth().is_some();
+        let skip = dcontext::async_ctx::is_active();
         let mut extensions = span.extensions_mut();
         extensions.insert(SyncSkipMarker { skip });
         skip
