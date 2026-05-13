@@ -5,7 +5,6 @@ use base64::Engine as _;
 
 use crate::*;
 // Re-import from the crate root
-use crate::sync_ctx;
 use crate::wire::test_helpers::{make_wire_bytes, make_wire_bytes_v};
 use crate::ContextError;
 use crate::ContextSnapshot;
@@ -31,12 +30,63 @@ fn unique_key(prefix: &str, suffix: &str) -> &'static str {
 }
 
 fn with_snapshot<F: Future>(snap: ContextSnapshot, fut: F) -> WithContext<F> {
-    fut.with_context(snapshot_to_store(snap))
+    fut.with_context(snap.into())
 }
 
 async fn async_scope<F: Future>(name: &str, fut: F) -> F::Output {
     let _scope = push_scope(name);
     fut.await
+}
+
+fn enter_scope() -> ScopeGuard {
+    crate::store::try_apply(|store| ScopeGuard::new(store.push_scope(None)))
+        .unwrap_or_else(ScopeGuard::noop)
+}
+
+fn enter_named_scope(name: impl Into<String>) -> ScopeGuard {
+    let name = name.into();
+    push_scope(&name)
+}
+
+fn set_context<T>(key: &'static str, value: T)
+where
+    T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    set_context_variable(key, value);
+}
+
+fn get_context<T>(key: &str) -> Option<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    get_context_variable(key)
+}
+
+fn update_context<T>(key: &'static str, f: impl FnOnce(T) -> T)
+where
+    T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    update_context_variable(key, f);
+}
+
+fn snapshot() -> ContextSnapshot {
+    capture()
+}
+
+fn attach(snap: ContextSnapshot) -> AttachGuard {
+    attach_snapshot(snap)
+}
+
+fn restore(snap: ContextSnapshot) -> AttachGuard {
+    attach_snapshot(snap)
+}
+
+fn serialize_context() -> Result<Vec<u8>, ContextError> {
+    capture().serialize()
+}
+
+fn deserialize_context(bytes: &[u8]) -> Result<AttachGuard, ContextError> {
+    ContextSnapshot::deserialize(bytes).map(attach_snapshot)
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -47,7 +97,7 @@ async fn async_scope<F: Future>(name: &str, fut: F) -> F::Output {
 fn test_register_and_get_default() {
     let key = unique_key("reg_default", "rid");
     register::<RequestId>(key);
-    let val: RequestId = sync_ctx::get_context::<RequestId>(key).unwrap_or_default();
+    let val: RequestId = get_context::<RequestId>(key).unwrap_or_default();
     assert_eq!(val, RequestId::default());
 }
 
@@ -69,7 +119,7 @@ fn test_try_register_conflict() {
 #[test]
 fn test_get_unregistered_returns_none() {
     let key = unique_key("unreg_none", "missing");
-    assert_eq!(sync_ctx::get_context::<RequestId>(key), None);
+    assert_eq!(get_context::<RequestId>(key), None);
 }
 
 // Registry-validation wrappers like try_get_context were removed in the sync/async split.
@@ -82,8 +132,8 @@ fn test_get_unregistered_returns_none() {
 fn test_set_and_get() {
     let key = unique_key("set_get", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("req-42".into()));
-    let val: RequestId = sync_ctx::get_context::<RequestId>(key).unwrap();
+    set_context(key, RequestId("req-42".into()));
+    let val: RequestId = get_context::<RequestId>(key).unwrap();
     assert_eq!(val.0, "req-42");
 }
 
@@ -98,65 +148,62 @@ fn test_set_and_get() {
 fn test_scope_shadows_and_reverts() {
     let key = unique_key("scope_shadow", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("parent".into()));
+    set_context(key, RequestId("parent".into()));
 
     {
-        let _guard = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("child".into()));
-        assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "child");
+        let _guard = enter_scope();
+        set_context(key, RequestId("child".into()));
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "child");
     }
     // Scope reverted
-    assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "parent");
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "parent");
 }
 
 #[test]
 fn test_nested_scopes() {
     let key = unique_key("nested_scope", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("root".into()));
+    set_context(key, RequestId("root".into()));
 
     {
-        let _g1 = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("level1".into()));
+        let _g1 = enter_scope();
+        set_context(key, RequestId("level1".into()));
 
         {
-            let _g2 = sync_ctx::enter_scope();
-            sync_ctx::set_context(key, RequestId("level2".into()));
-            assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "level2");
+            let _g2 = enter_scope();
+            set_context(key, RequestId("level2".into()));
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "level2");
         }
-        assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "level1");
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "level1");
     }
-    assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "root");
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "root");
 }
 
 #[test]
 fn test_scope_fn() {
     let key = unique_key("scope_fn", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("before".into()));
+    set_context(key, RequestId("before".into()));
 
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("inside".into()));
-        assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "inside");
+        let _scope_guard = enter_scope();
+        set_context(key, RequestId("inside".into()));
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "inside");
     }
 
-    assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "before");
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "before");
 }
 
 #[test]
 fn test_scope_inherits_parent() {
     let key = unique_key("scope_inherit", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("parent_val".into()));
+    set_context(key, RequestId("parent_val".into()));
 
     {
-        let _scope_guard = sync_ctx::enter_scope();
+        let _scope_guard = enter_scope();
         // Should see parent value without setting anything
-        assert_eq!(
-            sync_ctx::get_context::<RequestId>(key).unwrap().0,
-            "parent_val"
-        );
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "parent_val");
     }
 }
 
@@ -167,25 +214,19 @@ fn test_scope_partial_override() {
     register::<RequestId>(key_a);
     register::<UserId>(key_b);
 
-    sync_ctx::set_context(key_a, RequestId("a_parent".into()));
-    sync_ctx::set_context(key_b, UserId(10));
+    set_context(key_a, RequestId("a_parent".into()));
+    set_context(key_b, UserId(10));
 
     {
-        let _scope_guard = sync_ctx::enter_scope();
+        let _scope_guard = enter_scope();
         // Override only key_a
-        sync_ctx::set_context(key_a, RequestId("a_child".into()));
-        assert_eq!(
-            sync_ctx::get_context::<RequestId>(key_a).unwrap().0,
-            "a_child"
-        );
-        assert_eq!(sync_ctx::get_context::<UserId>(key_b).unwrap().0, 10); // inherited
+        set_context(key_a, RequestId("a_child".into()));
+        assert_eq!(get_context::<RequestId>(key_a).unwrap().0, "a_child");
+        assert_eq!(get_context::<UserId>(key_b).unwrap().0, 10); // inherited
     }
 
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key_a).unwrap().0,
-        "a_parent"
-    );
-    assert_eq!(sync_ctx::get_context::<UserId>(key_b).unwrap().0, 10);
+    assert_eq!(get_context::<RequestId>(key_a).unwrap().0, "a_parent");
+    assert_eq!(get_context::<UserId>(key_b).unwrap().0, 10);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -196,33 +237,27 @@ fn test_scope_partial_override() {
 fn test_snapshot_captures_current() {
     let key = unique_key("snap_capture", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("snapped".into()));
+    set_context(key, RequestId("snapped".into()));
 
-    let snap = sync_ctx::snapshot();
+    let snap = snapshot();
 
     // Modify after snapshot
-    sync_ctx::set_context(key, RequestId("modified".into()));
+    set_context(key, RequestId("modified".into()));
 
     // Attach snapshot in a new scope
     {
-        let _guard = sync_ctx::attach(snap);
-        assert_eq!(
-            sync_ctx::get_context::<RequestId>(key).unwrap().0,
-            "snapped"
-        );
+        let _guard = attach(snap);
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "snapped");
     }
     // Back to modified
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "modified"
-    );
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "modified");
 }
 
 #[test]
 fn test_snapshot_empty_context() {
     let snap = ContextSnapshot::empty();
     {
-        let _guard = sync_ctx::attach(snap);
+        let _guard = attach(snap);
         // No values — should get defaults for registered keys
     }
 }
@@ -235,14 +270,14 @@ fn test_snapshot_empty_context() {
 fn test_spawn_with_context() {
     let key = unique_key("thread_spawn", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("main-thread".into()));
+    set_context(key, RequestId("main-thread".into()));
 
-    let snap = sync_ctx::snapshot();
+    let snap = snapshot();
     let handle = std::thread::Builder::new()
         .name("test-worker".into())
         .spawn(move || {
-            sync_ctx::restore(snap);
-            sync_ctx::get_context::<RequestId>(key).unwrap()
+            let _guard = restore(snap);
+            get_context::<RequestId>(key).unwrap()
         })
         .unwrap();
 
@@ -254,16 +289,16 @@ fn test_spawn_with_context() {
 fn test_wrap_with_context_fn_once() {
     let key = unique_key("wrap_once", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("wrapped".into()));
+    set_context(key, RequestId("wrapped".into()));
 
-    let snap = sync_ctx::snapshot();
+    let snap = snapshot();
     let wrapped = move || {
-        sync_ctx::restore(snap);
-        sync_ctx::get_context::<RequestId>(key).unwrap()
+        let _guard = restore(snap);
+        get_context::<RequestId>(key).unwrap()
     };
 
     // Change context after wrapping
-    sync_ctx::set_context(key, RequestId("changed".into()));
+    set_context(key, RequestId("changed".into()));
 
     // The wrapped closure should see the snapped value
     let handle = std::thread::spawn(wrapped);
@@ -275,12 +310,12 @@ fn test_wrap_with_context_fn_once() {
 fn test_wrap_with_context_fn_multi() {
     let key = unique_key("wrap_multi", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("multi".into()));
+    set_context(key, RequestId("multi".into()));
 
-    let snap = sync_ctx::snapshot();
+    let snap = snapshot();
     let wrapped = move || {
-        let _guard = sync_ctx::attach(snap.clone());
-        sync_ctx::get_context::<RequestId>(key).unwrap()
+        let _guard = attach(snap.clone());
+        get_context::<RequestId>(key).unwrap()
     };
 
     // Call multiple times
@@ -298,17 +333,14 @@ fn test_wrap_with_context_fn_multi() {
 fn test_serialize_deserialize_roundtrip() {
     let key = unique_key("serde_rt", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("serialized".into()));
+    set_context(key, RequestId("serialized".into()));
 
-    let bytes = sync_ctx::serialize_context().unwrap();
+    let bytes = serialize_context().unwrap();
 
     // Deserialize in a new scope
     {
-        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
-        assert_eq!(
-            sync_ctx::get_context::<RequestId>(key).unwrap().0,
-            "serialized"
-        );
+        let _guard = deserialize_context(&bytes).unwrap();
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "serialized");
     }
 }
 
@@ -317,9 +349,9 @@ fn test_serialize_deserialize_roundtrip() {
 fn test_serialize_deserialize_string_roundtrip() {
     let key = unique_key("serde_str", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("base64val".into()));
+    set_context(key, RequestId("base64val".into()));
 
-    let encoded = sync_ctx::serialize_context()
+    let encoded = serialize_context()
         .map(|b| base64::engine::general_purpose::STANDARD.encode(&b))
         .map_err(|e| e)
         .unwrap();
@@ -327,17 +359,14 @@ fn test_serialize_deserialize_string_roundtrip() {
 
     // Clear and restore
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("cleared".into()));
+        let _scope_guard = enter_scope();
+        set_context(key, RequestId("cleared".into()));
         {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&encoded)
                 .unwrap();
-            let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
-            assert_eq!(
-                sync_ctx::get_context::<RequestId>(key).unwrap().0,
-                "base64val"
-            );
+            let _guard = deserialize_context(&bytes).unwrap();
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "base64val");
         }
     }
 }
@@ -346,16 +375,16 @@ fn test_serialize_deserialize_string_roundtrip() {
 fn test_deserialize_unknown_keys_skipped() {
     let key = unique_key("serde_skip", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("known".into()));
+    set_context(key, RequestId("known".into()));
 
     // Serialize with the current registration
-    let bytes = sync_ctx::serialize_context().unwrap();
+    let bytes = serialize_context().unwrap();
 
     // The deserialization should work even if there are extra keys —
     // here we just verify it doesn't fail on the known key.
     {
-        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
-        assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "known");
+        let _guard = deserialize_context(&bytes).unwrap();
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "known");
     }
 }
 
@@ -366,19 +395,16 @@ fn test_serialize_multiple_keys() {
     register::<RequestId>(key_a);
     register::<UserId>(key_b);
 
-    sync_ctx::set_context(key_a, RequestId("req-multi".into()));
-    sync_ctx::set_context(key_b, UserId(42));
+    set_context(key_a, RequestId("req-multi".into()));
+    set_context(key_b, UserId(42));
 
-    let bytes = sync_ctx::serialize_context().unwrap();
+    let bytes = serialize_context().unwrap();
 
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
-        assert_eq!(
-            sync_ctx::get_context::<RequestId>(key_a).unwrap().0,
-            "req-multi"
-        );
-        assert_eq!(sync_ctx::get_context::<UserId>(key_b).unwrap().0, 42);
+        let _scope_guard = enter_scope();
+        let _guard = deserialize_context(&bytes).unwrap();
+        assert_eq!(get_context::<RequestId>(key_a).unwrap().0, "req-multi");
+        assert_eq!(get_context::<UserId>(key_b).unwrap().0, 42);
     }
 }
 
@@ -391,7 +417,7 @@ fn test_try_get_registered_but_unset() {
     let key = unique_key("try_get_none", "rid");
     register::<RequestId>(key);
     // Registered but never set — should return Ok(None)
-    let result = sync_ctx::get_context::<RequestId>(key);
+    let result = get_context::<RequestId>(key);
     assert!(result.is_none());
 }
 
@@ -432,13 +458,10 @@ fn test_register_contexts_macro() {
     let key_b = unique_key("macro_reg", "b");
     register::<RequestId>(key_a);
     register::<UserId>(key_b);
-    sync_ctx::set_context(key_a, RequestId("macro-a".into()));
-    sync_ctx::set_context(key_b, UserId(77));
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key_a).unwrap().0,
-        "macro-a"
-    );
-    assert_eq!(sync_ctx::get_context::<UserId>(key_b).unwrap().0, 77);
+    set_context(key_a, RequestId("macro-a".into()));
+    set_context(key_b, UserId(77));
+    assert_eq!(get_context::<RequestId>(key_a).unwrap().0, "macro-a");
+    assert_eq!(get_context::<UserId>(key_b).unwrap().0, 77);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -449,19 +472,19 @@ fn test_register_contexts_macro() {
 fn test_set_max_context_size_enforced() {
     let key = unique_key("size_limit", "rid");
     register::<RequestId>(key);
-    sync_ctx::set_context(key, RequestId("some-value".into()));
+    set_context(key, RequestId("some-value".into()));
 
     // Set a very small limit.
     set_max_context_size(5);
 
-    let result = sync_ctx::serialize_context();
+    let result = serialize_context();
     assert!(matches!(result, Err(ContextError::ContextTooLarge { .. })));
 
     // Reset limit.
     set_max_context_size(0);
 
     // Should succeed now.
-    let result = sync_ctx::serialize_context();
+    let result = serialize_context();
     assert!(result.is_ok());
 }
 
@@ -530,8 +553,8 @@ fn test_migration_end_to_end() {
 
     // Deserialize on a fresh thread (clean thread-local context).
     let handle = std::thread::spawn(move || {
-        let _guard = sync_ctx::deserialize_context(&wire).unwrap();
-        let val: TraceV2 = sync_ctx::get_context::<TraceV2>(key).unwrap();
+        let _guard = deserialize_context(&wire).unwrap();
+        let val: TraceV2 = get_context::<TraceV2>(key).unwrap();
         assert_eq!(val.trace_id, "from-v1-sender");
         assert_eq!(val.span_id, "default-span");
     });
@@ -559,20 +582,20 @@ fn test_migration_current_version_still_works() {
     });
 
     // Current version (V2) roundtrip should still work.
-    let _guard = sync_ctx::enter_scope();
-    sync_ctx::set_context(
+    let _guard = enter_scope();
+    set_context(
         key,
         TraceV2 {
             trace_id: "current".into(),
             span_id: "current-span".into(),
         },
     );
-    let bytes = sync_ctx::serialize_context().unwrap();
+    let bytes = serialize_context().unwrap();
 
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
-        let val: TraceV2 = sync_ctx::get_context::<TraceV2>(key).unwrap();
+        let _scope_guard = enter_scope();
+        let _guard = deserialize_context(&bytes).unwrap();
+        let val: TraceV2 = get_context::<TraceV2>(key).unwrap();
         assert_eq!(val.trace_id, "current");
         assert_eq!(val.span_id, "current-span");
     }
@@ -608,15 +631,15 @@ fn test_register_with_json_codec() {
         )
     });
 
-    let _guard = sync_ctx::enter_scope();
-    sync_ctx::set_context(key, RequestId("json-encoded".into()));
+    let _guard = enter_scope();
+    set_context(key, RequestId("json-encoded".into()));
 
     // Roundtrip through serialization — uses JSON codec, not bincode.
-    let bytes = sync_ctx::serialize_context().unwrap();
+    let bytes = serialize_context().unwrap();
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
-        let val: RequestId = sync_ctx::get_context::<RequestId>(key).unwrap();
+        let _scope_guard = enter_scope();
+        let _guard = deserialize_context(&bytes).unwrap();
+        let val: RequestId = get_context::<RequestId>(key).unwrap();
         assert_eq!(val.0, "json-encoded");
     }
 }
@@ -632,10 +655,10 @@ fn test_json_codec_wire_bytes_are_json() {
         )
     });
 
-    let _guard = sync_ctx::enter_scope();
-    sync_ctx::set_context(key, RequestId("verify-json".into()));
+    let _guard = enter_scope();
+    set_context(key, RequestId("verify-json".into()));
 
-    let wire_bytes = sync_ctx::serialize_context().unwrap();
+    let wire_bytes = serialize_context().unwrap();
 
     // The inner value bytes should be valid JSON, not bincode.
     // Deserialize on a fresh thread to confirm.
@@ -646,8 +669,8 @@ fn test_json_codec_wire_bytes_are_json() {
                 |bytes| serde_json::from_slice(bytes).map_err(|e| e.to_string()),
             )
         });
-        let _guard = sync_ctx::deserialize_context(&wire_bytes).unwrap();
-        let val: RequestId = sync_ctx::get_context::<RequestId>(key).unwrap();
+        let _guard = deserialize_context(&wire_bytes).unwrap();
+        let val: RequestId = get_context::<RequestId>(key).unwrap();
         assert_eq!(val.0, "verify-json");
     });
     handle.join().unwrap();
@@ -659,14 +682,14 @@ fn test_default_codec_still_works() {
     let key = unique_key("codec_default", "rid");
     register::<RequestId>(key);
 
-    let _guard = sync_ctx::enter_scope();
-    sync_ctx::set_context(key, RequestId("bincode-default".into()));
+    let _guard = enter_scope();
+    set_context(key, RequestId("bincode-default".into()));
 
-    let bytes = sync_ctx::serialize_context().unwrap();
+    let bytes = serialize_context().unwrap();
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
-        let val: RequestId = sync_ctx::get_context::<RequestId>(key).unwrap();
+        let _scope_guard = enter_scope();
+        let _guard = deserialize_context(&bytes).unwrap();
+        let val: RequestId = get_context::<RequestId>(key).unwrap();
         assert_eq!(val.0, "bincode-default");
     }
 }
@@ -703,16 +726,16 @@ fn test_local_only_builder_excludes_from_serialization() {
     let key = unique_key("local_builder_ser", "rid");
     register_with::<RequestId>(key, |o| o.local_only());
 
-    let _scope = sync_ctx::enter_scope();
-    sync_ctx::set_context(key, RequestId("should-not-serialize".into()));
+    let _scope = enter_scope();
+    set_context(key, RequestId("should-not-serialize".into()));
 
     // Serialize — the local_only value must be excluded from wire bytes.
-    let bytes = sync_ctx::serialize_context().unwrap();
+    let bytes = serialize_context().unwrap();
 
     // Deserialize on a fresh thread so the original scope's value isn't visible.
     std::thread::spawn(move || {
-        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
-        let val = sync_ctx::get_context::<RequestId>(key);
+        let _guard = deserialize_context(&bytes).unwrap();
+        let val = get_context::<RequestId>(key);
         assert!(
             val.is_none(),
             "local_only value registered via builder should not survive serialization"
@@ -735,14 +758,11 @@ mod async_tests {
         register::<RequestId>(key);
 
         let snap = {
-            sync_ctx::set_context(key, RequestId("async-val".into()));
-            sync_ctx::snapshot()
+            set_context(key, RequestId("async-val".into()));
+            snapshot()
         };
 
-        let result = with_snapshot(snap, async {
-            get_context::<RequestId>(key).unwrap()
-        })
-        .await;
+        let result = with_snapshot(snap, async { get_context::<RequestId>(key).unwrap() }).await;
 
         assert_eq!(result.0, "async-val");
     }
@@ -753,29 +773,20 @@ mod async_tests {
         register::<RequestId>(key);
 
         let snap = {
-            sync_ctx::set_context(key, RequestId("before-async".into()));
-            sync_ctx::snapshot()
+            set_context(key, RequestId("before-async".into()));
+            snapshot()
         };
 
         with_snapshot(snap, async {
-            assert_eq!(
-                get_context::<RequestId>(key).unwrap().0,
-                "before-async"
-            );
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "before-async");
 
             async_scope("", async {
                 set_context(key, RequestId("inside-async".into()));
-                assert_eq!(
-                    get_context::<RequestId>(key).unwrap().0,
-                    "inside-async"
-                );
+                assert_eq!(get_context::<RequestId>(key).unwrap().0, "inside-async");
             })
             .await;
 
-            assert_eq!(
-                get_context::<RequestId>(key).unwrap().0,
-                "before-async"
-            );
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "before-async");
         })
         .await;
     }
@@ -786,8 +797,8 @@ mod async_tests {
         register::<RequestId>(key);
 
         let snap = {
-            sync_ctx::set_context(key, RequestId("spawned-async".into()));
-            sync_ctx::snapshot()
+            set_context(key, RequestId("spawned-async".into()));
+            snapshot()
         };
 
         let handle = with_snapshot(snap, async {
@@ -808,8 +819,8 @@ mod async_tests {
         register::<RequestId>(key);
 
         let snap = {
-            sync_ctx::set_context(key, RequestId("outer".into()));
-            sync_ctx::snapshot()
+            set_context(key, RequestId("outer".into()));
+            snapshot()
         };
 
         with_snapshot(snap, async {
@@ -832,18 +843,15 @@ mod async_tests {
         register::<RequestId>(key);
 
         let snap = {
-            sync_ctx::set_context(key, RequestId("async-serde".into()));
-            sync_ctx::snapshot()
+            set_context(key, RequestId("async-serde".into()));
+            snapshot()
         };
 
         with_snapshot(snap, async {
             let bytes = serialize_context().unwrap();
             set_context(key, RequestId("cleared".into()));
             let _guard = deserialize_context(&bytes).unwrap();
-            assert_eq!(
-                get_context::<RequestId>(key).unwrap().0,
-                "async-serde"
-            );
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "async-serde");
         })
         .await;
     }
@@ -855,47 +863,44 @@ mod async_tests {
 
 #[test]
 fn test_scope_chain_empty_by_default() {
-    let chain = sync_ctx::scope_chain();
+    let chain = scope_chain();
     assert!(chain.is_empty(), "default scope chain should be empty");
 }
 
 #[test]
 fn test_scope_chain_named_scope() {
-    let _g = sync_ctx::enter_named_scope("outer");
-    assert_eq!(sync_ctx::scope_chain(), vec!["outer"]);
+    let _g = enter_named_scope("outer");
+    assert_eq!(scope_chain(), vec!["outer"]);
     {
-        let _g2 = sync_ctx::enter_named_scope("inner");
-        assert_eq!(sync_ctx::scope_chain(), vec!["outer", "inner"]);
+        let _g2 = enter_named_scope("inner");
+        assert_eq!(scope_chain(), vec!["outer", "inner"]);
     }
-    assert_eq!(sync_ctx::scope_chain(), vec!["outer"]);
+    assert_eq!(scope_chain(), vec!["outer"]);
 }
 
 #[test]
 fn test_scope_chain_unnamed_invisible() {
-    let _g1 = sync_ctx::enter_named_scope("named");
-    let _g2 = sync_ctx::enter_scope();
-    let _g3 = sync_ctx::enter_named_scope("also-named");
-    assert_eq!(sync_ctx::scope_chain(), vec!["named", "also-named"]);
+    let _g1 = enter_named_scope("named");
+    let _g2 = enter_scope();
+    let _g3 = enter_named_scope("also-named");
+    assert_eq!(scope_chain(), vec!["named", "also-named"]);
 }
 
 #[test]
 fn test_scope_chain_snapshot_preserves_chain() {
-    let _g = sync_ctx::enter_named_scope("request-handler");
-    let snap = sync_ctx::snapshot();
+    let _g = enter_named_scope("request-handler");
+    let snap = snapshot();
     assert_eq!(snap.scope_chain, vec!["request-handler"]);
 
     // Restore in a new scope — the chain becomes remote_chain
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        let _guard = sync_ctx::attach(snap.clone());
-        assert_eq!(sync_ctx::scope_chain(), vec!["request-handler"]);
+        let _scope_guard = enter_scope();
+        let _guard = attach(snap.clone());
+        assert_eq!(scope_chain(), vec!["request-handler"]);
 
         // Push local named scopes
-        let _g2 = sync_ctx::enter_named_scope("sub-handler");
-        assert_eq!(
-            sync_ctx::scope_chain(),
-            vec!["request-handler", "sub-handler"]
-        );
+        let _g2 = enter_named_scope("sub-handler");
+        assert_eq!(scope_chain(), vec!["request-handler", "sub-handler"]);
     }
 }
 
@@ -904,24 +909,24 @@ fn test_scope_chain_serialize_roundtrip() {
     let key = unique_key("sc_serde", "rid");
     register::<RequestId>(key);
 
-    let _g1 = sync_ctx::enter_named_scope("app");
-    let _g2 = sync_ctx::enter_named_scope("service");
-    sync_ctx::set_context(key, RequestId("req-1".into()));
+    let _g1 = enter_named_scope("app");
+    let _g2 = enter_named_scope("service");
+    set_context(key, RequestId("req-1".into()));
 
-    let bytes = sync_ctx::serialize_context().unwrap();
+    let bytes = serialize_context().unwrap();
 
     // Deserialize in a clean scope
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        let _guard = sync_ctx::deserialize_context(&bytes).unwrap();
+        let _scope_guard = enter_scope();
+        let _guard = deserialize_context(&bytes).unwrap();
         // Values restored
-        assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "req-1");
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "req-1");
         // Scope chain restored as remote prefix
-        assert_eq!(sync_ctx::scope_chain(), vec!["app", "service"]);
+        assert_eq!(scope_chain(), vec!["app", "service"]);
 
         // Push more local scopes
-        let _g3 = sync_ctx::enter_named_scope("handler");
-        assert_eq!(sync_ctx::scope_chain(), vec!["app", "service", "handler"]);
+        let _g3 = enter_named_scope("handler");
+        assert_eq!(scope_chain(), vec!["app", "service", "handler"]);
     }
 }
 
@@ -935,14 +940,11 @@ fn test_scope_chain_wire_v1_compat() {
     let v1_bytes = make_wire_bytes_v(1, key, 1, &value_bytes);
 
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        let _guard = sync_ctx::deserialize_context(&v1_bytes).unwrap();
-        assert_eq!(
-            sync_ctx::get_context::<RequestId>(key).unwrap().0,
-            "v1-value"
-        );
+        let _scope_guard = enter_scope();
+        let _guard = deserialize_context(&v1_bytes).unwrap();
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "v1-value");
         // No scope chain from v1
-        assert!(sync_ctx::scope_chain().is_empty());
+        assert!(scope_chain().is_empty());
     }
 }
 
@@ -952,35 +954,35 @@ fn test_scope_chain_remote_chain_lifo_restore() {
     let key = unique_key("sc_lifo", "rid");
     register::<RequestId>(key);
 
-    let _g = sync_ctx::enter_named_scope("local-root");
+    let _g = enter_named_scope("local-root");
 
     // First "remote" call
-    let _g1 = sync_ctx::enter_named_scope("sender-scope");
-    sync_ctx::set_context(key, RequestId("first".into()));
-    let bytes1 = sync_ctx::serialize_context().unwrap();
+    let _g1 = enter_named_scope("sender-scope");
+    set_context(key, RequestId("first".into()));
+    let bytes1 = serialize_context().unwrap();
 
     {
-        let _scope_guard = sync_ctx::enter_scope();
-        let _guard1 = sync_ctx::deserialize_context(&bytes1).unwrap();
+        let _scope_guard = enter_scope();
+        let _guard1 = deserialize_context(&bytes1).unwrap();
         // Chain shows the sender's full chain
-        assert_eq!(sync_ctx::scope_chain(), vec!["local-root", "sender-scope"]);
+        assert_eq!(scope_chain(), vec!["local-root", "sender-scope"]);
 
         // Second nested "remote" call
-        let _g2 = sync_ctx::enter_named_scope("nested-scope");
-        let bytes2 = sync_ctx::serialize_context().unwrap();
+        let _g2 = enter_named_scope("nested-scope");
+        let bytes2 = serialize_context().unwrap();
 
         {
-            let _scope_guard = sync_ctx::enter_scope();
-            let _guard2 = sync_ctx::deserialize_context(&bytes2).unwrap();
+            let _scope_guard = enter_scope();
+            let _guard2 = deserialize_context(&bytes2).unwrap();
             assert_eq!(
-                sync_ctx::scope_chain(),
+                scope_chain(),
                 vec!["local-root", "sender-scope", "nested-scope"]
             );
         }
 
         // After inner scope ends, original chain is restored
         assert_eq!(
-            sync_ctx::scope_chain(),
+            scope_chain(),
             vec!["local-root", "sender-scope", "nested-scope"]
         );
     }
@@ -991,8 +993,8 @@ mod async_scope_chain_tests {
 
     #[tokio::test]
     async fn test_scope_chain_with_context() {
-        let _g = sync_ctx::enter_named_scope("pre-send");
-        let snap = sync_ctx::snapshot();
+        let _g = enter_named_scope("pre-send");
+        let snap = snapshot();
 
         with_snapshot(snap, async {
             assert_eq!(scope_chain(), vec!["pre-send"]);
@@ -1008,8 +1010,8 @@ mod async_scope_chain_tests {
     #[tokio::test]
     async fn test_named_scope_async_basic() {
         let snap = {
-            let _g = sync_ctx::enter_named_scope("root");
-            sync_ctx::snapshot()
+            let _g = enter_named_scope("root");
+            snapshot()
         };
 
         with_snapshot(snap, async {
@@ -1043,7 +1045,7 @@ impl Drop for ReentrantDropVal {
         // Try to read context during drop. Should not panic.
         // Probe during Drop without panicking if the key is missing.
         // (this Drop may fire after tests clean up).
-        let _ = sync_ctx::get_context::<RequestId>("__reentrant_drop_probe__");
+        let _ = get_context::<RequestId>("__reentrant_drop_probe__");
     }
 }
 
@@ -1053,15 +1055,15 @@ fn test_reentrant_read_during_scope_enter() {
     let key = unique_key("reentrant_enter", "rid");
     register::<RequestId>(key);
 
-    sync_ctx::set_context(key, RequestId("parent-val".into()));
+    set_context(key, RequestId("parent-val".into()));
 
     // Enter a scope — internally takes the store, modifies it, puts it back.
     // If anything tries to read during the take window, it should gracefully
     // return defaults (not panic).
-    let _g = sync_ctx::enter_scope();
+    let _g = enter_scope();
 
     // Value should still be accessible from parent scope.
-    let val: RequestId = sync_ctx::get_context::<RequestId>(key).unwrap();
+    let val: RequestId = get_context::<RequestId>(key).unwrap();
     assert_eq!(val.0, "parent-val");
 }
 
@@ -1072,16 +1074,16 @@ fn test_reentrant_read_during_scope_leave() {
     let key = unique_key("reentrant_leave", "rid");
     register::<RequestId>(key);
 
-    sync_ctx::set_context(key, RequestId("base".into()));
+    set_context(key, RequestId("base".into()));
 
     {
-        let _g = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("child".into()));
-        assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "child");
+        let _g = enter_scope();
+        set_context(key, RequestId("child".into()));
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "child");
     }
     // _g dropped — scope popped. Old child value (Arc) dropped OUTSIDE Cell window.
 
-    let val: RequestId = sync_ctx::get_context::<RequestId>(key).unwrap();
+    let val: RequestId = get_context::<RequestId>(key).unwrap();
     assert_eq!(val.0, "base");
 }
 
@@ -1094,12 +1096,12 @@ fn test_reentrant_read_during_set_context() {
     register::<RequestId>(key_a);
     register::<RequestId>(key_b);
 
-    sync_ctx::set_context(key_a, RequestId("aaa".into()));
-    sync_ctx::set_context(key_b, RequestId("bbb".into()));
+    set_context(key_a, RequestId("aaa".into()));
+    set_context(key_b, RequestId("bbb".into()));
 
     // After set, both reads succeed.
-    assert_eq!(sync_ctx::get_context::<RequestId>(key_a).unwrap().0, "aaa");
-    assert_eq!(sync_ctx::get_context::<RequestId>(key_b).unwrap().0, "bbb");
+    assert_eq!(get_context::<RequestId>(key_a).unwrap().0, "aaa");
+    assert_eq!(get_context::<RequestId>(key_b).unwrap().0, "bbb");
 }
 
 #[test]
@@ -1109,12 +1111,12 @@ fn test_reentrant_drop_on_value_overwrite() {
     let key = unique_key("reentrant_drop_overwrite", "val");
     register::<ReentrantDropVal>(key);
 
-    sync_ctx::set_context(key, ReentrantDropVal("first".into()));
+    set_context(key, ReentrantDropVal("first".into()));
     // This overwrites "first" — the old Arc is dropped after Cell::set().
     // ReentrantDropVal::drop tries to read context → should not panic.
-    sync_ctx::set_context(key, ReentrantDropVal("second".into()));
+    set_context(key, ReentrantDropVal("second".into()));
 
-    let val: ReentrantDropVal = sync_ctx::get_context::<ReentrantDropVal>(key).unwrap();
+    let val: ReentrantDropVal = get_context::<ReentrantDropVal>(key).unwrap();
     assert_eq!(val.0, "second");
 }
 
@@ -1125,16 +1127,16 @@ fn test_reentrant_drop_on_scope_leave() {
     let key = unique_key("reentrant_drop_leave", "val");
     register::<ReentrantDropVal>(key);
 
-    sync_ctx::set_context(key, ReentrantDropVal("root".into()));
+    set_context(key, ReentrantDropVal("root".into()));
 
     {
-        let _g = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, ReentrantDropVal("child-scope".into()));
+        let _g = enter_scope();
+        set_context(key, ReentrantDropVal("child-scope".into()));
     }
     // _g dropped → child scope's ReentrantDropVal dropped.
     // Its Drop reads context → should not panic.
 
-    let val: ReentrantDropVal = sync_ctx::get_context::<ReentrantDropVal>(key).unwrap();
+    let val: ReentrantDropVal = get_context::<ReentrantDropVal>(key).unwrap();
     assert_eq!(val.0, "root");
 }
 
@@ -1144,19 +1146,19 @@ fn test_scope_push_pop_integrity_across_many_levels() {
     let key = unique_key("stress_scope", "rid");
     register::<RequestId>(key);
 
-    sync_ctx::set_context(key, RequestId("root".into()));
+    set_context(key, RequestId("root".into()));
 
     let depth = 50;
     let mut guards: Vec<ScopeGuard> = Vec::new();
 
     for i in 0..depth {
-        guards.push(sync_ctx::enter_named_scope(format!("scope-{}", i)));
-        sync_ctx::set_context(key, RequestId(format!("val-{}", i)));
+        guards.push(enter_named_scope(format!("scope-{}", i)));
+        set_context(key, RequestId(format!("val-{}", i)));
     }
 
     // Innermost scope value.
     assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
+        get_context::<RequestId>(key).unwrap().0,
         format!("val-{}", depth - 1)
     );
 
@@ -1165,14 +1167,14 @@ fn test_scope_push_pop_integrity_across_many_levels() {
         guards.pop();
         if i > 0 {
             assert_eq!(
-                sync_ctx::get_context::<RequestId>(key).unwrap().0,
+                get_context::<RequestId>(key).unwrap().0,
                 format!("val-{}", i - 1)
             );
         }
     }
 
     // Back to root.
-    assert_eq!(sync_ctx::get_context::<RequestId>(key).unwrap().0, "root");
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "root");
 }
 
 #[test]
@@ -1183,12 +1185,12 @@ fn test_scope_chain_integrity_after_many_push_pops() {
 
     for round in 0..10 {
         let name = format!("round-{}", round);
-        let _g = sync_ctx::enter_named_scope(&name);
-        let chain = sync_ctx::scope_chain();
+        let _g = enter_named_scope(&name);
+        let chain = scope_chain();
         assert!(chain.last().map(|s| s.as_str()) == Some(name.as_str()));
     }
     // All guards dropped, chain should be empty.
-    assert!(sync_ctx::scope_chain().is_empty());
+    assert!(scope_chain().is_empty());
 }
 
 #[test]
@@ -1200,12 +1202,12 @@ fn test_update_context_basic() {
 
     register::<Counter>(key);
 
-    sync_ctx::set_context(key, Counter(10));
+    set_context(key, Counter(10));
 
     // Update: increment the counter.
-    sync_ctx::update_context::<Counter>(key, |c| Counter(c.0 + 5));
+    update_context::<Counter>(key, |c| Counter(c.0 + 5));
 
-    let val = sync_ctx::get_context::<Counter>(key).unwrap();
+    let val = get_context::<Counter>(key).unwrap();
     assert_eq!(val.0, 15);
 }
 
@@ -1219,9 +1221,9 @@ fn test_update_context_default_when_unset() {
     register::<Counter>(key);
 
     // No prior set — should start from default (0).
-    sync_ctx::update_context::<Counter>(key, |c| Counter(c.0 + 1));
+    update_context::<Counter>(key, |c| Counter(c.0 + 1));
 
-    let val = sync_ctx::get_context::<Counter>(key).unwrap();
+    let val = get_context::<Counter>(key).unwrap();
     assert_eq!(val.0, 1);
 }
 
@@ -1234,21 +1236,18 @@ fn test_update_context_callback_can_read_other_keys() {
     register::<RequestId>(key_a);
     register::<RequestId>(key_b);
 
-    sync_ctx::set_context(key_a, RequestId("aaa".into()));
-    sync_ctx::set_context(key_b, RequestId("bbb".into()));
+    set_context(key_a, RequestId("aaa".into()));
+    set_context(key_b, RequestId("bbb".into()));
 
     // Update key_a, reading key_b inside the callback.
-    sync_ctx::update_context::<RequestId>(key_a, |_old| {
-        let b = sync_ctx::get_context::<RequestId>(key_b).unwrap();
+    update_context::<RequestId>(key_a, |_old| {
+        let b = get_context::<RequestId>(key_b).unwrap();
         RequestId(format!("merged-{}", b.0))
     });
 
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key_a).unwrap().0,
-        "merged-bbb"
-    );
+    assert_eq!(get_context::<RequestId>(key_a).unwrap().0, "merged-bbb");
     // key_b unchanged.
-    assert_eq!(sync_ctx::get_context::<RequestId>(key_b).unwrap().0, "bbb");
+    assert_eq!(get_context::<RequestId>(key_b).unwrap().0, "bbb");
 }
 
 #[test]
@@ -1260,19 +1259,16 @@ fn test_update_context_in_scope_reverts() {
 
     register::<Val>(key);
 
-    sync_ctx::set_context(key, Val("root".into()));
+    set_context(key, Val("root".into()));
 
     {
-        let _g = sync_ctx::enter_scope();
-        sync_ctx::update_context::<Val>(key, |_| Val("updated-in-child".into()));
-        assert_eq!(
-            sync_ctx::get_context::<Val>(key).unwrap().0,
-            "updated-in-child"
-        );
+        let _g = enter_scope();
+        update_context::<Val>(key, |_| Val("updated-in-child".into()));
+        assert_eq!(get_context::<Val>(key).unwrap().0, "updated-in-child");
     }
 
     // Reverted after scope exit.
-    assert_eq!(sync_ctx::get_context::<Val>(key).unwrap().0, "root");
+    assert_eq!(get_context::<Val>(key).unwrap().0, "root");
 }
 
 #[test]
@@ -1282,13 +1278,13 @@ fn test_get_context_option_some_and_none() {
     register::<RequestId>(key_set);
     register::<RequestId>(key_unset);
 
-    sync_ctx::set_context(key_set, RequestId("hello".into()));
+    set_context(key_set, RequestId("hello".into()));
 
     assert_eq!(
-        sync_ctx::get_context::<RequestId>(key_set),
+        get_context::<RequestId>(key_set),
         Some(RequestId("hello".into()))
     );
-    assert_eq!(sync_ctx::get_context::<RequestId>(key_unset), None);
+    assert_eq!(get_context::<RequestId>(key_unset), None);
 }
 
 #[test]
@@ -1298,26 +1294,20 @@ fn test_snapshot_uses_arc_sharing() {
     let key = unique_key("snap_arc", "rid");
     register::<RequestId>(key);
 
-    sync_ctx::set_context(key, RequestId("original".into()));
-    let snap = sync_ctx::snapshot();
+    set_context(key, RequestId("original".into()));
+    let snap = snapshot();
 
     // Modify after snapshot.
-    sync_ctx::set_context(key, RequestId("modified".into()));
+    set_context(key, RequestId("modified".into()));
 
     // Attach restores snapshot values.
     {
-        let _g = sync_ctx::attach(snap);
-        assert_eq!(
-            sync_ctx::get_context::<RequestId>(key).unwrap().0,
-            "original"
-        );
+        let _g = attach(snap);
+        assert_eq!(get_context::<RequestId>(key).unwrap().0, "original");
     }
 
     // After attach scope ends, current value is back.
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "modified"
-    );
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "modified");
 }
 
 #[test]
@@ -1328,12 +1318,12 @@ fn test_concurrent_scope_and_read_no_panic() {
     let key = unique_key("concurrent_rw", "rid");
     register::<RequestId>(key);
 
-    sync_ctx::set_context(key, RequestId("base".into()));
+    set_context(key, RequestId("base".into()));
 
     // Rapidly alternate set + get (simulating interleaved callbacks).
     for i in 0..100 {
-        sync_ctx::set_context(key, RequestId(format!("iter-{}", i)));
-        let val: RequestId = sync_ctx::get_context::<RequestId>(key).unwrap();
+        set_context(key, RequestId(format!("iter-{}", i)));
+        let val: RequestId = get_context::<RequestId>(key).unwrap();
         assert_eq!(val.0, format!("iter-{}", i));
     }
 }
@@ -1344,40 +1334,25 @@ fn test_cached_key_o1_read_in_nested_scopes() {
     let key = unique_key("cached_read", "rid");
     register_with::<RequestId>(key, |opts| opts.cached());
 
-    sync_ctx::set_context(key, RequestId("root-val".into()));
+    set_context(key, RequestId("root-val".into()));
 
-    let _g1 = sync_ctx::enter_scope();
+    let _g1 = enter_scope();
     // Cached key should be readable without walking parents.
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "root-val"
-    );
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "root-val");
 
-    let _g2 = sync_ctx::enter_scope();
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "root-val"
-    );
+    let _g2 = enter_scope();
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "root-val");
 
     // Override in inner scope.
-    sync_ctx::set_context(key, RequestId("inner-val".into()));
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "inner-val"
-    );
+    set_context(key, RequestId("inner-val".into()));
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "inner-val");
 
     drop(_g2);
     // After inner scope exit, cached value from g1's scope is restored.
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "root-val"
-    );
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "root-val");
 
     drop(_g1);
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "root-val"
-    );
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "root-val");
 }
 
 #[test]
@@ -1386,40 +1361,25 @@ fn test_non_cached_key_walks_parents() {
     let key = unique_key("non_cached", "rid");
     register::<RequestId>(key);
 
-    sync_ctx::set_context(key, RequestId("root-val".into()));
+    set_context(key, RequestId("root-val".into()));
 
-    let _g1 = sync_ctx::enter_scope();
+    let _g1 = enter_scope();
     // Not set in child scope — walks to root.
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "root-val"
-    );
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "root-val");
 
     // Override in child.
-    sync_ctx::set_context(key, RequestId("child-val".into()));
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "child-val"
-    );
+    set_context(key, RequestId("child-val".into()));
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "child-val");
 
-    let _g2 = sync_ctx::enter_scope();
+    let _g2 = enter_scope();
     // Grandchild walks to child.
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "child-val"
-    );
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "child-val");
 
     drop(_g2);
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "child-val"
-    );
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "child-val");
 
     drop(_g1);
-    assert_eq!(
-        sync_ctx::get_context::<RequestId>(key).unwrap().0,
-        "root-val"
-    );
+    assert_eq!(get_context::<RequestId>(key).unwrap().0, "root-val");
 }
 
 #[tokio::test]
@@ -1430,8 +1390,8 @@ async fn test_async_reentrant_safety() {
     register::<RequestId>(key);
 
     let snap = {
-        sync_ctx::set_context(key, RequestId("base".into()));
-        sync_ctx::snapshot()
+        set_context(key, RequestId("base".into()));
+        snapshot()
     };
 
     with_snapshot(snap, async {
@@ -1439,25 +1399,16 @@ async fn test_async_reentrant_safety() {
 
         async_scope("", async {
             set_context(key, RequestId("in-scope-async".into()));
-            assert_eq!(
-                get_context::<RequestId>(key).unwrap().0,
-                "in-scope-async"
-            );
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "in-scope-async");
 
             async_scope("inner", async {
-                assert_eq!(
-                    get_context::<RequestId>(key).unwrap().0,
-                    "in-scope-async"
-                );
+                assert_eq!(get_context::<RequestId>(key).unwrap().0, "in-scope-async");
                 set_context(key, RequestId("deep".into()));
                 assert_eq!(get_context::<RequestId>(key).unwrap().0, "deep");
             })
             .await;
 
-            assert_eq!(
-                get_context::<RequestId>(key).unwrap().0,
-                "in-scope-async"
-            );
+            assert_eq!(get_context::<RequestId>(key).unwrap().0, "in-scope-async");
         })
         .await;
 
@@ -1476,15 +1427,12 @@ async fn test_fork_reads_parent_values() {
     register::<RequestId>(key);
 
     let snap = {
-        let _scope = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("parent-val".into()));
-        sync_ctx::snapshot()
+        let _scope = enter_scope();
+        set_context(key, RequestId("parent-val".into()));
+        snapshot()
     };
 
-    let result = with_snapshot(snap, async {
-        get_context::<RequestId>(key).unwrap()
-    })
-    .await;
+    let result = with_snapshot(snap, async { get_context::<RequestId>(key).unwrap() }).await;
 
     assert_eq!(result.0, "parent-val");
 }
@@ -1495,9 +1443,9 @@ async fn test_fork_writes_are_isolated() {
     register::<RequestId>(key);
 
     let snap = {
-        let _scope = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("parent".into()));
-        sync_ctx::snapshot()
+        let _scope = enter_scope();
+        set_context(key, RequestId("parent".into()));
+        snapshot()
     };
 
     with_snapshot(snap, async {
@@ -1507,7 +1455,7 @@ async fn test_fork_writes_are_isolated() {
     })
     .await;
 
-    let parent_val = sync_ctx::get_context::<RequestId>(key).unwrap_or_default();
+    let parent_val = get_context::<RequestId>(key).unwrap_or_default();
     assert_eq!(parent_val, RequestId::default());
 }
 
@@ -1517,21 +1465,15 @@ async fn test_fork_is_cheap_clone() {
     register::<RequestId>(key);
 
     let snap = {
-        let _scope = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("shared".into()));
-        sync_ctx::snapshot()
+        let _scope = enter_scope();
+        set_context(key, RequestId("shared".into()));
+        snapshot()
     };
 
     let snap2 = snap.clone();
 
-    let r1 = with_snapshot(snap, async {
-        get_context::<RequestId>(key).unwrap()
-    })
-    .await;
-    let r2 = with_snapshot(snap2, async {
-        get_context::<RequestId>(key).unwrap()
-    })
-    .await;
+    let r1 = with_snapshot(snap, async { get_context::<RequestId>(key).unwrap() }).await;
+    let r2 = with_snapshot(snap2, async { get_context::<RequestId>(key).unwrap() }).await;
 
     assert_eq!(r1.0, "shared");
     assert_eq!(r2.0, "shared");
@@ -1543,9 +1485,9 @@ async fn test_fork_child_scopes_work() {
     register::<RequestId>(key);
 
     let snap = {
-        let _scope = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("base".into()));
-        sync_ctx::snapshot()
+        let _scope = enter_scope();
+        set_context(key, RequestId("base".into()));
+        snapshot()
     };
 
     with_snapshot(snap, async {
@@ -1568,9 +1510,9 @@ async fn test_spawn_with_fork_async() {
     register::<RequestId>(key);
 
     let snap = {
-        let _scope = sync_ctx::enter_scope();
-        sync_ctx::set_context(key, RequestId("for-spawn".into()));
-        sync_ctx::snapshot()
+        let _scope = enter_scope();
+        set_context(key, RequestId("for-spawn".into()));
+        snapshot()
     };
 
     let join = tokio::spawn(with_snapshot(snap, async {
@@ -1597,9 +1539,9 @@ async fn test_fork_scope_chain_preserved() {
     register::<RequestId>(key);
 
     let snap = {
-        let _scope = sync_ctx::enter_named_scope("parent-scope");
-        sync_ctx::set_context(key, RequestId("chained".into()));
-        sync_ctx::snapshot()
+        let _scope = enter_named_scope("parent-scope");
+        set_context(key, RequestId("chained".into()));
+        snapshot()
     };
 
     with_snapshot(snap, async {

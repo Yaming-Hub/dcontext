@@ -54,6 +54,13 @@ impl ScopeGuard {
 
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
-        crate::sync_ctx::leave_scope(self.expected_depth);
+        leave_scope(self.expected_depth);
     }
+}
+
+fn leave_scope(expected_depth: usize) {
+    if expected_depth == usize::MAX {
+        return;
+    }
+    let _garbage = crate::store::try_apply(|store| store.pop_scope(expected_depth));
 }

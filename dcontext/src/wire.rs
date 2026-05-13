@@ -5,15 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ContextError;
 use crate::registry;
-use crate::scope::ScopeGuard;
 use crate::snapshot::ContextSnapshot;
-use crate::sync_ctx as storage;
 use crate::value::ContextValue;
 
 const WIRE_VERSION: u32 = 2;
 
-/// Wire format: includes scope chain alongside entries.
-/// For v1 messages (no scope chain), `scope_chain` defaults to empty.
 #[derive(Serialize, Deserialize)]
 struct WireContext {
     version: u32,
@@ -29,7 +25,10 @@ struct WireEntry {
     value: Vec<u8>,
 }
 
-/// Serialize context from pre-collected values and scope chain.
+/// Type alias for deserialized entry result.
+type DeserializedEntry = (&'static str, Box<dyn ContextValue>);
+
+/// Serialize a snapshot into wire-format bytes.
 pub(crate) fn serialize_from(
     values: HashMap<&'static str, Arc<dyn ContextValue>>,
     scope_chain_val: Vec<String>,
@@ -38,10 +37,6 @@ pub(crate) fn serialize_from(
 
     for (key, val) in &values {
         let info = registry::get_serialization_info(key);
-        let is_local = val.is_local() || info.as_ref().is_some_and(|i| i.local_only);
-        if is_local {
-            continue;
-        }
 
         let value_bytes = match info.as_ref().and_then(|i| i.serialize_fn.as_ref()) {
             Some(custom_ser) => custom_ser(val.as_ref())?,
@@ -69,30 +64,7 @@ pub(crate) fn serialize_from(
     Ok(bytes)
 }
 
-/// Restore context from bytes into the thread-local store.
-///
-/// Pushes a new scope, activates a scope barrier, and populates the scope
-/// with deserialized values.
-pub(crate) fn deserialize_into(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
-    let (entries, scope_chain) = deserialize_wire(bytes)?;
-
-    let guard = storage::enter_scope();
-    storage::set_scope_barrier();
-
-    if !scope_chain.is_empty() {
-        storage::set_remote_chain(scope_chain);
-    }
-
-    for entry in &entries {
-        if let Some((static_key, val)) = deserialize_entry(entry)? {
-            storage::set_value(static_key, Arc::from(val));
-        }
-    }
-
-    Ok(guard)
-}
-
-/// Deserialize bytes into a standalone snapshot without modifying the current store.
+/// Deserialize bytes into a standalone snapshot.
 pub(crate) fn deserialize_to_snapshot(bytes: &[u8]) -> Result<ContextSnapshot, ContextError> {
     let (entries, scope_chain) = deserialize_wire(bytes)?;
     let mut values = HashMap::new();
@@ -109,12 +81,10 @@ pub(crate) fn deserialize_to_snapshot(bytes: &[u8]) -> Result<ContextSnapshot, C
     })
 }
 
-fn deserialize_entry(
-    entry: &WireEntry,
-) -> Result<Option<(&'static str, Box<dyn ContextValue>)>, ContextError> {
+fn deserialize_entry(entry: &WireEntry) -> Result<Option<DeserializedEntry>, ContextError> {
     let key_str = entry.key.as_str();
     let restored = registry::with_registration(key_str, |reg| {
-        if reg.local_only || reg.deserializers.is_empty() {
+        if reg.deserializers.is_empty() {
             return None;
         }
         match reg.deserializers.get(&entry.key_version) {
@@ -141,7 +111,6 @@ fn deserialize_entry(
     }
 }
 
-/// Deserialize wire bytes, handling both v1 and v2 formats.
 fn deserialize_wire(bytes: &[u8]) -> Result<(Vec<WireEntry>, Vec<String>), ContextError> {
     let wire: WireContext = bincode::deserialize(bytes)
         .map_err(|e| ContextError::DeserializationFailed(e.to_string()))?;
@@ -155,16 +124,7 @@ fn deserialize_wire(bytes: &[u8]) -> Result<(Vec<WireEntry>, Vec<String>), Conte
     }
 }
 
-/// Construct wire-format bytes with a single entry. This is a helper for
-/// testing version migration - it lets you create wire bytes as if they came
-/// from a sender running an older schema version.
-///
-/// In production, wire bytes come from `serialize_context()` on the sender.
-/// This function is useful in tests and samples to simulate cross-version
-/// scenarios within a single process.
-///
-/// The `wire_version` parameter controls which wire format version to emit.
-/// Use `1` to simulate a pre-scope-chain sender, or `2` (current) for full format.
+/// Construct wire-format bytes with a single entry.
 pub fn make_wire_bytes(key: &str, key_version: u32, value_bytes: &[u8]) -> Vec<u8> {
     make_wire_bytes_v(2, key, key_version, value_bytes)
 }

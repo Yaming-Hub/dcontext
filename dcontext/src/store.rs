@@ -3,6 +3,7 @@
 //! `ContextStore` is the mutable state that lives inside a `Cell<Option<ContextStore>>`.
 //! It is accessed via the take/set pattern for contention-free interior mutability.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -60,7 +61,7 @@ pub struct ContextStore {
 
 impl ContextStore {
     /// Create a new store with an empty root scope.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             scope_chain: None,
             current_values: HashMap::new(),
@@ -322,25 +323,6 @@ impl ContextStore {
         result
     }
 
-    /// Set the remote scope chain.
-    pub(crate) fn set_remote_chain(&mut self, chain: Vec<String>) {
-        self.remote_chain = Arc::new(chain);
-        self.remote_chain_base_depth = self.depth;
-    }
-
-    /// Activate a scope barrier at the current depth.
-    ///
-    /// All scopes with depth <= the barrier depth become invisible to
-    /// value lookups, `collect_values`, and `scope_chain`. The barrier
-    /// is automatically saved/restored by `push_scope`/`pop_scope`, so
-    /// dropping the guard that owns this scope clears the barrier.
-    pub(crate) fn set_scope_barrier(&mut self) {
-        // Block everything below the current scope. The current scope's
-        // parent chain starts at depth - 1, so barrier = depth - 1
-        // hides all ancestors.
-        self.scope_barrier = Some(self.depth - 1);
-    }
-
     /// Build the full scope chain: frozen parent names + remote prefix + local named scope names.
     /// Stops at the scope_barrier — hidden scopes are excluded.
     pub(crate) fn scope_chain(&self) -> Vec<String> {
@@ -393,6 +375,25 @@ impl ContextStore {
 
         chain
     }
+}
+
+// ── Thread-local storage ───────────────────────────────────────
+
+thread_local! {
+    pub(crate) static CONTEXT: Cell<Option<ContextStore>> =
+        Cell::new(Some(ContextStore::new()));
+}
+
+/// Execute `f` with exclusive access to the thread-local context store.
+pub(crate) fn try_apply<R>(f: impl FnOnce(&mut ContextStore) -> R) -> Option<R> {
+    CONTEXT
+        .try_with(|cell| {
+            let mut store = cell.take()?;
+            let result = f(&mut store);
+            cell.set(Some(store));
+            Some(result)
+        })
+        .unwrap_or(None)
 }
 
 #[cfg(test)]

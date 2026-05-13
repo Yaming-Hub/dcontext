@@ -11,31 +11,6 @@
 //! A single `thread_local!` store is the source of truth. For async code,
 //! the [`WithContext`] future wrapper swaps the store in/out on each poll,
 //! making it effectively task-local without any runtime dependency.
-//!
-//! ## Quick Start
-//!
-//! ```rust
-//! use dcontext::{RegistryBuilder, initialize};
-//! use serde::{Deserialize, Serialize};
-//!
-//! #[derive(Clone, Default, Debug, Serialize, Deserialize)]
-//! struct RequestId(String);
-//!
-//! # fn main() {
-//! let mut builder = RegistryBuilder::new();
-//! builder.register::<RequestId>("request_id");
-//! initialize(builder);
-//!
-//! let _scope = dcontext::push_scope("ingress");
-//! dcontext::set_context("request_id", RequestId("req-123".into()));
-//!
-//! let rid: Option<RequestId> = dcontext::get_context("request_id");
-//! assert_eq!(rid.unwrap().0, "req-123");
-//!
-//! let chain = dcontext::scope_chain();
-//! assert_eq!(chain, vec!["ingress"]);
-//! # }
-//! ```
 
 pub mod error;
 mod registry;
@@ -53,15 +28,13 @@ mod future_ext;
 #[macro_use]
 mod macros;
 
-// Keep sync_ctx as internal (thread-local + try_apply live here)
-pub(crate) mod sync_ctx;
-
 // Re-export public types
 pub use attach::AttachGuard;
 pub use error::ContextError;
 pub use future_ext::{ContextFutureExt, WithContext};
 pub use scope::ScopeGuard;
 pub use snapshot::ContextSnapshot;
+pub use store::ContextStore;
 
 #[cfg(feature = "context-key")]
 pub use context_key::ContextKey;
@@ -74,8 +47,8 @@ pub use registry::{
 
 #[cfg(test)]
 pub(crate) use registry::{
-    register, register_local, register_migration, register_with, try_register, try_register_local,
-    try_register_migration, try_register_with,
+    register, register_migration, register_with, try_register, try_register_migration,
+    try_register_with,
 };
 
 // Serialization helpers
@@ -89,139 +62,129 @@ pub use config::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::store::ContextStore;
+use crate::store::{try_apply, CONTEXT};
 use crate::value::ContextValue;
 
+// ── Public API ─────────────────────────────────────────────────
+
 /// Push a named scope onto the context store.
-///
 /// Returns a [`ScopeGuard`] that pops the scope on drop.
 pub fn push_scope(name: &str) -> ScopeGuard {
-    sync_ctx::push_scope(name)
+    let name = name.to_string();
+    try_apply(|store| ScopeGuard::new(store.push_scope(Some(name))))
+        .unwrap_or_else(ScopeGuard::noop)
 }
 
 /// Get the current scope chain.
 pub fn scope_chain() -> Vec<String> {
-    sync_ctx::scope_chain()
+    try_apply(|store| store.scope_chain()).unwrap_or_default()
 }
 
-/// Set a context value.
-pub fn set_context<T>(key: &'static str, value: T)
+/// Get the current scope depth.
+pub fn current_depth() -> Option<usize> {
+    try_apply(|store| store.depth)
+}
+
+/// Set a context variable.
+pub fn set_context_variable<T>(key: &'static str, value: T)
 where
     T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    sync_ctx::set_context(key, value)
+    try_apply(|store| {
+        store.set_value(key, Arc::new(value));
+    });
 }
 
-/// Get a context value. Returns `None` if the key is not set.
-pub fn get_context<T>(key: &str) -> Option<T>
+/// Get a context variable. Returns `None` if the key is not set.
+pub fn get_context_variable<T>(key: &str) -> Option<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    sync_ctx::get_context(key)
+    try_apply(|store| {
+        store
+            .get_value(key)
+            .and_then(|arc| arc.as_any().downcast_ref::<T>().cloned())
+    })
+    .flatten()
 }
 
-/// Update a context value using a callback (read-modify-write).
-pub fn update_context<T>(key: &'static str, f: impl FnOnce(T) -> T)
+/// Update a context variable using a callback (read-modify-write).
+pub fn update_context_variable<T>(key: &'static str, f: impl FnOnce(T) -> T)
 where
     T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    sync_ctx::update_context(key, f)
+    let old = get_context_variable::<T>(key).unwrap_or_default();
+    let new = f(old);
+    set_context_variable(key, new);
 }
 
-/// Set a raw type-erased value.
-pub fn set_raw_value(key: &'static str, value: Arc<dyn ContextValue>) {
-    sync_ctx::set_raw_value(key, value)
-}
-
-/// Get a raw type-erased value.
-pub fn get_raw_value(key: &str) -> Option<Arc<dyn ContextValue>> {
-    sync_ctx::get_raw_value(key)
-}
-
-/// Take a snapshot of the current context (for serialization or cross-process transfer).
-pub fn snapshot() -> ContextSnapshot {
-    sync_ctx::snapshot()
+/// Capture a snapshot of the current context.
+/// Local-only variables (registered with `.local_only()`) are excluded.
+pub fn capture() -> ContextSnapshot {
+    try_apply(|store| {
+        let values: HashMap<&'static str, Arc<dyn ContextValue>> = store
+            .collect_values()
+            .into_iter()
+            .filter(|(k, _)| !registry::is_local_key(k))
+            .collect();
+        let scope_chain = store.scope_chain();
+        ContextSnapshot {
+            values: Arc::new(values),
+            scope_chain,
+        }
+    })
+    .unwrap_or_default()
 }
 
 /// Fork the current context. Creates a child store with a frozen parent.
-///
 /// Value lookups fall through to the frozen parent (cheap, Arc-shared).
 /// Writes are isolated in the child (copy-on-write).
 pub fn fork() -> ContextStore {
-    sync_ctx::fork().unwrap_or_else(ContextStore::new)
+    try_apply(|store| store.fork_child()).unwrap_or_else(ContextStore::new)
 }
 
-/// Push a new scope with snapshot values merged in.
-///
-/// The snapshot's scope-chain is ignored - the current chain is preserved
-/// and the new scope name is appended. Only the snapshot's values are
-/// merged into the new scope.
-pub fn push_scope_with_snapshot(name: &str, snap: ContextSnapshot) -> ScopeGuard {
-    let guard = sync_ctx::push_scope(name);
-    for (key, val) in snap.values.iter() {
-        sync_ctx::set_value(key, Arc::clone(val));
-    }
-    guard
-}
-
-/// Attach a snapshot as root context. Replaces entire thread-local store.
-///
-/// The scope hierarchy is flattened (values only), but the snapshot's scope
-/// names are preserved for display in `scope_chain()`.
-/// Returns an [`AttachGuard`] that restores the previous store on drop.
+/// Attach a snapshot as root context. Returns an [`AttachGuard`] that restores previous state.
 pub fn attach_snapshot(snap: ContextSnapshot) -> AttachGuard {
-    let values: HashMap<&'static str, Arc<dyn ContextValue>> = snap
-        .values
-        .iter()
-        .map(|(k, v)| (*k, Arc::clone(v)))
-        .collect();
-    let new_store = ContextStore::from_values_with_chain(values, snap.scope_chain);
-    attach_store(new_store)
+    let store: ContextStore = snap.into();
+    attach_store(store)
 }
 
-/// Attach a `ContextStore` as root context. Replaces entire thread-local store.
-///
-/// Returns an [`AttachGuard`] that restores the previous store on drop.
+/// Attach a `ContextStore` as root context. Returns an [`AttachGuard`].
 pub fn attach_store(store: ContextStore) -> AttachGuard {
-    let prev = sync_ctx::CONTEXT.with(|cell| cell.replace(Some(store)));
+    let prev = CONTEXT.with(|cell| cell.replace(Some(store)));
     AttachGuard::new(prev)
 }
 
-/// Serialize the current context into bytes (wire format).
-pub fn serialize_context() -> Result<Vec<u8>, ContextError> {
-    sync_ctx::serialize_context()
-}
-
-/// Deserialize bytes into the current context. Pushes a new scope with
-/// a scope barrier hiding parent scopes.
-pub fn deserialize_context(bytes: &[u8]) -> Result<ScopeGuard, ContextError> {
-    sync_ctx::deserialize_context(bytes)
-}
-
-/// Deserialize bytes into a standalone `ContextSnapshot` without modifying
-/// the current store.
-pub fn deserialize_to_snapshot(bytes: &[u8]) -> Result<ContextSnapshot, ContextError> {
-    wire::deserialize_to_snapshot(bytes)
-}
-
-/// Convert a `ContextSnapshot` into a `ContextStore` (for use with `with_context`).
-pub fn snapshot_to_store(snap: ContextSnapshot) -> ContextStore {
-    let values: HashMap<&'static str, Arc<dyn ContextValue>> = snap
-        .values
-        .iter()
-        .map(|(k, v)| (*k, Arc::clone(v)))
-        .collect();
-    ContextStore::from_values_with_chain(values, snap.scope_chain)
+/// Merge values from another store into the current context.
+/// Only merges values, not scope chain.
+pub fn merge_context(source: ContextStore) {
+    let values = source.collect_values();
+    try_apply(|store| {
+        for (key, val) in values {
+            store.set_value(key, val);
+        }
+    });
 }
 
 /// Clear the context entirely.
 pub fn clear() {
-    sync_ctx::clear()
+    try_apply(|store| {
+        *store = ContextStore::new();
+    });
 }
 
-/// Peek at the current scope depth.
-pub fn current_depth() -> Option<usize> {
-    sync_ctx::current_depth()
+// ── From<ContextSnapshot> for ContextStore ─────────────────────
+
+impl From<ContextSnapshot> for ContextStore {
+    fn from(snap: ContextSnapshot) -> Self {
+        let values: HashMap<&'static str, Arc<dyn ContextValue>> = snap
+            .values
+            .iter()
+            .filter(|(k, v)| registry::is_valid_value(k, v.as_ref()) && !registry::is_local_key(k))
+            .map(|(k, v)| (*k, Arc::clone(v)))
+            .collect();
+        ContextStore::from_values_with_chain(values, snap.scope_chain)
+    }
 }
 
 #[cfg(test)]

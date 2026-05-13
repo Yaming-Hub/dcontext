@@ -4,7 +4,7 @@
 //! `AttachGuard` replaces the entire thread-local store and restores it on drop.
 
 use crate::store::ContextStore;
-use crate::sync_ctx::CONTEXT;
+use crate::store::CONTEXT;
 
 /// RAII guard that restores the previous thread-local store on drop.
 ///

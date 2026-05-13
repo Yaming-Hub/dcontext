@@ -248,36 +248,6 @@ where
     Ok(())
 }
 
-fn do_register_local<T>(registry: &mut RegistryMap, key: &'static str) -> Result<(), ContextError>
-where
-    T: Clone + Default + Send + Sync + 'static,
-{
-    let tid = TypeId::of::<T>();
-
-    if let Some(existing) = registry.get(key) {
-        if existing.type_id == tid {
-            return Ok(());
-        }
-        return Err(ContextError::AlreadyRegistered(key.to_string()));
-    }
-
-    registry.insert(
-        key,
-        Registration {
-            key,
-            type_id: tid,
-            key_version: 0,
-            deserializers: HashMap::new(),
-            type_name: std::any::type_name::<T>(),
-            local_only: true,
-            serialize_fn: None,
-            cached: false,
-            metadata: HashMap::new(),
-        },
-    );
-    Ok(())
-}
-
 fn do_register_migration<TOld, TCurrent>(
     registry: &mut RegistryMap,
     key: &'static str,
@@ -372,7 +342,7 @@ impl RegistryBuilder {
         T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
         self.try_register::<T>(key)
-            .expect("RegistryBuilder::register failed");
+            .unwrap_or_else(|e| panic!("RegistryBuilder::register failed for key '{key}': {e}"));
     }
 
     /// Register a context type. Returns Err on conflict.
@@ -397,7 +367,9 @@ impl RegistryBuilder {
         T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
         self.try_register_with::<T>(key, configure)
-            .expect("RegistryBuilder::register_with failed");
+            .unwrap_or_else(|e| {
+                panic!("RegistryBuilder::register_with failed for key '{key}': {e}")
+            });
     }
 
     /// Register with custom options. Returns Err on conflict.
@@ -410,28 +382,6 @@ impl RegistryBuilder {
         T: Clone + Default + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
         do_register_with(&mut self.map, key, configure)
-    }
-
-    /// Register a local-only context type (no Serialize/DeserializeOwned needed).
-    ///
-    /// # Panics
-    ///
-    /// Panics on conflict. Use [`try_register_local`](Self::try_register_local)
-    /// for a non-panicking alternative.
-    pub fn register_local<T>(&mut self, key: &'static str)
-    where
-        T: Clone + Default + Send + Sync + 'static,
-    {
-        self.try_register_local::<T>(key)
-            .expect("RegistryBuilder::register_local failed");
-    }
-
-    /// Register a local-only type. Returns Err on conflict.
-    pub fn try_register_local<T>(&mut self, key: &'static str) -> Result<(), ContextError>
-    where
-        T: Clone + Default + Send + Sync + 'static,
-    {
-        do_register_local::<T>(&mut self.map, key)
     }
 
     /// Register a migration deserializer for an older wire version.
@@ -451,7 +401,9 @@ impl RegistryBuilder {
         TCurrent: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
         self.try_register_migration::<TOld, TCurrent>(key, old_version, migrate)
-            .expect("RegistryBuilder::register_migration failed");
+            .unwrap_or_else(|e| {
+                panic!("RegistryBuilder::register_migration failed for key '{key}': {e}")
+            });
     }
 
     /// Register a migration. Returns Err on conflict or if key not found.
@@ -551,24 +503,6 @@ pub(crate) fn register_with<T>(
 }
 
 #[cfg(test)]
-pub(crate) fn try_register_local<T>(key: &'static str) -> Result<(), ContextError>
-where
-    T: Clone + Default + Send + Sync + 'static,
-{
-    let mut guard = lock_build();
-    let registry = guard.as_mut().ok_or(ContextError::RegistryFrozen)?;
-    do_register_local::<T>(registry, key)
-}
-
-#[cfg(test)]
-pub(crate) fn register_local<T>(key: &'static str)
-where
-    T: Clone + Default + Send + Sync + 'static,
-{
-    try_register_local::<T>(key).expect("dcontext::register_local failed");
-}
-
-#[cfg(test)]
 pub(crate) fn try_register_migration<TOld, TCurrent>(
     key: &'static str,
     old_version: u32,
@@ -612,7 +546,6 @@ pub(crate) fn with_registration<R>(key: &str, f: impl FnOnce(&Registration) -> R
 
 /// Info needed by `serialize_context`, fetched in a single lookup.
 pub(crate) struct SerializationInfo {
-    pub local_only: bool,
     pub key_version: u32,
     pub serialize_fn: Option<SerializeFn>,
 }
@@ -620,7 +553,6 @@ pub(crate) struct SerializationInfo {
 /// Single-lookup extraction of everything `serialize_context` needs.
 pub(crate) fn get_serialization_info(key: &str) -> Option<SerializationInfo> {
     let extract = |r: &Registration| SerializationInfo {
-        local_only: r.local_only,
         key_version: r.key_version,
         serialize_fn: r.serialize_fn.clone(),
     };
@@ -647,6 +579,29 @@ pub(crate) fn cached_keys() -> Vec<&'static str> {
     }
     let guard = lock_build();
     guard.as_ref().map_or_else(Vec::new, filter)
+}
+
+/// Check if a key is registered as local-only.
+pub(crate) fn is_local_key(key: &str) -> bool {
+    let check = |map: &RegistryMap| -> bool { map.get(key).is_some_and(|r| r.local_only) };
+    if let Some(frozen) = FROZEN.get() {
+        return check(frozen);
+    }
+    let guard = lock_build();
+    guard.as_ref().is_some_and(check)
+}
+
+/// Check if a value is valid for a given key (key exists and TypeId matches).
+pub(crate) fn is_valid_value(key: &str, value: &dyn ContextValue) -> bool {
+    let check = |map: &RegistryMap| -> bool {
+        map.get(key)
+            .is_some_and(|r| r.type_id == value.as_any().type_id())
+    };
+    if let Some(frozen) = FROZEN.get() {
+        return check(frozen);
+    }
+    let guard = lock_build();
+    guard.as_ref().is_some_and(check)
 }
 
 // ── Metadata query API ─────────────────────────────────────────

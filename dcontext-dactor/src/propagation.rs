@@ -1,4 +1,5 @@
 use dactor::ActorContext;
+use dcontext::ContextFutureExt;
 use dcontext::ContextSnapshot;
 
 use crate::header::{ContextHeader, ContextSnapshotHeader};
@@ -49,7 +50,7 @@ where
     F: std::future::Future<Output = R>,
 {
     match extract_context(ctx) {
-        Some(snap) => dcontext::async_ctx::with_context(snap, f).await,
+        Some(snap) => f.attach(snap).await,
         None => f.await,
     }
 }
@@ -60,11 +61,5 @@ where
 /// snapshot, then reverts. This avoids interfering with any active task-local
 /// context.
 pub(crate) fn bytes_to_snapshot(bytes: &[u8]) -> Option<ContextSnapshot> {
-    // Push a temporary scope, deserialize wire values into it,
-    // capture as snapshot, then let guards revert everything.
-    let _outer = dcontext::sync_ctx::enter_scope();
-    let _wire_guard = dcontext::sync_ctx::deserialize_context(bytes).ok()?;
-    Some(dcontext::sync_ctx::snapshot())
-    // _wire_guard drops → pops deserialized scope
-    // _outer drops → pops isolation scope
+    dcontext::ContextSnapshot::deserialize(bytes).ok()
 }
