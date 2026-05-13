@@ -73,6 +73,29 @@ pub trait ContextFutureExt: Sized {
         let store = crate::snapshot_to_store(snap);
         self.with_context(store)
     }
+
+    /// Fork the current context, push a named scope, and wrap this future.
+    ///
+    /// Like `fork_context()` but also creates a named scope that appears in
+    /// `scope_chain()`. Ideal for request/task boundaries where you want
+    /// the scope name to be visible for debugging and tracing.
+    fn fork_scope(self, name: &str) -> WithContext<Self> {
+        let mut store = crate::fork();
+        store.push_scope(Some(name.to_string()));
+        self.with_context(store)
+    }
+
+    /// Snapshot the current context, push a named scope, and wrap this future.
+    ///
+    /// Like `capture_context()` but also creates a named scope that appears in
+    /// `scope_chain()`. Use at boundaries where you need a full deep copy
+    /// plus a visible scope name.
+    fn capture_scope(self, name: &str) -> WithContext<Self> {
+        let snap = crate::snapshot();
+        let mut store = crate::snapshot_to_store(snap);
+        store.push_scope(Some(name.to_string()));
+        self.with_context(store)
+    }
 }
 
 impl<F: Sized> ContextFutureExt for F {}
